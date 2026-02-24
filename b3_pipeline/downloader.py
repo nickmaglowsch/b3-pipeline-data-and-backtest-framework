@@ -1,14 +1,15 @@
 """
-Download COTAHIST files and corporate actions data.
+Download COTAHIST files from B3.
+
+Note: Corporate actions are now fetched via b3_corporate_actions module,
+which queries B3 directly as the single source of truth.
 """
 
 import logging
-import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import List, Optional
 
-import pandas as pd
 import requests
 
 from . import config
@@ -125,95 +126,3 @@ def download_current_year_daily(force: bool = False) -> List[Path]:
         current += timedelta(days=1)
 
     return downloaded_files
-
-
-def fetch_corporate_actions(ticker: str) -> pd.DataFrame:
-    """
-    Fetch dividend and JCP data from StatusInvest for a single ticker.
-
-    Args:
-        ticker: Stock ticker (e.g., 'PETR4')
-
-    Returns:
-        DataFrame with columns: [ticker, event_date, event_type, value]
-    """
-    url = config.STATUSINVEST_PROVENTS_URL.format(ticker=ticker)
-    headers = {
-        **config.STATUSINVEST_HEADERS,
-        "Referer": f"https://statusinvest.com.br/acoes/{ticker.lower()}",
-    }
-
-    try:
-        resp = requests.get(url, headers=headers, timeout=30)
-        resp.raise_for_status()
-        data = resp.json()
-
-        if data is None:
-            return pd.DataFrame(columns=["ticker", "event_date", "event_type", "value"])
-
-        events = []
-        models = data.get("assetEarningsModels", [])
-
-        for event in models:
-            event_type = event.get("et", "")
-            if event_type in ("Dividendo", "JCP", "Rend. Tributado"):
-                ed_str = event.get("ed", "")
-                value = event.get("v", 0)
-
-                if ed_str and value > 0:
-                    try:
-                        event_date = datetime.strptime(ed_str, "%d/%m/%Y")
-                        events.append(
-                            {
-                                "ticker": ticker,
-                                "event_date": event_date.date(),
-                                "event_type": event_type,
-                                "value": float(value),
-                            }
-                        )
-                    except ValueError:
-                        continue
-
-        if events:
-            return pd.DataFrame(events)
-        return pd.DataFrame(columns=["ticker", "event_date", "event_type", "value"])
-
-    except requests.RequestException as e:
-        logger.warning(f"Failed to fetch corporate actions for {ticker}: {e}")
-        return pd.DataFrame(columns=["ticker", "event_date", "event_type", "value"])
-    except (KeyError, ValueError) as e:
-        logger.warning(f"Failed to parse corporate actions for {ticker}: {e}")
-        return pd.DataFrame(columns=["ticker", "event_date", "event_type", "value"])
-
-
-def fetch_all_corporate_actions(tickers: List[str]) -> pd.DataFrame:
-    """
-    Fetch corporate actions for all tickers with rate limiting and progress logging.
-
-    Args:
-        tickers: List of ticker symbols
-
-    Returns:
-        DataFrame with all corporate actions
-    """
-    all_actions = []
-    total = len(tickers)
-
-    for i, ticker in enumerate(tickers, 1):
-        if i % 10 == 0 or i == total:
-            logger.info(f"Fetching corporate actions: {i}/{total} ({ticker})")
-
-        actions = fetch_corporate_actions(ticker)
-        if not actions.empty:
-            all_actions.append(actions)
-
-        time.sleep(config.RATE_LIMIT_DELAY)
-
-    if all_actions:
-        result = pd.concat(all_actions, ignore_index=True)
-        logger.info(
-            f"Fetched {len(result)} corporate action events for {len(tickers)} tickers"
-        )
-        return result
-
-    return pd.DataFrame(columns=["ticker", "event_date", "event_type", "value"])

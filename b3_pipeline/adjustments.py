@@ -2,14 +2,13 @@
 Compute split and dividend adjustments for price data.
 
 Implements:
-1. Split detection from price gaps
-2. Split adjustment factors (backward cumulative)
-3. Dividend/JCP adjustment factors (Yahoo-style backward cumulative)
+1. Split adjustment factors from B3 official data (backward cumulative)
+2. Dividend/JCP adjustment factors (Yahoo-style backward cumulative)
 """
 
 import logging
 from datetime import date, datetime
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -19,7 +18,7 @@ from . import config
 logger = logging.getLogger(__name__)
 
 
-def _normalize_date(val):
+def _normalize_date(val) -> Optional[date]:
     """Convert various date formats to datetime.date object."""
     if val is None:
         return None
@@ -37,98 +36,70 @@ def _normalize_date(val):
     return None
 
 
-def _find_nearest_split_ratio(price_ratio: float) -> Tuple[float, str]:
+def convert_stock_actions_to_splits(stock_actions: pd.DataFrame) -> pd.DataFrame:
     """
-    Find the nearest common split ratio for a given price ratio.
+    Convert B3 stock actions to the format needed for split adjustments.
+
+    B3 factors:
+    - STOCK_SPLIT (DESDOBRAMENTO): factor > 1 means new_shares = old_shares * factor
+      -> split_factor = 1/factor (e.g., 100x split -> factor=0.01)
+    - REVERSE_SPLIT (GRUPAMENTO): factor < 1 means new_shares = old_shares * factor
+      -> split_factor = 1/factor (e.g., 0.01 reverse -> factor=100)
+    - BONUS_SHARES (BONIFICACAO): factor represents bonus ratio
+      -> split_factor = 1/(1+factor) (e.g., 33.33% bonus -> factor=0.75)
+
+    The split_factor represents: old_shares / new_shares
+    - split_factor < 1: price increases (stock split)
+    - split_factor > 1: price decreases (reverse split)
 
     Args:
-        price_ratio: The ratio close[t] / close[t-1]
-
-    Returns:
-        Tuple of (split_factor, description)
-        split_factor = old_shares / new_shares
-    """
-    best_diff = float("inf")
-    best_factor = 1.0
-    best_desc = "1:1"
-
-    for old_shares, new_shares in config.COMMON_SPLIT_RATIOS:
-        expected_ratio = new_shares / old_shares
-        diff = abs(price_ratio - expected_ratio)
-
-        if diff < best_diff:
-            best_diff = diff
-            best_factor = old_shares / new_shares
-            best_desc = f"{old_shares}:{new_shares}"
-
-    return best_factor, best_desc
-
-
-def detect_splits(prices: pd.DataFrame) -> pd.DataFrame:
-    """
-    Detect stock splits from price discontinuities.
-
-    Algorithm:
-    1. For each ticker, compute daily close ratio: close[t] / close[t-1]
-    2. Flag potential split if ratio > SPLIT_DETECTION_THRESHOLD_HIGH
-       or ratio < SPLIT_DETECTION_THRESHOLD_LOW
-    3. Infer split factor from nearest round ratio
-
-    Args:
-        prices: DataFrame with columns [date, ticker, close]
+        stock_actions: DataFrame from B3 with columns [ticker, ex_date, action_type, factor]
 
     Returns:
         DataFrame with columns [ticker, ex_date, split_factor, description]
     """
-    if prices.empty:
+    if stock_actions.empty:
         return pd.DataFrame(
             columns=["ticker", "ex_date", "split_factor", "description"]
         )
 
-    logger.info("Detecting splits from price gaps...")
-
     splits = []
-    tickers = prices["ticker"].unique()
+    for _, row in stock_actions.iterrows():
+        ticker = row["ticker"]
+        ex_date = _normalize_date(row["ex_date"])
+        action_type = row["action_type"]
+        b3_factor = row["factor"]
 
-    for ticker in tickers:
-        ticker_data = prices[prices["ticker"] == ticker].copy()
-        ticker_data = ticker_data.sort_values("date").reset_index(drop=True)
-
-        if len(ticker_data) < 2:
+        if ex_date is None:
             continue
 
-        ticker_data["prev_close"] = ticker_data["close"].shift(1)
-        ticker_data["price_ratio"] = ticker_data["close"] / ticker_data["prev_close"]
+        if action_type == config.EVENT_TYPE_STOCK_SPLIT:
+            split_factor = 1.0 / b3_factor
+            description = f"Split {b3_factor}:1"
+        elif action_type == config.EVENT_TYPE_REVERSE_SPLIT:
+            split_factor = 1.0 / b3_factor
+            description = (
+                f"Reverse split 1:{1 / b3_factor:.0f}"
+                if b3_factor < 1
+                else f"Reverse split {1 / b3_factor:.0f}:1"
+            )
+        elif action_type == config.EVENT_TYPE_BONUS_SHARES:
+            split_factor = 1.0 / (1.0 + b3_factor / 100.0)
+            description = f"Bonus {b3_factor}%"
+        else:
+            continue
 
-        potential_splits = ticker_data[
-            (ticker_data["price_ratio"] > config.SPLIT_DETECTION_THRESHOLD_HIGH)
-            | (ticker_data["price_ratio"] < config.SPLIT_DETECTION_THRESHOLD_LOW)
-        ].copy()
-
-        for _, row in potential_splits.iterrows():
-            price_ratio = row["price_ratio"]
-            split_factor, description = _find_nearest_split_ratio(price_ratio)
-
-            if split_factor != 1.0:
-                splits.append(
-                    {
-                        "ticker": ticker,
-                        "ex_date": _normalize_date(row["date"]),
-                        "split_factor": round(split_factor, 6),
-                        "description": description,
-                    }
-                )
+        splits.append(
+            {
+                "ticker": ticker,
+                "ex_date": ex_date,
+                "split_factor": round(split_factor, 10),
+                "description": description,
+            }
+        )
 
     if splits:
-        result = pd.DataFrame(splits)
-        result = result.drop_duplicates(subset=["ticker", "ex_date"], keep="first")
-        result = result.sort_values(["ticker", "ex_date"]).reset_index(drop=True)
-        logger.info(
-            f"Detected {len(result)} potential splits across {len(tickers)} tickers"
-        )
-        return result
-
-    logger.info("No splits detected")
+        return pd.DataFrame(splits)
     return pd.DataFrame(columns=["ticker", "ex_date", "split_factor", "description"])
 
 
@@ -147,7 +118,7 @@ def compute_split_adjustment_factors(
 
     Args:
         prices: DataFrame with raw price data
-        splits: DataFrame with detected splits
+        splits: DataFrame with splits (from B3 stock_actions)
 
     Returns:
         DataFrame with split-adjusted columns added
@@ -164,7 +135,7 @@ def compute_split_adjustment_factors(
         logger.info("No splits to apply")
         return result
 
-    logger.info("Applying split adjustments...")
+    logger.info(f"Applying {len(splits)} split adjustments...")
 
     tickers_with_splits = splits["ticker"].unique()
 
@@ -252,15 +223,24 @@ def compute_dividend_adjustment_factors(
         logger.info("No corporate actions to apply")
         return result
 
+    dividend_types = [
+        config.EVENT_TYPE_CASH_DIVIDEND,
+        config.EVENT_TYPE_JCP,
+        "Dividendo",
+        "JCP",
+        "Rend. Tributado",
+    ]
     dividend_actions = corporate_actions[
-        corporate_actions["event_type"].isin(["Dividendo", "JCP", "Rend. Tributado"])
+        corporate_actions["event_type"].isin(dividend_types)
     ].copy()
 
     if dividend_actions.empty:
         logger.info("No dividend/JCP events to apply")
         return result
 
-    logger.info("Applying dividend/JCP adjustments...")
+    logger.info(
+        f"Applying dividend/JCP adjustments ({len(dividend_actions)} events)..."
+    )
 
     result["date_normalized"] = result["date"].apply(_normalize_date)
     dividend_actions["event_date_normalized"] = dividend_actions["event_date"].apply(
@@ -295,13 +275,18 @@ def compute_dividend_adjustment_factors(
             ex_date = div_row["event_date_normalized"]
             div_amount = div_row["value"]
 
+            if div_amount is None or div_amount <= 0:
+                continue
+
             prev_mask = ticker_prices["date_normalized"] < ex_date
             prev_data = ticker_prices[prev_mask]
 
             if prev_data.empty:
                 continue
 
-            prev_close = prev_data.iloc[-1]["split_adj_close"]
+            # IMPORTANT: We must use the RAW close price to calculate the yield factor,
+            # because B3 dividend amounts are raw historical amounts (not split-adjusted).
+            prev_close = prev_data.iloc[-1]["close"]
 
             if prev_close <= 0:
                 continue
@@ -346,122 +331,27 @@ def compute_dividend_adjustment_factors(
     logger.info("Dividend/JCP adjustments applied")
     return result
 
-    dividend_actions = corporate_actions[
-        corporate_actions["event_type"].isin(["Dividendo", "JCP", "Rend. Tributado"])
-    ].copy()
-
-    if dividend_actions.empty:
-        logger.info("No dividend/JCP events to apply")
-        return result
-
-    logger.info("Applying dividend/JCP adjustments...")
-
-    tickers_with_dividends = dividend_actions["ticker"].unique()
-
-    for ticker in tickers_with_dividends:
-        ticker_mask = result["ticker"] == ticker
-        ticker_prices = result[ticker_mask].copy()
-
-        if ticker_prices.empty:
-            continue
-
-        ticker_prices = ticker_prices.sort_values("date").reset_index(drop=True)
-        ticker_prices["date_normalized"] = ticker_prices["date"].apply(_normalize_date)
-
-        ticker_dividends = dividend_actions[dividend_actions["ticker"] == ticker].copy()
-        ticker_dividends = ticker_dividends.sort_values("event_date", ascending=False)
-
-        ticker_dividends["event_date_normalized"] = ticker_dividends[
-            "event_date"
-        ].apply(_normalize_date)
-
-        adj_factors = []
-
-        for _, div_row in ticker_dividends.iterrows():
-            ex_date = div_row["event_date_normalized"]
-            if ex_date is None:
-                continue
-
-            div_amount = div_row["value"]
-
-            prev_day_mask = ticker_prices["date_normalized"] < ex_date
-            prev_day_data = ticker_prices[prev_day_mask]
-
-            if prev_day_data.empty:
-                continue
-
-            prev_close = prev_day_data.iloc[-1]["split_adj_close"]
-
-            if prev_close <= 0:
-                continue
-
-            factor = 1.0 - (div_amount / prev_close)
-            factor = max(0.0, min(1.0, factor))
-
-            adj_factors.append(
-                {
-                    "ex_date": ex_date,
-                    "factor": factor,
-                    "dividend": div_amount,
-                    "prev_close": prev_close,
-                }
-            )
-
-        if not adj_factors:
-            continue
-
-        adj_factors_df = pd.DataFrame(adj_factors)
-        adj_factors_df = adj_factors_df.sort_values("ex_date", ascending=False)
-
-        cumulative_factor = 1.0
-        factor_idx = 0
-        n_factors = len(adj_factors_df)
-
-        ticker_prices_desc = ticker_prices.sort_values("date", ascending=False)
-
-        for _, row in ticker_prices_desc.iterrows():
-            row_date = row["date_normalized"]
-            if row_date is None:
-                continue
-
-            while factor_idx < n_factors:
-                factor_row = adj_factors_df.iloc[factor_idx]
-                factor_date = factor_row["ex_date"]
-
-                if factor_date >= row_date:
-                    cumulative_factor *= factor_row["factor"]
-                    factor_idx += 1
-                else:
-                    break
-
-            idx_mask = (result["ticker"] == ticker) & (
-                result["date"].apply(lambda x: x.date() if hasattr(x, "date") else x)
-                == row_date
-            )
-            result.loc[idx_mask, "adj_close"] = (
-                row["split_adj_close"] * cumulative_factor
-            )
-
-    logger.info("Dividend/JCP adjustments applied")
-    return result
-
 
 def compute_all_adjustments(
-    prices: pd.DataFrame, corporate_actions: pd.DataFrame
+    prices: pd.DataFrame,
+    corporate_actions: pd.DataFrame,
+    stock_actions: pd.DataFrame,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
-    Compute all adjustments: split detection, split adjustment, dividend adjustment.
+    Compute all adjustments using B3 official data.
 
     Args:
         prices: Raw price DataFrame
-        corporate_actions: Corporate actions DataFrame
+        corporate_actions: Corporate actions DataFrame (dividends, JCP)
+        stock_actions: Stock actions DataFrame (splits, reverse splits, bonuses)
 
     Returns:
-        Tuple of (adjusted_prices, detected_splits)
+        Tuple of (adjusted_prices, splits)
     """
     logger.info("Starting adjustment computation...")
 
-    splits = detect_splits(prices)
+    splits = convert_stock_actions_to_splits(stock_actions)
+    logger.info(f"Converted {len(stock_actions)} stock actions to {len(splits)} splits")
 
     prices = compute_split_adjustment_factors(prices, splits)
 

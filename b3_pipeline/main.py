@@ -4,6 +4,11 @@ B3 Historical Market Data Pipeline
 
 Downloads, parses, and adjusts historical equity data from B3 (Brazilian Stock Exchange).
 
+B3 is the single source of truth for:
+- Price data (COTAHIST)
+- Cash dividends and JCP
+- Stock splits, reverse splits, and bonus shares
+
 Usage:
     python main.py              # Run pipeline (downloads missing data)
     python main.py --rebuild    # Rebuild entire database from scratch
@@ -16,7 +21,7 @@ import sys
 from datetime import datetime
 from typing import Optional
 
-from . import adjustments, config, downloader, parser, storage
+from . import adjustments, b3_corporate_actions, config, downloader, parser, storage
 
 logging.basicConfig(
     level=logging.INFO,
@@ -41,12 +46,11 @@ def run_pipeline(
     2. Detect and download COTAHIST files
     3. Parse COTAHIST files into standardized DataFrame
     4. Upsert raw prices to SQLite
-    5. Fetch corporate actions from StatusInvest
-    6. Detect splits from price gaps
-    7. Compute split adjustment factors
-    8. Compute dividend adjustment factors
-    9. Update adjusted columns in database
-    10. Log summary statistics
+    5. Fetch corporate actions from B3 (dividends, JCP, splits)
+    6. Compute split adjustment factors
+    7. Compute dividend adjustment factors
+    8. Update adjusted columns in database
+    9. Log summary statistics
 
     Args:
         rebuild: If True, drop and recreate all tables
@@ -104,20 +108,33 @@ def run_pipeline(
         storage.upsert_prices(conn, prices)
 
         corporate_actions = None
+        stock_actions = None
         if not skip_corporate_actions:
             logger.info("")
-            logger.info("Step 6/9: Fetching corporate actions...")
+            logger.info("Step 6/9: Fetching corporate actions from B3...")
             tickers = storage.get_all_tickers(conn)
             logger.info(f"Found {len(tickers)} unique tickers")
 
             if tickers:
-                corporate_actions = downloader.fetch_all_corporate_actions(tickers)
+                ticker_roots = sorted(set(t[:4] for t in tickers if len(t) >= 4))
+                logger.info(f"Fetching data for {len(ticker_roots)} company codes")
+
+                corporate_actions, stock_actions = (
+                    b3_corporate_actions.fetch_all_corporate_actions(
+                        ticker_roots, tickers
+                    )
+                )
+
                 if not corporate_actions.empty:
                     storage.upsert_corporate_actions(conn, corporate_actions)
+
+                if not stock_actions.empty:
+                    storage.upsert_stock_actions(conn, stock_actions)
         else:
             logger.info("")
             logger.info("Step 6/9: Skipping corporate actions fetch...")
             corporate_actions = storage.get_all_corporate_actions(conn)
+            stock_actions = storage.get_all_stock_actions(conn)
 
         logger.info("")
         logger.info("Step 7/9: Computing adjustments...")
@@ -126,13 +143,15 @@ def run_pipeline(
 
         if corporate_actions is None or corporate_actions.empty:
             corporate_actions = storage.get_all_corporate_actions(conn)
+        if stock_actions is None or stock_actions.empty:
+            stock_actions = storage.get_all_stock_actions(conn)
 
-        adjusted_prices, detected_splits = adjustments.compute_all_adjustments(
-            prices_from_db, corporate_actions
+        adjusted_prices, splits = adjustments.compute_all_adjustments(
+            prices_from_db, corporate_actions, stock_actions
         )
 
-        if not detected_splits.empty:
-            storage.upsert_detected_splits(conn, detected_splits)
+        if not splits.empty:
+            storage.upsert_detected_splits(conn, splits)
 
         logger.info("")
         logger.info("Step 8/9: Updating adjusted columns in database...")
@@ -150,7 +169,7 @@ def run_pipeline(
         logger.info(f"Unique tickers: {stats['total_tickers']:,}")
         logger.info(f"Date range: {stats['date_range'][0]} to {stats['date_range'][1]}")
         logger.info(f"Corporate actions: {stats['total_corporate_actions']:,}")
-        logger.info(f"Detected splits: {stats['total_detected_splits']:,}")
+        logger.info(f"Stock actions (splits/bonuses): {stats['total_stock_actions']:,}")
 
         end_time = datetime.now()
         duration = end_time - start_time
