@@ -225,9 +225,7 @@ def fetch_cash_dividends_paginated(
     return all_results
 
 
-def parse_cash_dividends(
-    records: List[dict], available_tickers: List[str], ticker_root: str = ""
-) -> pd.DataFrame:
+def parse_cash_dividends(records: List[dict]) -> pd.DataFrame:
     """
     Parse cash dividend records from B3 response.
 
@@ -238,11 +236,9 @@ def parse_cash_dividends(
 
     Args:
         records: List of cash dividend records from B3
-        available_tickers: List of tickers available in database
-        ticker_root: The 4-character ticker root used to fetch this data (e.g., 'PETR')
 
     Returns:
-        DataFrame with columns: [ticker, event_date, event_type, value, isin_code, source]
+        DataFrame with columns: [isin_code, event_date, event_type, value, source]
     """
     events = []
 
@@ -251,7 +247,9 @@ def parse_cash_dividends(
         value_str = record.get("rate", record.get("valueCash", "0"))
         isin_code = record.get("isinCode", record.get("assetIssued", ""))
         date_str = record.get("lastDatePrior", record.get("lastDatePriorEx", ""))
-        type_stock = record.get("typeStock", "")
+
+        if not isin_code:
+            continue
 
         if label == config.B3_LABEL_DIVIDEND:
             event_type = config.EVENT_TYPE_CASH_DIVIDEND
@@ -270,54 +268,12 @@ def parse_cash_dividends(
         if value <= 0:
             continue
 
-        ticker = None
-        if isin_code:
-            ticker = _map_isin_to_ticker(isin_code, available_tickers)
-
-        # Fallback if no ISIN but we have typeStock and ticker_root
-        if not ticker and ticker_root and type_stock:
-            matching = [t for t in available_tickers if t.startswith(ticker_root)]
-            if type_stock == "ON":
-                for t in matching:
-                    if t.endswith("3"):
-                        ticker = t
-                        break
-            elif type_stock in ("PN", "PNA", "PNB", "PNC"):
-                # Usually PN is 4, PNA is 5, PNB is 6
-                suffix = "4"
-                if type_stock == "PNA":
-                    suffix = "5"
-                elif type_stock == "PNB":
-                    suffix = "6"
-
-                for t in matching:
-                    if t.endswith(suffix):
-                        ticker = t
-                        break
-
-                # Fallback to any PN if exact match not found
-                if not ticker:
-                    for t in matching:
-                        if t.endswith("4") or t.endswith("5") or t.endswith("6"):
-                            ticker = t
-                            break
-
-            if not ticker and matching:
-                ticker = matching[0]
-
-        if ticker is None:
-            logger.debug(
-                f"Could not map ISIN '{isin_code}' or type '{type_stock}' to ticker for root '{ticker_root}'"
-            )
-            continue
-
         events.append(
             {
-                "ticker": ticker,
+                "isin_code": isin_code,
                 "event_date": event_date.date(),
                 "event_type": event_type,
                 "value": value,
-                "isin_code": isin_code,
                 "source": "B3",
             }
         )
@@ -325,13 +281,11 @@ def parse_cash_dividends(
     if events:
         return pd.DataFrame(events)
     return pd.DataFrame(
-        columns=["ticker", "event_date", "event_type", "value", "isin_code", "source"]
+        columns=["isin_code", "event_date", "event_type", "value", "source"]
     )
 
 
-def parse_stock_dividends(
-    records: List[dict], available_tickers: List[str]
-) -> Tuple[pd.DataFrame, pd.DataFrame]:
+def parse_stock_dividends(records: List[dict]) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
     Parse stock dividend records (splits, reverse splits, bonuses) from B3.
 
@@ -342,7 +296,6 @@ def parse_stock_dividends(
 
     Args:
         records: List of stock dividend records from B3
-        available_tickers: List of tickers available in database
 
     Returns:
         Tuple of (corporate_actions_df, stock_actions_df)
@@ -356,17 +309,15 @@ def parse_stock_dividends(
         isin_code = record.get("isinCode", record.get("assetIssued", ""))
         date_str = record.get("lastDatePrior", "")
 
+        if not isin_code:
+            continue
+
         factor = _parse_b3_float(factor_str)
         if factor <= 0:
             continue
 
         ex_date = _parse_b3_date(date_str)
         if ex_date is None:
-            continue
-
-        ticker = _map_isin_to_ticker(isin_code, available_tickers)
-        if ticker is None:
-            logger.debug(f"Could not map ISIN {isin_code} to ticker")
             continue
 
         if label == config.B3_LABEL_DESDOBRAMENTO:
@@ -380,22 +331,20 @@ def parse_stock_dividends(
 
         stock_events.append(
             {
-                "ticker": ticker,
+                "isin_code": isin_code,
                 "ex_date": ex_date.date(),
                 "action_type": action_type,
                 "factor": factor,
-                "isin_code": isin_code,
                 "source": "B3",
             }
         )
 
         corp_events.append(
             {
-                "ticker": ticker,
+                "isin_code": isin_code,
                 "event_date": ex_date.date(),
                 "event_type": action_type,
                 "value": None,
-                "isin_code": isin_code,
                 "factor": factor,
                 "source": "B3",
             }
@@ -406,11 +355,10 @@ def parse_stock_dividends(
         if corp_events
         else pd.DataFrame(
             columns=[
-                "ticker",
+                "isin_code",
                 "event_date",
                 "event_type",
                 "value",
-                "isin_code",
                 "factor",
                 "source",
             ]
@@ -420,14 +368,7 @@ def parse_stock_dividends(
         pd.DataFrame(stock_events)
         if stock_events
         else pd.DataFrame(
-            columns=[
-                "ticker",
-                "ex_date",
-                "action_type",
-                "factor",
-                "isin_code",
-                "source",
-            ]
+            columns=["isin_code", "ex_date", "action_type", "factor", "source"]
         )
     )
 
@@ -436,14 +377,12 @@ def parse_stock_dividends(
 
 def fetch_all_corporate_actions(
     trading_names: List[str],
-    available_tickers: List[str],
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
     Fetch all corporate actions for multiple trading names.
 
     Args:
         trading_names: List of 4-character ticker roots (e.g., 'PETR')
-        available_tickers: List of tickers available in database
 
     Returns:
         Tuple of (corporate_actions_df, stock_actions_df)
@@ -468,9 +407,7 @@ def fetch_all_corporate_actions(
         stock_divs = company_data.get("stockDividends", [])
 
         if stock_divs:
-            corp_from_stock, stock_df = parse_stock_dividends(
-                stock_divs, available_tickers
-            )
+            corp_from_stock, stock_df = parse_stock_dividends(stock_divs)
             if not corp_from_stock.empty:
                 all_corp_actions.append(corp_from_stock)
             if not stock_df.empty:
@@ -482,7 +419,7 @@ def fetch_all_corporate_actions(
         if full_trading_name:
             cash_divs = fetch_cash_dividends_paginated(full_trading_name)
             if cash_divs:
-                corp_df = parse_cash_dividends(cash_divs, available_tickers, name)
+                corp_df = parse_cash_dividends(cash_divs)
                 if not corp_df.empty:
                     all_corp_actions.append(corp_df)
 
@@ -500,11 +437,10 @@ def fetch_all_corporate_actions(
         if valid_corp
         else pd.DataFrame(
             columns=[
-                "ticker",
+                "isin_code",
                 "event_date",
                 "event_type",
                 "value",
-                "isin_code",
                 "factor",
                 "source",
             ]
@@ -515,11 +451,10 @@ def fetch_all_corporate_actions(
         if valid_stock
         else pd.DataFrame(
             columns=[
-                "ticker",
+                "isin_code",
                 "ex_date",
                 "action_type",
                 "factor",
-                "isin_code",
                 "source",
             ]
         )
@@ -527,13 +462,13 @@ def fetch_all_corporate_actions(
 
     if not final_corp.empty:
         final_corp = final_corp.drop_duplicates(
-            subset=["ticker", "event_date", "event_type"], keep="last"
+            subset=["isin_code", "event_date", "event_type"], keep="last"
         )
         logger.info(f"Total corporate actions: {len(final_corp)}")
 
     if not final_stock.empty:
         final_stock = final_stock.drop_duplicates(
-            subset=["ticker", "ex_date", "action_type"], keep="last"
+            subset=["isin_code", "ex_date", "action_type"], keep="last"
         )
         logger.info(f"Total stock actions: {len(final_stock)}")
 
