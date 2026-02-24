@@ -114,10 +114,26 @@ Primary Key: `(ticker, ex_date, action_type)`
 
 Stores split, reverse split, and bonus share events separately for clarity.
 
+| Column | Type | Description |
+|--------|------|-------------|
+| `ticker` | TEXT | Stock symbol |
+| `ex_date` | DATE | Ex-date |
+| `action_type` | TEXT | STOCK_SPLIT, REVERSE_SPLIT, BONUS_SHARES |
+| `factor` | REAL | Split/bonus factor |
+| `isin_code` | TEXT | ISIN code from B3 |
+| `source` | TEXT | Data source (always "B3") |
+
 ### Table: `detected_splits`
 Primary Key: `(ticker, ex_date)`
 
 Legacy table for storing split factors derived from B3 stock_actions data.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `ticker` | TEXT | Stock symbol |
+| `ex_date` | DATE | Ex-date |
+| `split_factor`| REAL | Calculated multiplier (old_shares / new_shares) |
+| `description` | TEXT | Text description of the split |
 
 ## B3 Corporate Action Labels
 
