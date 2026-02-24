@@ -53,19 +53,19 @@ def convert_stock_actions_to_splits(stock_actions: pd.DataFrame) -> pd.DataFrame
     - split_factor > 1: price decreases (reverse split)
 
     Args:
-        stock_actions: DataFrame from B3 with columns [ticker, ex_date, action_type, factor]
+        stock_actions: DataFrame from B3 with columns [isin_code, ex_date, action_type, factor]
 
     Returns:
-        DataFrame with columns [ticker, ex_date, split_factor, description]
+        DataFrame with columns [isin_code, ex_date, split_factor, description]
     """
     if stock_actions.empty:
         return pd.DataFrame(
-            columns=["ticker", "ex_date", "split_factor", "description"]
+            columns=["isin_code", "ex_date", "split_factor", "description"]
         )
 
     splits = []
     for _, row in stock_actions.iterrows():
-        ticker = row["ticker"]
+        isin_code = row["isin_code"]
         ex_date = _normalize_date(row["ex_date"])
         action_type = row["action_type"]
         b3_factor = row["factor"]
@@ -91,7 +91,7 @@ def convert_stock_actions_to_splits(stock_actions: pd.DataFrame) -> pd.DataFrame
 
         splits.append(
             {
-                "ticker": ticker,
+                "isin_code": isin_code,
                 "ex_date": ex_date,
                 "split_factor": round(split_factor, 10),
                 "description": description,
@@ -100,16 +100,16 @@ def convert_stock_actions_to_splits(stock_actions: pd.DataFrame) -> pd.DataFrame
 
     if splits:
         return pd.DataFrame(splits)
-    return pd.DataFrame(columns=["ticker", "ex_date", "split_factor", "description"])
+    return pd.DataFrame(columns=["isin_code", "ex_date", "split_factor", "description"])
 
 
 def compute_split_adjustment_factors(
     prices: pd.DataFrame, splits: pd.DataFrame
 ) -> pd.DataFrame:
     """
-    Compute backward cumulative split adjustment factors.
+    Compute backward cumulative split adjustment factors based on ISIN codes.
 
-    For each ticker:
+    For each ISIN:
     1. Sort splits by date descending
     2. For each trading date, cumulative_factor = product of all split_factors
        for splits on or after that date
@@ -137,31 +137,31 @@ def compute_split_adjustment_factors(
 
     logger.info(f"Applying {len(splits)} split adjustments...")
 
-    tickers_with_splits = splits["ticker"].unique()
+    isins_with_splits = splits["isin_code"].unique()
 
-    for ticker in tickers_with_splits:
-        ticker_mask = result["ticker"] == ticker
-        ticker_prices = result[ticker_mask].copy()
+    for isin_code in isins_with_splits:
+        isin_mask = result["isin_code"] == isin_code
+        isin_prices = result[isin_mask].copy()
 
-        if ticker_prices.empty:
+        if isin_prices.empty:
             continue
 
-        ticker_splits = splits[splits["ticker"] == ticker].copy()
-        ticker_splits = ticker_splits.sort_values("ex_date", ascending=False)
+        isin_splits = splits[splits["isin_code"] == isin_code].copy()
+        isin_splits = isin_splits.sort_values("ex_date", ascending=False)
 
         cumulative_factor = 1.0
         split_idx = 0
-        n_splits = len(ticker_splits)
+        n_splits = len(isin_splits)
 
-        ticker_prices = ticker_prices.sort_values("date", ascending=False)
+        isin_prices = isin_prices.sort_values("date", ascending=False)
 
-        for idx in ticker_prices.index:
+        for idx in isin_prices.index:
             row_date = _normalize_date(result.loc[idx, "date"])
             if row_date is None:
                 continue
 
             while split_idx < n_splits:
-                split_row = ticker_splits.iloc[split_idx]
+                split_row = isin_splits.iloc[split_idx]
                 split_date = _normalize_date(split_row["ex_date"])
                 if split_date is None:
                     split_idx += 1
@@ -199,7 +199,7 @@ def compute_dividend_adjustment_factors(
     prices: pd.DataFrame, corporate_actions: pd.DataFrame
 ) -> pd.DataFrame:
     """
-    Compute Yahoo-style backward cumulative dividend adjustment factors.
+    Compute Yahoo-style backward cumulative dividend adjustment factors based on ISIN.
 
     For each dividend/JCP event:
     1. Get previous close (trading day before ex_date)
@@ -247,39 +247,39 @@ def compute_dividend_adjustment_factors(
         _normalize_date
     )
 
-    tickers_with_dividends = dividend_actions["ticker"].unique()
-    n_tickers = len(tickers_with_dividends)
+    isins_with_dividends = dividend_actions["isin_code"].unique()
+    n_isins = len(isins_with_dividends)
 
-    for i, ticker in enumerate(tickers_with_dividends, 1):
-        if i % 100 == 0 or i == n_tickers:
-            logger.info(f"Applying dividend adjustments: {i}/{n_tickers}")
+    for i, isin_code in enumerate(isins_with_dividends, 1):
+        if i % 100 == 0 or i == n_isins:
+            logger.info(f"Applying dividend adjustments: {i}/{n_isins}")
 
-        ticker_mask = result["ticker"] == ticker
-        ticker_prices = result.loc[ticker_mask].copy()
+        isin_mask = result["isin_code"] == isin_code
+        isin_prices = result.loc[isin_mask].copy()
 
-        if ticker_prices.empty:
+        if isin_prices.empty:
             continue
 
-        ticker_prices = ticker_prices.sort_values("date_normalized").reset_index(
-            drop=True
-        )
+        isin_prices = isin_prices.sort_values("date_normalized").reset_index(drop=True)
 
-        ticker_dividends = dividend_actions[dividend_actions["ticker"] == ticker].copy()
-        ticker_dividends = ticker_dividends.dropna(subset=["event_date_normalized"])
+        isin_dividends = dividend_actions[
+            dividend_actions["isin_code"] == isin_code
+        ].copy()
+        isin_dividends = isin_dividends.dropna(subset=["event_date_normalized"])
 
-        if ticker_dividends.empty:
+        if isin_dividends.empty:
             continue
 
         div_factors = []
-        for _, div_row in ticker_dividends.iterrows():
+        for _, div_row in isin_dividends.iterrows():
             ex_date = div_row["event_date_normalized"]
             div_amount = div_row["value"]
 
             if div_amount is None or div_amount <= 0:
                 continue
 
-            prev_mask = ticker_prices["date_normalized"] < ex_date
-            prev_data = ticker_prices[prev_mask]
+            prev_mask = isin_prices["date_normalized"] < ex_date
+            prev_data = isin_prices[prev_mask]
 
             if prev_data.empty:
                 continue
@@ -302,7 +302,7 @@ def compute_dividend_adjustment_factors(
         div_factors_df = pd.DataFrame(div_factors)
         div_factors_df = div_factors_df.sort_values("ex_date", ascending=True)
 
-        ticker_prices = ticker_prices.sort_values(
+        isin_prices = isin_prices.sort_values(
             "date_normalized", ascending=True
         ).reset_index(drop=True)
 
@@ -312,8 +312,8 @@ def compute_dividend_adjustment_factors(
         div_factors_df = div_factors_df.sort_values("ex_date", ascending=True)
 
         last_cumulative = 1.0
-        adj_close_values = ticker_prices["split_adj_close"].values.copy()
-        dates = ticker_prices["date_normalized"].values
+        adj_close_values = isin_prices["split_adj_close"].values.copy()
+        dates = isin_prices["date_normalized"].values
 
         div_idx = len(div_factors_df) - 1
         for j in range(len(dates) - 1, -1, -1):
@@ -325,7 +325,7 @@ def compute_dividend_adjustment_factors(
 
             adj_close_values[j] = adj_close_values[j] * last_cumulative
 
-        result.loc[ticker_prices.index, "adj_close"] = adj_close_values
+        result.loc[isin_prices.index, "adj_close"] = adj_close_values
 
     result = result.drop(columns=["date_normalized"])
     logger.info("Dividend/JCP adjustments applied")

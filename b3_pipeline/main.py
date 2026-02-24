@@ -120,9 +120,7 @@ def run_pipeline(
                 logger.info(f"Fetching data for {len(ticker_roots)} company codes")
 
                 corporate_actions, stock_actions = (
-                    b3_corporate_actions.fetch_all_corporate_actions(
-                        ticker_roots, tickers
-                    )
+                    b3_corporate_actions.fetch_all_corporate_actions(ticker_roots)
                 )
 
                 if not corporate_actions.empty:
