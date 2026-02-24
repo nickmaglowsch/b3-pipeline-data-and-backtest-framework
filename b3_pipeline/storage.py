@@ -39,7 +39,22 @@ CREATE TABLE IF NOT EXISTS corporate_actions (
     event_date DATE NOT NULL,
     event_type TEXT NOT NULL,
     value REAL,
+    isin_code TEXT,
+    factor REAL,
+    source TEXT DEFAULT 'B3',
     PRIMARY KEY (ticker, event_date, event_type)
+);
+"""
+
+SCHEMA_STOCK_ACTIONS = """
+CREATE TABLE IF NOT EXISTS stock_actions (
+    ticker TEXT NOT NULL,
+    ex_date DATE NOT NULL,
+    action_type TEXT NOT NULL,
+    factor REAL NOT NULL,
+    isin_code TEXT,
+    source TEXT DEFAULT 'B3',
+    PRIMARY KEY (ticker, ex_date, action_type)
 );
 """
 
@@ -91,11 +106,13 @@ def init_db(conn: sqlite3.Connection, rebuild: bool = False) -> None:
         logger.info("Dropping existing tables...")
         cursor.execute("DROP TABLE IF EXISTS prices")
         cursor.execute("DROP TABLE IF EXISTS corporate_actions")
+        cursor.execute("DROP TABLE IF EXISTS stock_actions")
         cursor.execute("DROP TABLE IF EXISTS detected_splits")
 
     logger.info("Creating database schema...")
     cursor.execute(SCHEMA_PRICES)
     cursor.execute(SCHEMA_CORPORATE_ACTIONS)
+    cursor.execute(SCHEMA_STOCK_ACTIONS)
     cursor.execute(SCHEMA_DETECTED_SPLITS)
     cursor.execute(INDEX_PRICES_DATE)
     cursor.execute(INDEX_PRICES_TICKER)
@@ -180,8 +197,8 @@ def upsert_corporate_actions(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
     cursor = conn.cursor()
 
     sql = """
-        INSERT OR REPLACE INTO corporate_actions (ticker, event_date, event_type, value)
-        VALUES (?, ?, ?, ?)
+        INSERT OR REPLACE INTO corporate_actions (ticker, event_date, event_type, value, isin_code, factor, source)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
     """
 
     records = []
@@ -192,6 +209,9 @@ def upsert_corporate_actions(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
                 _prepare_date(row["event_date"]),
                 row["event_type"],
                 row.get("value"),
+                row.get("isin_code"),
+                row.get("factor"),
+                row.get("source", "B3"),
             )
         )
 
@@ -239,6 +259,48 @@ def upsert_detected_splits(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
     conn.commit()
 
     logger.info(f"Upserted {len(records):,} detected split records")
+    return len(records)
+
+
+def upsert_stock_actions(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
+    """
+    Upsert stock action records (splits, reverse splits, bonuses) into the database.
+
+    Args:
+        conn: SQLite connection
+        df: DataFrame with stock action data
+
+    Returns:
+        Number of records upserted
+    """
+    if df.empty:
+        logger.warning("No stock action records to upsert")
+        return 0
+
+    cursor = conn.cursor()
+
+    sql = """
+        INSERT OR REPLACE INTO stock_actions (ticker, ex_date, action_type, factor, isin_code, source)
+        VALUES (?, ?, ?, ?, ?, ?)
+    """
+
+    records = []
+    for _, row in df.iterrows():
+        records.append(
+            (
+                row["ticker"],
+                _prepare_date(row["ex_date"]),
+                row["action_type"],
+                row["factor"],
+                row.get("isin_code"),
+                row.get("source", "B3"),
+            )
+        )
+
+    cursor.executemany(sql, records)
+    conn.commit()
+
+    logger.info(f"Upserted {len(records):,} stock action records")
     return len(records)
 
 
@@ -381,6 +443,62 @@ def get_all_detected_splits(conn: sqlite3.Connection) -> pd.DataFrame:
     return pd.read_sql_query(query, conn)
 
 
+def get_all_stock_actions(conn: sqlite3.Connection) -> pd.DataFrame:
+    """
+    Get all stock action records from the database.
+
+    Args:
+        conn: SQLite connection
+
+    Returns:
+        DataFrame with stock action data
+    """
+    query = """
+        SELECT ticker, ex_date, action_type, factor, isin_code, source
+        FROM stock_actions
+        ORDER BY ticker, ex_date
+    """
+    return pd.read_sql_query(query, conn)
+
+
+def get_tickers_by_company_code(
+    conn: sqlite3.Connection, company_code: str
+) -> List[str]:
+    """
+    Get all tickers that start with a given company code.
+
+    Args:
+        conn: SQLite connection
+        company_code: The company code (e.g., 'PETR' from B3 response)
+
+    Returns:
+        List of ticker symbols matching the company code
+    """
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT DISTINCT ticker FROM prices WHERE ticker LIKE ? ORDER BY ticker",
+        (f"{company_code}%",),
+    )
+    return [row[0] for row in cursor.fetchall()]
+
+
+def get_trading_names(conn: sqlite3.Connection) -> List[str]:
+    """
+    Get all unique ticker root codes (first 4 characters) from prices.
+
+    Args:
+        conn: SQLite connection
+
+    Returns:
+        Sorted list of unique 4-char ticker roots
+    """
+    cursor = conn.cursor()
+    cursor.execute("SELECT DISTINCT ticker FROM prices ORDER BY ticker")
+    tickers = [row[0] for row in cursor.fetchall()]
+    roots = sorted(set(t[:4] for t in tickers if len(t) >= 4))
+    return roots
+
+
 def get_summary_stats(conn: sqlite3.Connection) -> dict:
     """
     Get summary statistics from the database.
@@ -408,10 +526,14 @@ def get_summary_stats(conn: sqlite3.Connection) -> dict:
     cursor.execute("SELECT COUNT(*) FROM detected_splits")
     total_splits = cursor.fetchone()[0]
 
+    cursor.execute("SELECT COUNT(*) FROM stock_actions")
+    total_stock_actions = cursor.fetchone()[0]
+
     return {
         "total_prices": total_prices,
         "total_tickers": total_tickers,
         "date_range": (date_range[0], date_range[1]),
         "total_corporate_actions": total_actions,
         "total_detected_splits": total_splits,
+        "total_stock_actions": total_stock_actions,
     }

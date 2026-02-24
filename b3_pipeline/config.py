@@ -11,7 +11,8 @@ BASE_COTAHIST_URL = (
 DAILY_COTAHIST_URL = (
     "https://bvmf.bmfbovespa.com.br/InstDados/SerHist/COTAHIST_D{date:%d%m%Y}.ZIP"
 )
-STATUSINVEST_PROVENTS_URL = "https://statusinvest.com.br/acao/companytickerprovents?ticker={ticker}&chartProventsType=2"
+B3_CASH_DIVIDENDS_URL = "https://sistemaswebb3-listados.b3.com.br/listedCompaniesProxy/CompanyCall/GetListedCashDividends/{payload}"
+B3_STOCK_CORP_ACTIONS_URL = "https://sistemaswebb3-listados.b3.com.br/listedCompaniesProxy/CompanyCall/GetListedSupplementCompany/{payload}"
 
 PROJECT_ROOT = Path(__file__).parent.parent
 DATA_DIR = PROJECT_ROOT / "data" / "raw"
@@ -54,14 +55,13 @@ COTAHIST_LAYOUT = {
     "num_distribuicao": (242, 245),
 }
 
-STATUSINVEST_HEADERS = {
-    "Accept": "application/json",
-    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-    "Referer": "https://statusinvest.com.br/acoes/",
-}
-
 B3_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+}
+
+B3_CORP_ACTIONS_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Accept": "application/json",
 }
 
 SPLIT_DETECTION_THRESHOLD_HIGH = 1.8
@@ -83,3 +83,16 @@ COMMON_SPLIT_RATIOS = [
 ]
 
 RATE_LIMIT_DELAY = 0.1
+
+EVENT_TYPE_CASH_DIVIDEND = "CASH_DIVIDEND"
+EVENT_TYPE_JCP = "JCP"
+EVENT_TYPE_STOCK_SPLIT = "STOCK_SPLIT"
+EVENT_TYPE_REVERSE_SPLIT = "REVERSE_SPLIT"
+EVENT_TYPE_BONUS_SHARES = "BONUS_SHARES"
+
+B3_LABEL_DIVIDEND = "DIVIDENDO"
+B3_LABEL_JCP = "JRS CAP PROPRIO"
+B3_LABEL_RENDIMENTO = "RENDIMENTO"
+B3_LABEL_DESDOBRAMENTO = "DESDOBRAMENTO"
+B3_LABEL_GRUPAMENTO = "GRUPAMENTO"
+B3_LABEL_BONIFICACAO = "BONIFICACAO"
