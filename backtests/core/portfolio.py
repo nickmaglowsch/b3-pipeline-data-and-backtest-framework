@@ -41,21 +41,34 @@ def rebalance_positions(
                 pos["current_value"] += injected
 
 
+import math
+
+
 def apply_returns(
     positions: dict, ret_row: pd.Series, max_ret: float = 1.0, min_ret: float = -0.90
 ) -> None:
     """Apply monthly returns to all open positions with optional clipping for safety."""
     for t, pos in positions.items():
-        r = ret_row.get(t, pd.NA)
-        if pd.isna(r):
+        if t not in ret_row.index:
             r = 0.0
+        else:
+            try:
+                r = float(ret_row.loc[t])
+                if math.isnan(r):
+                    r = 0.0
+            except (ValueError, TypeError):
+                r = 0.0
 
         r = min(max(r, min_ret), max_ret)
         pos["current_value"] *= 1.0 + r
 
 
 def compute_tax(
-    exiting: set, positions: dict, loss_carryforward: float, tax_rate: float
+    exiting: set,
+    positions: dict,
+    loss_carryforward: float,
+    tax_rate: float,
+    ignore_short_losses: bool = True,
 ) -> tuple[float, float]:
     """
     Compute Brazilian capital gains tax (with loss carryforward) on exiting positions.
@@ -70,6 +83,11 @@ def compute_tax(
         cv = positions[t]["current_value"]
         cb = positions[t]["cost_basis"]
         pnl = cv - cb
+
+        # Receita Federal does not allow deducting margin interest/short losses from capital gains
+        if ignore_short_losses and cb < 0 and pnl < 0:
+            continue
+
         if pnl > 0:
             gross_gain += pnl
         else:

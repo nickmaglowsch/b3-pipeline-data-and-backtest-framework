@@ -63,6 +63,9 @@ def load_b3_data(
     return adj_close, close_px, fin_vol
 
 
+import requests
+
+
 def download_benchmark(ticker: str, start: str, end: str) -> pd.Series:
     """
     Download benchmark index data from Yahoo Finance.
@@ -82,3 +85,54 @@ def download_benchmark(ticker: str, start: str, end: str) -> pd.Series:
         index_data.index = index_data.index.tz_localize(None)
 
     return index_data
+
+
+from dateutil.relativedelta import relativedelta
+
+
+def download_cdi_daily(start: str, end: str) -> pd.Series:
+    """
+    Download daily accumulated CDI directly from the Brazilian Central Bank (SGS API Series 12).
+    Because BCB limits queries to 10 years for daily data, this safely batches requests.
+    Returns a pandas Series of daily returns (e.g., 0.0001 for 0.01%).
+    """
+    print("⬇  Downloading Daily CDI from Brazilian Central Bank...")
+
+    start_dt = pd.to_datetime(start)
+    end_dt = pd.to_datetime(end)
+
+    series = []
+    current_start = start_dt
+
+    while current_start <= end_dt:
+        # BCB API allows max 10 years for daily data. We'll query in 5-year chunks.
+        current_end = min(current_start + relativedelta(years=5), end_dt)
+
+        s_str = current_start.strftime("%d/%m/%Y")
+        e_str = current_end.strftime("%d/%m/%Y")
+
+        url = f"https://api.bcb.gov.br/dados/serie/bcdata.sgs.12/dados?formato=json&dataInicial={s_str}&dataFinal={e_str}"
+
+        try:
+            response = requests.get(url)
+            data = response.json()
+            if data:
+                df = pd.DataFrame(data)
+                df["data"] = pd.to_datetime(df["data"], format="%d/%m/%Y")
+                df["valor"] = pd.to_numeric(df["valor"]) / 100.0
+                df.set_index("data", inplace=True)
+                series.append(df["valor"])
+        except Exception as e:
+            print(f"Warning: Failed to fetch CDI chunk {s_str} to {e_str}: {e}")
+
+        current_start = current_end + relativedelta(days=1)
+
+    if not series:
+        return pd.Series(dtype=float, name="CDI")
+
+    result = pd.concat(series)
+    # Ensure no duplicates at chunk boundaries
+    result = result[~result.index.duplicated(keep="first")]
+    result.name = "CDI"
+
+    return result
