@@ -1,0 +1,134 @@
+/Users/nickmaglowsch/Library/Python/3.9/lib/python/site-packages/urllib3/__init__.py:35: NotOpenSSLWarning: urllib3 v2 only supports OpenSSL 1.1.1+, currently the 'ssl' module is compiled with 'LibreSSL 2.8.3'. See: https://github.com/urllib3/urllib3/issues/3020
+  warnings.warn(
+Failed to fetch dividends page 1 for AMIL: 520 Server Error:  for url: https://sistemaswebb3-listados.b3.com.br/listedCompaniesProxy/CompanyCall/GetListedCashDividends/eyJsYW5ndWFnZSI6InB0LWJyIiwicGFnZU51bWJlciI6MSwicGFnZVNpemUiOjEwMCwidHJhZGluZ05hbWUiOiJBTUlMIn0=
+Failed to fetch company data for AML : 520 Server Error:  for url: https://sistemaswebb3-listados.b3.com.br/listedCompaniesProxy/CompanyCall/GetListedSupplementCompany/eyJpc3N1aW5nQ29tcGFueSI6IkFNTCIsImxhbmd1YWdlIjoicHQtYnIifQ==
+Failed to fetch company data for AMLC: 520 Server Error:  for url: https://sistemaswebb3-listados.b3.com.br/listedCompaniesProxy/CompanyCall/GetListedSupplementCompany/eyJpc3N1aW5nQ29tcGFueSI6IkFNTEMiLCJsYW5ndWFnZSI6InB0LWJyIn0=
+/Users/nickmaglowsch/person-projects/b3-data-pipeline/b3_pipeline/b3_corporate_actions.py:455: FutureWarning: The behavior of DataFrame concatenation with empty or all-NA entries is deprecated. In a future version, this will no longer exclude empty or all-NA columns when determining the result dtypes. To retain the old behavior, exclude the relevant entries before the concat operation.
+  pd.concat(valid_corp, ignore_index=True)
+Failed to fetch dividends page 1 for AMER LEASING: 520 Server Error:  for url: https://sistemaswebb3-listados.b3.com.br/listedCompaniesProxy/CompanyCall/GetListedCashDividends/eyJsYW5ndWFnZSI6InB0LWJyIiwicGFnZU51bWJlciI6MSwicGFnZVNpemUiOjEwMCwidHJhZGluZ05hbWUiOiJBTUVSIExFQVNJTkcifQ==
+Failed to fetch dividends page 1 for ANTARCTIC PB: 520 Server Error:  for url: https://sistemaswebb3-listados.b3.com.br/listedCompaniesProxy/CompanyCall/GetListedCashDividends/eyJsYW5ndWFnZSI6InB0LWJyIiwicGFnZU51bWJlciI6MSwicGFnZVNpemUiOjEwMCwidHJhZGluZ05hbWUiOiJBTlRBUkNUSUMgUEIifQ==
+Failed to fetch company data for ANRN: 520 Server Error:  for url: https://sistemaswebb3-listados.b3.com.br/listedCompaniesProxy/CompanyCall/GetListedSupplementCompany/eyJpc3N1aW5nQ29tcGFueSI6IkFOUk4iLCJsYW5ndWFnZSI6InB0LWJyIn0=
+Failed to fetch company data for APTI: 520 Server Error:  for url: https://sistemaswebb3-listados.b3.com.br/listedCompaniesProxy/CompanyCall/GetListedSupplementCompany/eyJpc3N1aW5nQ29tcGFueSI6IkFQVEkiLCJsYW5ndWFnZSI6InB0LWJyIn0=
+Failed to fetch company data for ARTE: HTTPSConnectionPool(host='sistemaswebb3-listados.b3.com.br', port=443): Read timed out. (read timeout=30)
+Failed to fetch company data for ARZZ: 520 Server Error:  for url: https://sistemaswebb3-listados.b3.com.br/listedCompaniesProxy/CompanyCall/GetListedSupplementCompany/eyJpc3N1aW5nQ29tcGFueSI6IkFSWloiLCJsYW5ndWFnZSI6InB0LWJyIn0=
+Failed to fetch dividends page 1 for SANTISTEXTIL: 520 Server Error:  for url: https://sistemaswebb3-listados.b3.com.br/listedCompaniesProxy/CompanyCall/GetListedCashDividends/eyJsYW5ndWFnZSI6InB0LWJyIiwicGFnZU51bWJlciI6MSwicGFnZVNpemUiOjEwMCwidHJhZGluZ05hbWUiOiJTQU5USVNURVhUSUwifQ==
+/Users/nickmaglowsch/person-projects/b3-data-pipeline/b3_pipeline/b3_corporate_actions.py:455: FutureWarning: The behavior of DataFrame concatenation with empty or all-NA entries is deprecated. In a future version, this will no longer exclude empty or all-NA columns when determining the result dtypes. To retain the old behavior, exclude the relevant entries before the concat operation.
+  pd.concat(valid_corp, ignore_index=True)
+Failed to fetch dividends page 1 for BBSEGURIDADE: 520 Server Error:  for url: https://sistemaswebb3-listados.b3.com.br/listedCompaniesProxy/CompanyCall/GetListedCashDividends/eyJsYW5ndWFnZSI6InB0LWJyIiwicGFnZU51bWJlciI6MSwicGFnZVNpemUiOjEwMCwidHJhZGluZ05hbWUiOiJCQlNFR1VSSURBREUifQ==
+/Users/nickmaglowsch/person-projects/b3-data-pipeline/b3_pipeline/b3_corporate_actions.py:455: FutureWarning: The behavior of DataFrame concatenation with empty or all-NA entries is deprecated. In a future version, this will no longer exclude empty or all-NA columns when determining the result dtypes. To retain the old behavior, exclude the relevant entries before the concat operation.
+  pd.concat(valid_corp, ignore_index=True)
+Failed to fetch dividends page 1 for BANEB: 520 Server Error:  for url: https://sistemaswebb3-listados.b3.com.br/listedCompaniesProxy/CompanyCall/GetListedCashDividends/eyJsYW5ndWFnZSI6InB0LWJyIiwicGFnZU51bWJlciI6MSwicGFnZVNpemUiOjEwMCwidHJhZGluZ05hbWUiOiJCQU5FQiJ9
+Failed to fetch company data for BEM : 520 Server Error:  for url: https://sistemaswebb3-listados.b3.com.br/listedCompaniesProxy/CompanyCall/GetListedSupplementCompany/eyJpc3N1aW5nQ29tcGFueSI6IkJFTSIsImxhbmd1YWdlIjoicHQtYnIifQ==
+/Users/nickmaglowsch/person-projects/b3-data-pipeline/b3_pipeline/b3_corporate_actions.py:455: FutureWarning: The behavior of DataFrame concatenation with empty or all-NA entries is deprecated. In a future version, this will no longer exclude empty or all-NA columns when determining the result dtypes. To retain the old behavior, exclude the relevant entries before the concat operation.
+  pd.concat(valid_corp, ignore_index=True)
+Failed to fetch company data for BMGB: 520 Server Error:  for url: https://sistemaswebb3-listados.b3.com.br/listedCompaniesProxy/CompanyCall/GetListedSupplementCompany/eyJpc3N1aW5nQ29tcGFueSI6IkJNR0IiLCJsYW5ndWFnZSI6InB0LWJyIn0=
+Failed to fetch company data for BMI : 520 Server Error:  for url: https://sistemaswebb3-listados.b3.com.br/listedCompaniesProxy/CompanyCall/GetListedSupplementCompany/eyJpc3N1aW5nQ29tcGFueSI6IkJNSSIsImxhbmd1YWdlIjoicHQtYnIifQ==
+/Users/nickmaglowsch/person-projects/b3-data-pipeline/b3_pipeline/b3_corporate_actions.py:455: FutureWarning: The behavior of DataFrame concatenation with empty or all-NA entries is deprecated. In a future version, this will no longer exclude empty or all-NA columns when determining the result dtypes. To retain the old behavior, exclude the relevant entries before the concat operation.
+  pd.concat(valid_corp, ignore_index=True)
+/Users/nickmaglowsch/person-projects/b3-data-pipeline/b3_pipeline/b3_corporate_actions.py:455: FutureWarning: The behavior of DataFrame concatenation with empty or all-NA entries is deprecated. In a future version, this will no longer exclude empty or all-NA columns when determining the result dtypes. To retain the old behavior, exclude the relevant entries before the concat operation.
+  pd.concat(valid_corp, ignore_index=True)
+/Users/nickmaglowsch/person-projects/b3-data-pipeline/b3_pipeline/b3_corporate_actions.py:455: FutureWarning: The behavior of DataFrame concatenation with empty or all-NA entries is deprecated. In a future version, this will no longer exclude empty or all-NA columns when determining the result dtypes. To retain the old behavior, exclude the relevant entries before the concat operation.
+  pd.concat(valid_corp, ignore_index=True)
+/Users/nickmaglowsch/person-projects/b3-data-pipeline/b3_pipeline/b3_corporate_actions.py:455: FutureWarning: The behavior of DataFrame concatenation with empty or all-NA entries is deprecated. In a future version, this will no longer exclude empty or all-NA columns when determining the result dtypes. To retain the old behavior, exclude the relevant entries before the concat operation.
+  pd.concat(valid_corp, ignore_index=True)
+/Users/nickmaglowsch/person-projects/b3-data-pipeline/b3_pipeline/b3_corporate_actions.py:455: FutureWarning: The behavior of DataFrame concatenation with empty or all-NA entries is deprecated. In a future version, this will no longer exclude empty or all-NA columns when determining the result dtypes. To retain the old behavior, exclude the relevant entries before the concat operation.
+  pd.concat(valid_corp, ignore_index=True)
+/Users/nickmaglowsch/person-projects/b3-data-pipeline/b3_pipeline/b3_corporate_actions.py:455: FutureWarning: The behavior of DataFrame concatenation with empty or all-NA entries is deprecated. In a future version, this will no longer exclude empty or all-NA columns when determining the result dtypes. To retain the old behavior, exclude the relevant entries before the concat operation.
+  pd.concat(valid_corp, ignore_index=True)
+Failed to fetch company data for DMVF: 520 Server Error:  for url: https://sistemaswebb3-listados.b3.com.br/listedCompaniesProxy/CompanyCall/GetListedSupplementCompany/eyJpc3N1aW5nQ29tcGFueSI6IkRNVkYiLCJsYW5ndWFnZSI6InB0LWJyIn0=
+/Users/nickmaglowsch/person-projects/b3-data-pipeline/b3_pipeline/b3_corporate_actions.py:455: FutureWarning: The behavior of DataFrame concatenation with empty or all-NA entries is deprecated. In a future version, this will no longer exclude empty or all-NA columns when determining the result dtypes. To retain the old behavior, exclude the relevant entries before the concat operation.
+  pd.concat(valid_corp, ignore_index=True)
+/Users/nickmaglowsch/person-projects/b3-data-pipeline/b3_pipeline/b3_corporate_actions.py:455: FutureWarning: The behavior of DataFrame concatenation with empty or all-NA entries is deprecated. In a future version, this will no longer exclude empty or all-NA columns when determining the result dtypes. To retain the old behavior, exclude the relevant entries before the concat operation.
+  pd.concat(valid_corp, ignore_index=True)
+Failed to fetch company data for FAPC: HTTPSConnectionPool(host='sistemaswebb3-listados.b3.com.br', port=443): Read timed out. (read timeout=30)
+Failed to fetch company data for FBMC: HTTPSConnectionPool(host='sistemaswebb3-listados.b3.com.br', port=443): Read timed out. (read timeout=30)
+Failed to fetch company data for FBRA: HTTPSConnectionPool(host='sistemaswebb3-listados.b3.com.br', port=443): Read timed out. (read timeout=30)
+Failed to fetch company data for FCAP: HTTPSConnectionPool(host='sistemaswebb3-listados.b3.com.br', port=443): Read timed out. (read timeout=30)
+Failed to fetch company data for FCCQ: HTTPSConnectionPool(host='sistemaswebb3-listados.b3.com.br', port=443): Read timed out. (read timeout=30)
+Failed to fetch company data for FDES: HTTPSConnectionPool(host='sistemaswebb3-listados.b3.com.br', port=443): Read timed out. (read timeout=30)
+Failed to fetch company data for FFTL: HTTPSConnectionPool(host='sistemaswebb3-listados.b3.com.br', port=443): Read timed out. (read timeout=30)
+Failed to fetch company data for FGOS: HTTPSConnectionPool(host='sistemaswebb3-listados.b3.com.br', port=443): Read timed out. (read timeout=30)
+Failed to fetch company data for FIBR: HTTPSConnectionPool(host='sistemaswebb3-listados.b3.com.br', port=443): Read timed out. (read timeout=30)
+Failed to fetch company data for FIND: HTTPSConnectionPool(host='sistemaswebb3-listados.b3.com.br', port=443): Read timed out. (read timeout=30)
+Failed to fetch company data for FLBR: HTTPSConnectionPool(host='sistemaswebb3-listados.b3.com.br', port=443): Read timed out. (read timeout=30)
+Failed to fetch company data for FNAM: HTTPSConnectionPool(host='sistemaswebb3-listados.b3.com.br', port=443): Read timed out. (read timeout=30)
+Failed to fetch company data for FNBS: HTTPSConnectionPool(host='sistemaswebb3-listados.b3.com.br', port=443): Read timed out. (read timeout=30)
+Failed to fetch company data for FNOR: HTTPSConnectionPool(host='sistemaswebb3-listados.b3.com.br', port=443): Read timed out. (read timeout=30)
+Failed to fetch company data for FPOR: HTTPSConnectionPool(host='sistemaswebb3-listados.b3.com.br', port=443): Read timed out. (read timeout=30)
+/Users/nickmaglowsch/person-projects/b3-data-pipeline/b3_pipeline/b3_corporate_actions.py:455: FutureWarning: The behavior of DataFrame concatenation with empty or all-NA entries is deprecated. In a future version, this will no longer exclude empty or all-NA columns when determining the result dtypes. To retain the old behavior, exclude the relevant entries before the concat operation.
+  pd.concat(valid_corp, ignore_index=True)
+/Users/nickmaglowsch/person-projects/b3-data-pipeline/b3_pipeline/b3_corporate_actions.py:455: FutureWarning: The behavior of DataFrame concatenation with empty or all-NA entries is deprecated. In a future version, this will no longer exclude empty or all-NA columns when determining the result dtypes. To retain the old behavior, exclude the relevant entries before the concat operation.
+  pd.concat(valid_corp, ignore_index=True)
+/Users/nickmaglowsch/person-projects/b3-data-pipeline/b3_pipeline/b3_corporate_actions.py:455: FutureWarning: The behavior of DataFrame concatenation with empty or all-NA entries is deprecated. In a future version, this will no longer exclude empty or all-NA columns when determining the result dtypes. To retain the old behavior, exclude the relevant entries before the concat operation.
+  pd.concat(valid_corp, ignore_index=True)
+Failed to fetch dividends page 1 for INEPAR-FEM: 520 Server Error:  for url: https://sistemaswebb3-listados.b3.com.br/listedCompaniesProxy/CompanyCall/GetListedCashDividends/eyJsYW5ndWFnZSI6InB0LWJyIiwicGFnZU51bWJlciI6MSwicGFnZVNpemUiOjEwMCwidHJhZGluZ05hbWUiOiJJTkVQQVItRkVNIn0=
+/Users/nickmaglowsch/person-projects/b3-data-pipeline/b3_pipeline/b3_corporate_actions.py:455: FutureWarning: The behavior of DataFrame concatenation with empty or all-NA entries is deprecated. In a future version, this will no longer exclude empty or all-NA columns when determining the result dtypes. To retain the old behavior, exclude the relevant entries before the concat operation.
+  pd.concat(valid_corp, ignore_index=True)
+/Users/nickmaglowsch/person-projects/b3-data-pipeline/b3_pipeline/b3_corporate_actions.py:455: FutureWarning: The behavior of DataFrame concatenation with empty or all-NA entries is deprecated. In a future version, this will no longer exclude empty or all-NA columns when determining the result dtypes. To retain the old behavior, exclude the relevant entries before the concat operation.
+  pd.concat(valid_corp, ignore_index=True)
+/Users/nickmaglowsch/person-projects/b3-data-pipeline/b3_pipeline/b3_corporate_actions.py:455: FutureWarning: The behavior of DataFrame concatenation with empty or all-NA entries is deprecated. In a future version, this will no longer exclude empty or all-NA columns when determining the result dtypes. To retain the old behavior, exclude the relevant entries before the concat operation.
+  pd.concat(valid_corp, ignore_index=True)
+Failed to fetch company data for MEAL: 520 Server Error:  for url: https://sistemaswebb3-listados.b3.com.br/listedCompaniesProxy/CompanyCall/GetListedSupplementCompany/eyJpc3N1aW5nQ29tcGFueSI6Ik1FQUwiLCJsYW5ndWFnZSI6InB0LWJyIn0=
+Failed to fetch company data for MEGA: 520 Server Error:  for url: https://sistemaswebb3-listados.b3.com.br/listedCompaniesProxy/CompanyCall/GetListedSupplementCompany/eyJpc3N1aW5nQ29tcGFueSI6Ik1FR0EiLCJsYW5ndWFnZSI6InB0LWJyIn0=
+Failed to fetch company data for MFL : 520 Server Error:  for url: https://sistemaswebb3-listados.b3.com.br/listedCompaniesProxy/CompanyCall/GetListedSupplementCompany/eyJpc3N1aW5nQ29tcGFueSI6Ik1GTCIsImxhbmd1YWdlIjoicHQtYnIifQ==
+/Users/nickmaglowsch/person-projects/b3-data-pipeline/b3_pipeline/b3_corporate_actions.py:455: FutureWarning: The behavior of DataFrame concatenation with empty or all-NA entries is deprecated. In a future version, this will no longer exclude empty or all-NA columns when determining the result dtypes. To retain the old behavior, exclude the relevant entries before the concat operation.
+  pd.concat(valid_corp, ignore_index=True)
+/Users/nickmaglowsch/person-projects/b3-data-pipeline/b3_pipeline/b3_corporate_actions.py:455: FutureWarning: The behavior of DataFrame concatenation with empty or all-NA entries is deprecated. In a future version, this will no longer exclude empty or all-NA columns when determining the result dtypes. To retain the old behavior, exclude the relevant entries before the concat operation.
+  pd.concat(valid_corp, ignore_index=True)
+Failed to fetch company data for OSAO: 520 Server Error:  for url: https://sistemaswebb3-listados.b3.com.br/listedCompaniesProxy/CompanyCall/GetListedSupplementCompany/eyJpc3N1aW5nQ29tcGFueSI6Ik9TQU8iLCJsYW5ndWFnZSI6InB0LWJyIn0=
+/Users/nickmaglowsch/person-projects/b3-data-pipeline/b3_pipeline/b3_corporate_actions.py:455: FutureWarning: The behavior of DataFrame concatenation with empty or all-NA entries is deprecated. In a future version, this will no longer exclude empty or all-NA columns when determining the result dtypes. To retain the old behavior, exclude the relevant entries before the concat operation.
+  pd.concat(valid_corp, ignore_index=True)
+/Users/nickmaglowsch/person-projects/b3-data-pipeline/b3_pipeline/b3_corporate_actions.py:455: FutureWarning: The behavior of DataFrame concatenation with empty or all-NA entries is deprecated. In a future version, this will no longer exclude empty or all-NA columns when determining the result dtypes. To retain the old behavior, exclude the relevant entries before the concat operation.
+  pd.concat(valid_corp, ignore_index=True)
+Failed to fetch dividends page 1 for PEVE PREDIOS: 520 Server Error:  for url: https://sistemaswebb3-listados.b3.com.br/listedCompaniesProxy/CompanyCall/GetListedCashDividends/eyJsYW5ndWFnZSI6InB0LWJyIiwicGFnZU51bWJlciI6MSwicGFnZVNpemUiOjEwMCwidHJhZGluZ05hbWUiOiJQRVZFIFBSRURJT1MifQ==
+/Users/nickmaglowsch/person-projects/b3-data-pipeline/b3_pipeline/b3_corporate_actions.py:455: FutureWarning: The behavior of DataFrame concatenation with empty or all-NA entries is deprecated. In a future version, this will no longer exclude empty or all-NA columns when determining the result dtypes. To retain the old behavior, exclude the relevant entries before the concat operation.
+  pd.concat(valid_corp, ignore_index=True)
+/Users/nickmaglowsch/person-projects/b3-data-pipeline/b3_pipeline/b3_corporate_actions.py:455: FutureWarning: The behavior of DataFrame concatenation with empty or all-NA entries is deprecated. In a future version, this will no longer exclude empty or all-NA columns when determining the result dtypes. To retain the old behavior, exclude the relevant entries before the concat operation.
+  pd.concat(valid_corp, ignore_index=True)
+/Users/nickmaglowsch/person-projects/b3-data-pipeline/b3_pipeline/b3_corporate_actions.py:455: FutureWarning: The behavior of DataFrame concatenation with empty or all-NA entries is deprecated. In a future version, this will no longer exclude empty or all-NA columns when determining the result dtypes. To retain the old behavior, exclude the relevant entries before the concat operation.
+  pd.concat(valid_corp, ignore_index=True)
+/Users/nickmaglowsch/person-projects/b3-data-pipeline/b3_pipeline/b3_corporate_actions.py:455: FutureWarning: The behavior of DataFrame concatenation with empty or all-NA entries is deprecated. In a future version, this will no longer exclude empty or all-NA columns when determining the result dtypes. To retain the old behavior, exclude the relevant entries before the concat operation.
+  pd.concat(valid_corp, ignore_index=True)
+Failed to fetch company data for SWET: 520 Server Error:  for url: https://sistemaswebb3-listados.b3.com.br/listedCompaniesProxy/CompanyCall/GetListedSupplementCompany/eyJpc3N1aW5nQ29tcGFueSI6IlNXRVQiLCJsYW5ndWFnZSI6InB0LWJyIn0=
+/Users/nickmaglowsch/person-projects/b3-data-pipeline/b3_pipeline/b3_corporate_actions.py:455: FutureWarning: The behavior of DataFrame concatenation with empty or all-NA entries is deprecated. In a future version, this will no longer exclude empty or all-NA columns when determining the result dtypes. To retain the old behavior, exclude the relevant entries before the concat operation.
+  pd.concat(valid_corp, ignore_index=True)
+/Users/nickmaglowsch/person-projects/b3-data-pipeline/b3_pipeline/b3_corporate_actions.py:455: FutureWarning: The behavior of DataFrame concatenation with empty or all-NA entries is deprecated. In a future version, this will no longer exclude empty or all-NA columns when determining the result dtypes. To retain the old behavior, exclude the relevant entries before the concat operation.
+  pd.concat(valid_corp, ignore_index=True)
+/Users/nickmaglowsch/person-projects/b3-data-pipeline/b3_pipeline/b3_corporate_actions.py:455: FutureWarning: The behavior of DataFrame concatenation with empty or all-NA entries is deprecated. In a future version, this will no longer exclude empty or all-NA columns when determining the result dtypes. To retain the old behavior, exclude the relevant entries before the concat operation.
+  pd.concat(valid_corp, ignore_index=True)
+Failed to fetch company data for VSMA: HTTPSConnectionPool(host='sistemaswebb3-listados.b3.com.br', port=443): Read timed out. (read timeout=30)
+/Users/nickmaglowsch/person-projects/b3-data-pipeline/b3_pipeline/b3_corporate_actions.py:455: FutureWarning: The behavior of DataFrame concatenation with empty or all-NA entries is deprecated. In a future version, this will no longer exclude empty or all-NA columns when determining the result dtypes. To retain the old behavior, exclude the relevant entries before the concat operation.
+  pd.concat(valid_corp, ignore_index=True)
+Fetching corporate actions for 1504 roots in chunks...
+Processing chunk 1 (AALR to AMPI)...
+Processing chunk 2 (AMS  to AVP )...
+Processing chunk 3 (AVPL to BCNA)...
+Processing chunk 4 (BDB  to BKBR)...
+Processing chunk 5 (BLAU to BRAX)...
+Processing chunk 6 (BRBI to CAMB)...
+Processing chunk 7 (CAML to CESP)...
+Processing chunk 8 (CET  to COGN)...
+Processing chunk 9 (COGU to CSP )...
+Processing chunk 10 (CSPC to DISA)...
+Processing chunk 11 (DIVO to EKTR)...
+Processing chunk 12 (ELA  to ESTC)...
+Processing chunk 13 (ESTR to FRAS)...
+Processing chunk 14 (FRI  to GRSU)...
+Processing chunk 15 (GSHP to IGU )...
+Processing chunk 16 (IGUA to JBSS)...
+Processing chunk 17 (JFA  to LIBP)...
+Processing chunk 18 (LIG  to MARI)...
+Processing chunk 19 (MAT  to MNSA)...
+Processing chunk 20 (MOA  to NGRD)...
+Processing chunk 21 (NINJ to PEFX)...
+Processing chunk 22 (PET  to PQUN)...
+Processing chunk 23 (PRB  to RCS )...
+Processing chunk 24 (RCSA to RUMO)...
+Processing chunk 25 (RVEE to SIBR)...
+Processing chunk 26 (SID  to STLB)...
+Processing chunk 27 (SUBA to TENE)...
+Processing chunk 28 (TEP  to TRIC)...
+Processing chunk 29 (TRIS to VGAF)...
+Processing chunk 30 (VGO  to YDUQ)...
+Processing chunk 31 (ZAMP to ZIVI)...
+Finished all chunks.

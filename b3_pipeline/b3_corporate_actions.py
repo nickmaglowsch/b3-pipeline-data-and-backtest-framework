@@ -225,7 +225,9 @@ def fetch_cash_dividends_paginated(
     return all_results
 
 
-def parse_cash_dividends(records: List[dict]) -> pd.DataFrame:
+def parse_cash_dividends(
+    records: List[dict], ticker_root: str, ticker_to_isin: dict
+) -> pd.DataFrame:
     """
     Parse cash dividend records from B3 response.
 
@@ -249,7 +251,23 @@ def parse_cash_dividends(records: List[dict]) -> pd.DataFrame:
         date_str = record.get("lastDatePrior", record.get("lastDatePriorEx", ""))
 
         if not isin_code:
-            continue
+            type_stock = record.get("typeStock", "")
+            guessed_ticker = None
+            if type_stock == "ON":
+                guessed_ticker = f"{ticker_root}3"
+            elif type_stock == "PN":
+                guessed_ticker = f"{ticker_root}4"
+            elif type_stock == "PNA":
+                guessed_ticker = f"{ticker_root}5"
+            elif type_stock == "PNB":
+                guessed_ticker = f"{ticker_root}6"
+            elif type_stock == "UNT":
+                guessed_ticker = f"{ticker_root}11"
+
+            if guessed_ticker and guessed_ticker in ticker_to_isin:
+                isin_code = ticker_to_isin[guessed_ticker]
+            else:
+                continue
 
         if label == config.B3_LABEL_DIVIDEND:
             event_type = config.EVENT_TYPE_CASH_DIVIDEND
@@ -376,13 +394,14 @@ def parse_stock_dividends(records: List[dict]) -> Tuple[pd.DataFrame, pd.DataFra
 
 
 def fetch_all_corporate_actions(
-    trading_names: List[str],
+    trading_names: List[str], ticker_to_isin: dict
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
     Fetch all corporate actions for multiple trading names.
 
     Args:
         trading_names: List of 4-character ticker roots (e.g., 'PETR')
+        ticker_to_isin: Dictionary mapping tickers to ISINs
 
     Returns:
         Tuple of (corporate_actions_df, stock_actions_df)
@@ -419,7 +438,7 @@ def fetch_all_corporate_actions(
         if full_trading_name:
             cash_divs = fetch_cash_dividends_paginated(full_trading_name)
             if cash_divs:
-                corp_df = parse_cash_dividends(cash_divs)
+                corp_df = parse_cash_dividends(cash_divs, name, ticker_to_isin)
                 if not corp_df.empty:
                     all_corp_actions.append(corp_df)
 
