@@ -2,168 +2,87 @@
 B3 Dynamic Momentum Strategy Backtest — with Brazilian Capital Gains Tax
 =======================================================================
 """
-
 import warnings
-
 warnings.filterwarnings("ignore")
 
 import pandas as pd
 import numpy as np
 from datetime import datetime
+import sys
+import os
 
-# Import framework components
-from core.data import load_b3_data, download_benchmark
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from core.data import load_b3_data, download_benchmark, download_cdi_daily
 from core.metrics import build_metrics, value_to_ret, display_metrics_table
 from core.plotting import plot_tax_backtest
-from core.portfolio import rebalance_positions, apply_returns, compute_tax
+from core.simulation import run_simulation
 
 # ─────────────────────────────────────────────
 #  CONFIGURATION
 # ─────────────────────────────────────────────
-LOOKBACK_MONTHS = 12  # momentum signal window (months)
-SKIP_MONTHS = 1  # skip most-recent month (avoid short-term reversal)
-TOP_DECILE = 0.10  # fraction of valid universe selected each rebalance
-TAX_RATE = 0.15  # Brazilian capital gains tax rate
+REBALANCE_FREQ = "ME"  
+LOOKBACK_YEARS = 1
+
+period_map = {"ME": 12, "QE": 4, "YE": 1, "W": 52, "W-FRI": 52, "W-MON": 52}
+PERIODS_PER_YEAR = period_map.get(REBALANCE_FREQ, 12)
+LOOKBACK_PERIODS = int(LOOKBACK_YEARS * PERIODS_PER_YEAR)
+SKIP_PERIODS = 1 if REBALANCE_FREQ == "ME" else 0
+
+TOP_DECILE = 0.10
+TAX_RATE = 0.15
+SLIPPAGE = 0.001
 START_DATE = "2012-01-01"
 END_DATE = datetime.today().strftime("%Y-%m-%d")
-INITIAL_CAPITAL = 100_000  # BRL
-MIN_ADTV = 1_000_000  # Minimum Average Daily Traded Volume in BRL
+INITIAL_CAPITAL = 100_000
+MIN_ADTV = 1_000_000
 
 DB_PATH = "b3_market_data.sqlite"
 IBOV_INDEX = "^BVSP"
 
+def generate_signals(adj_close, close_px, fin_vol):
+    px = adj_close.resample(REBALANCE_FREQ).last()
+    ret = px.pct_change()
+    
+    raw_close = close_px.resample(REBALANCE_FREQ).last()
+    adtv = fin_vol.resample(REBALANCE_FREQ).mean()
 
-# ─────────────────────────────────────────────
-#  SIGNAL
-# ─────────────────────────────────────────────
-def momentum_signal(
-    monthly_ret: pd.DataFrame, lookback: int, skip: int
-) -> pd.DataFrame:
-    """Log-cumulative return with data glitch protection."""
-    log_ret = np.log1p(monthly_ret)
-    signal = log_ret.shift(skip).rolling(lookback).sum()
-
-    has_glitch = (
-        ((monthly_ret > 1.0) | (monthly_ret < -0.90))
-        .shift(skip)
-        .rolling(lookback)
-        .max()
-    )
+    log_ret = np.log1p(ret)
+    signal = log_ret.shift(SKIP_PERIODS).rolling(LOOKBACK_PERIODS).sum()
+    
+    has_glitch = ((ret > 1.0) | (ret < -0.90)).shift(SKIP_PERIODS).rolling(LOOKBACK_PERIODS).max()
     signal[has_glitch == 1] = np.nan
-    return signal
-
-
-# ─────────────────────────────────────────────
-#  BACKTEST ENGINE
-# ─────────────────────────────────────────────
-def run_backtest(
-    adj_close: pd.DataFrame,
-    close_px: pd.DataFrame,
-    fin_vol: pd.DataFrame,
-    top_pct: float = TOP_DECILE,
-) -> dict:
-    """Simulate two portfolios in parallel using dynamic universe filtering."""
-    monthly_px = adj_close.resample("ME").last()
-    monthly_ret = monthly_px.pct_change()
-    monthly_raw_close = close_px.resample("ME").last()
-    monthly_adtv = fin_vol.resample("ME").mean()
-
-    signal = momentum_signal(monthly_ret, LOOKBACK_MONTHS, SKIP_MONTHS)
-    start_idx = LOOKBACK_MONTHS + SKIP_MONTHS + 1
-
-    pretax_positions, aftertax_positions = {}, {}
-    loss_carryforward = 0.0
-
-    pretax_values, aftertax_values = [], []
-    tax_paid_list, loss_cf_list, turnover_list, dates = [], [], [], []
-
-    prev_selected = set()
-    initialized = False
-
-    for i in range(start_idx, len(monthly_ret)):
-        date = monthly_ret.index[i]
-
+    
+    target_weights = pd.DataFrame(0.0, index=ret.index, columns=ret.columns)
+    start_idx = LOOKBACK_PERIODS + SKIP_PERIODS + 1
+    
+    prev_sel = set()
+    
+    for i in range(start_idx, len(ret)):
         sig_row = signal.iloc[i - 1]
-        adtv_row = monthly_adtv.iloc[i - 1]
-        raw_close_row = monthly_raw_close.iloc[i - 1]
-
-        valid_universe_mask = (adtv_row >= MIN_ADTV) & (raw_close_row >= 1.0)
-        valid = sig_row[valid_universe_mask].dropna()
-
+        adtv_row = adtv.iloc[i - 1]
+        raw_close_row = raw_close.iloc[i - 1]
+        
+        valid_mask = (adtv_row >= MIN_ADTV) & (raw_close_row >= 1.0)
+        valid = sig_row[valid_mask].dropna()
+        
         if len(valid) < 5:
-            new_selected = prev_selected
+            sel = prev_sel
         else:
-            n_select = max(1, int(len(valid) * top_pct))
-            new_selected = set(valid.nlargest(n_select).index.tolist())
-
-        ret_row = monthly_ret.iloc[i]
-
-        if not initialized and len(valid) >= 5:
-            alloc = INITIAL_CAPITAL / len(new_selected)
-            for t in new_selected:
-                pretax_positions[t] = {"cost_basis": alloc, "current_value": alloc}
-                aftertax_positions[t] = {"cost_basis": alloc, "current_value": alloc}
-            prev_selected = new_selected
-            initialized = True
-
-            pretax_values.append(INITIAL_CAPITAL)
-            aftertax_values.append(INITIAL_CAPITAL)
-            tax_paid_list.append(0.0)
-            loss_cf_list.append(0.0)
-            turnover_list.append(1.0)
-            dates.append(date)
+            n_sel = max(1, int(len(valid) * TOP_DECILE))
+            sel = set(valid.nlargest(n_sel).index)
+            
+        if not sel:
             continue
+            
+        weight_per_stock = 1.0 / len(sel)
+        for t in sel:
+            target_weights.iloc[i, target_weights.columns.get_loc(t)] = weight_per_stock
+            
+        prev_sel = sel
 
-        if not initialized:
-            continue
+    return ret, target_weights
 
-        # Step 1: Apply returns
-        apply_returns(pretax_positions, ret_row)
-        apply_returns(aftertax_positions, ret_row)
-
-        # Step 2: Classify positions
-        exiting = prev_selected - new_selected
-        entering = new_selected - prev_selected
-        n_universe = len(new_selected | prev_selected)
-        turnover_list.append(len(exiting | entering) / max(n_universe, 1))
-
-        # Step 3: Compute tax
-        tax, loss_carryforward = compute_tax(
-            exiting, aftertax_positions, loss_carryforward, TAX_RATE
-        )
-
-        # Step 4: Rebalance ledgers
-        rebalance_positions(pretax_positions, exiting, entering, ret_row, tax=0.0)
-        rebalance_positions(aftertax_positions, exiting, entering, ret_row, tax=tax)
-
-        # Step 5: Record state
-        pretax_values.append(sum(p["current_value"] for p in pretax_positions.values()))
-        aftertax_values.append(
-            sum(p["current_value"] for p in aftertax_positions.values())
-        )
-        tax_paid_list.append(tax)
-        loss_cf_list.append(loss_carryforward)
-        dates.append(date)
-
-        prev_selected = new_selected
-
-    idx = pd.DatetimeIndex(dates)
-    return {
-        "pretax_values": pd.Series(pretax_values, index=idx, name="Momentum (Pre-Tax)"),
-        "aftertax_values": pd.Series(
-            aftertax_values, index=idx, name="Momentum (After-Tax)"
-        ),
-        "tax_paid": pd.Series(tax_paid_list, index=idx, name="Tax Paid (BRL)"),
-        "loss_carryforward": pd.Series(
-            loss_cf_list, index=idx, name="Loss Carryforward (BRL)"
-        ),
-        "turnover": pd.Series(turnover_list, index=idx, name="Turnover"),
-    }
-
-
-# ─────────────────────────────────────────────
-#  MAIN
-# ─────────────────────────────────────────────
 def main():
     print("\n" + "=" * 70)
     print("  B3 NATIVE DYNAMIC MOMENTUM BACKTEST (15% CGT)")
@@ -171,50 +90,59 @@ def main():
 
     adj_close, close_px, fin_vol = load_b3_data(DB_PATH, START_DATE, END_DATE)
 
+    cdi_daily = download_cdi_daily(START_DATE, END_DATE)
     ibov_px = download_benchmark(IBOV_INDEX, START_DATE, END_DATE)
-    ibov_monthly = ibov_px.resample("ME").last().pct_change().dropna()
-    ibov_monthly.name = "IBOV"
+    
+    ibov_ret = ibov_px.resample(REBALANCE_FREQ).last().pct_change().dropna()
+    ibov_ret.name = "IBOV"
+    
+    cdi_ret = (1 + cdi_daily).resample(REBALANCE_FREQ).prod() - 1
 
-    print("\n🚀 Running dynamic backtest with tax engine...")
-    result = run_backtest(adj_close, close_px, fin_vol)
+    print("\n🧠 Generating target weights matrix...")
+    ret, target_weights = generate_signals(adj_close, close_px, fin_vol)
+    
+    ret = ret.fillna(0.0)
 
-    common = result["pretax_values"].index.intersection(ibov_monthly.index)
+    print(f"\n🚀 Running generic simulation engine ({REBALANCE_FREQ})...")
+    result = run_simulation(
+        returns_matrix=ret,
+        target_weights=target_weights,
+        initial_capital=INITIAL_CAPITAL,
+        tax_rate=TAX_RATE,
+        slippage=SLIPPAGE,
+        name="Momentum"
+    )
 
+    common = result["pretax_values"].index.intersection(ibov_ret.index)
     pretax_val = result["pretax_values"].loc[common]
     aftertax_val = result["aftertax_values"].loc[common]
-    ibov_ret = ibov_monthly.loc[common]
-
+    ibov_ret = ibov_ret.loc[common]
+    cdi_ret = cdi_ret.loc[common]
+    
     pretax_ret = value_to_ret(pretax_val)
     aftertax_ret = value_to_ret(aftertax_val)
-    total_tax = result["tax_paid"].loc[common].sum()
+    total_tax = result["tax_paid"].sum()
 
-    print(f"\n   Period          : {common[0].date()} → {common[-1].date()}")
-    print(f"   Total months    : {len(common)}")
-    print(f"   Total tax paid  : R$ {total_tax:,.2f}")
-    print(
-        f"   Final loss C/F  : R$ {result['loss_carryforward'].loc[common].iloc[-1]:,.2f}"
-    )
-    print(f"   Avg turnover/mo : {result['turnover'].loc[common].mean() * 100:.1f}%")
+    m_pretax = build_metrics(pretax_ret, "Momentum Pre-Tax", PERIODS_PER_YEAR)
+    m_aftertax = build_metrics(aftertax_ret, "After-Tax 15% CGT", PERIODS_PER_YEAR)
+    m_ibov = build_metrics(ibov_ret, "IBOV", PERIODS_PER_YEAR)
+    m_cdi = build_metrics(cdi_ret, "CDI", PERIODS_PER_YEAR)
 
-    m_pretax = build_metrics(pretax_ret, "Momentum Pre-Tax")
-    m_aftertax = build_metrics(aftertax_ret, "After-Tax 15% CGT")
-    m_ibov = build_metrics(ibov_ret, "IBOV")
-
-    display_metrics_table([m_pretax, m_aftertax, m_ibov])
+    display_metrics_table([m_pretax, m_aftertax, m_ibov, m_cdi])
 
     plot_tax_backtest(
-        title=f"Dynamic Momentum (B3 Native)  ·  {LOOKBACK_MONTHS}M Lookback · Skip {SKIP_MONTHS}M\nTop {int(TOP_DECILE * 100)}% of R$ {MIN_ADTV / 1_000_000:.0f}M+ ADTV  ·  15% CGT with Loss Carryforward\n{START_DATE[:4]}–{END_DATE[:4]}",
+        title=f"Dynamic Momentum (B3 Native)  ·  {LOOKBACK_YEARS}Y Lookback · Skip {SKIP_PERIODS}\nTop {int(TOP_DECILE * 100)}% of R$ {MIN_ADTV / 1_000_000:.0f}M+ ADTV  ·  15% CGT + {SLIPPAGE*100}% Slippage\n{START_DATE[:4]}–{END_DATE[:4]}",
         pretax_val=pretax_val,
         aftertax_val=aftertax_val,
         ibov_ret=ibov_ret,
         tax_paid=result["tax_paid"].loc[common],
         loss_cf=result["loss_carryforward"].loc[common],
         turnover=result["turnover"].loc[common],
-        metrics=[m_pretax, m_aftertax, m_ibov],
+        metrics=[m_pretax, m_aftertax, m_ibov, m_cdi],
         total_tax_brl=total_tax,
         out_path="momentum_dynamic_backtest.png",
+        cdi_ret=cdi_ret
     )
-
 
 if __name__ == "__main__":
     main()

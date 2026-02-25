@@ -1,14 +1,8 @@
 """
 B3 Multi-Factor Strategy Backtest (Value + Momentum)
 =======================================================================
-Strategy: Instead of allocating parallel capital to separate strategies,
-this strategy uses a composite scoring system. Each month it ranks stocks
-by both their Momentum (12-month return) and Mean Reversion (1-month drop).
-It combines the ranks and buys the top 10%.
 """
-
 import warnings
-
 warnings.filterwarnings("ignore")
 
 import pandas as pd
@@ -19,16 +13,25 @@ import os
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from core.data import load_b3_data, download_benchmark
+from core.data import load_b3_data, download_benchmark, download_cdi_daily
 from core.metrics import build_metrics, value_to_ret, display_metrics_table
 from core.plotting import plot_tax_backtest
-from core.portfolio import rebalance_positions, apply_returns, compute_tax
+from core.simulation import run_simulation
 
 # ─────────────────────────────────────────────
 #  CONFIGURATION
 # ─────────────────────────────────────────────
+REBALANCE_FREQ = "ME"  
+LOOKBACK_YEARS = 1
+
+period_map = {"ME": 12, "QE": 4, "YE": 1, "W": 52, "W-FRI": 52, "W-MON": 52}
+PERIODS_PER_YEAR = period_map.get(REBALANCE_FREQ, 12)
+LOOKBACK_PERIODS = int(LOOKBACK_YEARS * PERIODS_PER_YEAR)
+SKIP_PERIODS = 1 if REBALANCE_FREQ == "ME" else 0
+
 TOP_DECILE = 0.10
 TAX_RATE = 0.15
+SLIPPAGE = 0.001
 START_DATE = "2012-01-01"
 END_DATE = datetime.today().strftime("%Y-%m-%d")
 INITIAL_CAPITAL = 100_000
@@ -37,125 +40,56 @@ MIN_ADTV = 1_000_000
 DB_PATH = "b3_market_data.sqlite"
 IBOV_INDEX = "^BVSP"
 
+def generate_signals(adj_close, close_px, fin_vol):
+    px = adj_close.resample(REBALANCE_FREQ).last()
+    ret = px.pct_change()
+    
+    raw_close = close_px.resample(REBALANCE_FREQ).last()
+    adtv = fin_vol.resample(REBALANCE_FREQ).mean()
 
-def run_backtest(adj_close, close_px, fin_vol):
-    monthly_px = adj_close.resample("ME").last()
-    monthly_ret = monthly_px.pct_change()
-
-    monthly_raw_close = close_px.resample("ME").last()
-    monthly_adtv = fin_vol.resample("ME").mean()
-
-    # Signal 1: 12-Month Momentum (skip 1 month)
-    log_ret = np.log1p(monthly_ret)
-    mom_signal = log_ret.shift(1).rolling(12).sum()
-    mom_glitch = (
-        ((monthly_ret > 1.0) | (monthly_ret < -0.90)).shift(1).rolling(12).max()
-    )
+    log_ret = np.log1p(ret)
+    mom_signal = log_ret.shift(SKIP_PERIODS).rolling(LOOKBACK_PERIODS).sum()
+    mom_glitch = ((ret > 1.0) | (ret < -0.90)).shift(SKIP_PERIODS).rolling(LOOKBACK_PERIODS).max()
     mom_signal[mom_glitch == 1] = np.nan
-
-    # Signal 2: Low Volatility (12-month trailing standard deviation)
-    vol_signal = -monthly_ret.shift(1).rolling(12).std()
-    vol_glitch = (
-        ((monthly_ret > 1.0) | (monthly_ret < -0.90)).shift(1).rolling(12).max()
-    )
+    
+    vol_signal = -ret.shift(1).rolling(LOOKBACK_PERIODS).std()
+    vol_glitch = ((ret > 1.0) | (ret < -0.90)).shift(1).rolling(LOOKBACK_PERIODS).max()
     vol_signal[vol_glitch == 1] = np.nan
 
-    # Convert signals to cross-sectional percentile ranks (higher = better)
     mom_rank = mom_signal.rank(axis=1, pct=True)
     vol_rank = vol_signal.rank(axis=1, pct=True)
 
-    # Combined Composite Signal (50% Mom, 50% Low Vol)
-    # We only score stocks where both signals are valid
-    composite_signal = (mom_rank * 0.5) + (vol_rank * 0.5)
-
-    start_idx = 14
-
-    pretax_positions, aftertax_positions = {}, {}
-    loss_carryforward = 0.0
-
-    pretax_values, aftertax_values = [], []
-    tax_paid_list, loss_cf_list, turnover_list, dates = [], [], [], []
-    prev_selected = set()
-    initialized = False
-
-    for i in range(start_idx, len(monthly_ret)):
-        date = monthly_ret.index[i]
-
-        sig_row = composite_signal.iloc[i - 1]
-
-        adtv_row = monthly_adtv.iloc[i - 1]
-        raw_close_row = monthly_raw_close.iloc[i - 1]
-        valid_universe_mask = (adtv_row >= MIN_ADTV) & (raw_close_row >= 1.0)
-
-        valid = sig_row[valid_universe_mask].dropna()
-
+    composite = (mom_rank * 0.5) + (vol_rank * 0.5)
+    
+    target_weights = pd.DataFrame(0.0, index=ret.index, columns=ret.columns)
+    start_idx = LOOKBACK_PERIODS + SKIP_PERIODS + 1
+    
+    prev_sel = set()
+    
+    for i in range(start_idx, len(ret)):
+        sig_row = composite.iloc[i - 1]
+        adtv_row = adtv.iloc[i - 1]
+        raw_close_row = raw_close.iloc[i - 1]
+        
+        valid_mask = (adtv_row >= MIN_ADTV) & (raw_close_row >= 1.0)
+        valid = sig_row[valid_mask].dropna()
+        
         if len(valid) < 5:
-            new_selected = prev_selected
+            sel = prev_sel
         else:
-            n_select = max(1, int(len(valid) * TOP_DECILE))
-            new_selected = set(valid.nlargest(n_select).index.tolist())
-
-        ret_row = monthly_ret.iloc[i]
-
-        if not initialized and len(valid) >= 5:
-            alloc = INITIAL_CAPITAL / len(new_selected)
-            for t in new_selected:
-                pretax_positions[t] = {"cost_basis": alloc, "current_value": alloc}
-                aftertax_positions[t] = {"cost_basis": alloc, "current_value": alloc}
-            prev_selected = new_selected
-            initialized = True
-
-            pretax_values.append(INITIAL_CAPITAL)
-            aftertax_values.append(INITIAL_CAPITAL)
-            tax_paid_list.append(0.0)
-            loss_cf_list.append(0.0)
-            turnover_list.append(1.0)
-            dates.append(date)
+            n_sel = max(1, int(len(valid) * TOP_DECILE))
+            sel = set(valid.nlargest(n_sel).index)
+            
+        if not sel:
             continue
+            
+        weight_per_stock = 1.0 / len(sel)
+        for t in sel:
+            target_weights.iloc[i, target_weights.columns.get_loc(t)] = weight_per_stock
+            
+        prev_sel = sel
 
-        if not initialized:
-            continue
-
-        apply_returns(pretax_positions, ret_row)
-        apply_returns(aftertax_positions, ret_row)
-
-        exiting = prev_selected - new_selected
-        entering = new_selected - prev_selected
-        n_universe = len(new_selected | prev_selected)
-        turnover_list.append(len(exiting | entering) / max(n_universe, 1))
-
-        tax, loss_carryforward = compute_tax(
-            exiting, aftertax_positions, loss_carryforward, TAX_RATE
-        )
-
-        rebalance_positions(pretax_positions, exiting, entering, ret_row, tax=0.0)
-        rebalance_positions(aftertax_positions, exiting, entering, ret_row, tax=tax)
-
-        pretax_values.append(sum(p["current_value"] for p in pretax_positions.values()))
-        aftertax_values.append(
-            sum(p["current_value"] for p in aftertax_positions.values())
-        )
-        tax_paid_list.append(tax)
-        loss_cf_list.append(loss_carryforward)
-        dates.append(date)
-
-        prev_selected = new_selected
-
-    idx = pd.DatetimeIndex(dates)
-    return {
-        "pretax_values": pd.Series(
-            pretax_values, index=idx, name="Multi-Factor (Pre-Tax)"
-        ),
-        "aftertax_values": pd.Series(
-            aftertax_values, index=idx, name="Multi-Factor (After-Tax)"
-        ),
-        "tax_paid": pd.Series(tax_paid_list, index=idx, name="Tax Paid (BRL)"),
-        "loss_carryforward": pd.Series(
-            loss_cf_list, index=idx, name="Loss Carryforward (BRL)"
-        ),
-        "turnover": pd.Series(turnover_list, index=idx, name="Turnover"),
-    }
-
+    return ret, target_weights
 
 def main():
     print("\n" + "=" * 70)
@@ -163,41 +97,60 @@ def main():
     print("=" * 70)
 
     adj_close, close_px, fin_vol = load_b3_data(DB_PATH, START_DATE, END_DATE)
+
+    cdi_daily = download_cdi_daily(START_DATE, END_DATE)
     ibov_px = download_benchmark(IBOV_INDEX, START_DATE, END_DATE)
-    ibov_monthly = ibov_px.resample("ME").last().pct_change().dropna()
-    ibov_monthly.name = "IBOV"
+    
+    ibov_ret = ibov_px.resample(REBALANCE_FREQ).last().pct_change().dropna()
+    ibov_ret.name = "IBOV"
+    
+    cdi_ret = (1 + cdi_daily).resample(REBALANCE_FREQ).prod() - 1
 
-    print("\n🚀 Running dynamic backtest with tax engine...")
-    result = run_backtest(adj_close, close_px, fin_vol)
+    print("\n🧠 Generating target weights matrix...")
+    ret, target_weights = generate_signals(adj_close, close_px, fin_vol)
+    
+    ret = ret.fillna(0.0)
 
-    common = result["pretax_values"].index.intersection(ibov_monthly.index)
+    print(f"\n🚀 Running generic simulation engine ({REBALANCE_FREQ})...")
+    result = run_simulation(
+        returns_matrix=ret,
+        target_weights=target_weights,
+        initial_capital=INITIAL_CAPITAL,
+        tax_rate=TAX_RATE,
+        slippage=SLIPPAGE,
+        name="Factor"
+    )
+
+    common = result["pretax_values"].index.intersection(ibov_ret.index)
     pretax_val = result["pretax_values"].loc[common]
     aftertax_val = result["aftertax_values"].loc[common]
-    ibov_ret = ibov_monthly.loc[common]
-
+    ibov_ret = ibov_ret.loc[common]
+    cdi_ret = cdi_ret.loc[common]
+    
     pretax_ret = value_to_ret(pretax_val)
     aftertax_ret = value_to_ret(aftertax_val)
     total_tax = result["tax_paid"].sum()
 
-    m_pretax = build_metrics(pretax_ret, "Factor Pre-Tax")
-    m_aftertax = build_metrics(aftertax_ret, "After-Tax 15% CGT")
-    m_ibov = build_metrics(ibov_ret, "IBOV")
+    m_pretax = build_metrics(pretax_ret, "Factor Pre-Tax", PERIODS_PER_YEAR)
+    m_aftertax = build_metrics(aftertax_ret, "After-Tax 15% CGT", PERIODS_PER_YEAR)
+    m_ibov = build_metrics(ibov_ret, "IBOV", PERIODS_PER_YEAR)
+    m_cdi = build_metrics(cdi_ret, "CDI", PERIODS_PER_YEAR)
 
-    display_metrics_table([m_pretax, m_aftertax, m_ibov])
+    display_metrics_table([m_pretax, m_aftertax, m_ibov, m_cdi])
 
     plot_tax_backtest(
-        title=f"Multi-Factor Rank: 50% Mom + 50% Low Vol\nTop 10% Selected  ·  R$ {MIN_ADTV / 1_000_000:.0f}M+ ADTV\n{START_DATE[:4]}–{END_DATE[:4]}",
+        title=f"Multi-Factor Rank: 50% Mom + 50% Low Vol\nTop {int(TOP_DECILE * 100)}% of R$ {MIN_ADTV / 1_000_000:.0f}M+ ADTV  ·  15% CGT + {SLIPPAGE*100}% Slippage\n{START_DATE[:4]}–{END_DATE[:4]}",
         pretax_val=pretax_val,
         aftertax_val=aftertax_val,
         ibov_ret=ibov_ret,
         tax_paid=result["tax_paid"].loc[common],
         loss_cf=result["loss_carryforward"].loc[common],
         turnover=result["turnover"].loc[common],
-        metrics=[m_pretax, m_aftertax, m_ibov],
+        metrics=[m_pretax, m_aftertax, m_ibov, m_cdi],
         total_tax_brl=total_tax,
         out_path="multifactor_backtest.png",
+        cdi_ret=cdi_ret
     )
-
 
 if __name__ == "__main__":
     main()
