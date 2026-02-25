@@ -44,6 +44,7 @@ def plot_tax_backtest(
     metrics: list,
     total_tax_brl: float,
     out_path: str = "backtest_results.png",
+    cdi_ret: "pd.Series | None" = None,
 ):
     """Generate the standard 4-panel tear sheet for tax-aware backtests."""
     plt.rcParams.update(
@@ -80,6 +81,11 @@ def plot_tax_backtest(
     at_curve = at_val / at_val.iloc[0]
     ibov_curve = cumret(ibov)
 
+    cdi_curve = None
+    if cdi_ret is not None:
+        cdi = cdi_ret.loc[common].fillna(0)
+        cdi_curve = cumret(cdi)
+
     ax1 = fig.add_subplot(gs[0, :])
     ax1.plot(
         pt_curve.index,
@@ -107,6 +113,18 @@ def plot_tax_backtest(
         zorder=2,
         ls="--",
     )
+
+    if cdi_curve is not None:
+        ax1.plot(
+            cdi_curve.index,
+            cdi_curve.values,
+            color="#A8B2C1",
+            lw=1.5,
+            label="CDI",
+            zorder=1,
+            ls=":",
+        )
+
     ax1.fill_between(
         pt_curve.index,
         pt_curve.values,
@@ -127,7 +145,7 @@ def plot_tax_backtest(
         edgecolor=PALETTE["grid"],
         labelcolor=PALETTE["text"],
         fontsize=9,
-        ncol=4,
+        ncol=5,
     )
     fmt_ax(ax1, ylabel="Growth of R$1")
 
@@ -159,13 +177,20 @@ def plot_tax_backtest(
         color=PALETTE["ibov"],
         label="Benchmark DD",
     )
+
+    if cdi_curve is not None:
+        dd_cdi = (cdi_curve / cdi_curve.cummax() - 1) * 100
+        ax2.fill_between(
+            dd_cdi.index, dd_cdi.values, 0, alpha=0.20, color="#A8B2C1", label="CDI DD"
+        )
+
     ax2.set_title("Drawdown (%)", color=PALETTE["text"], fontsize=11, pad=6)
     ax2.legend(
         facecolor=PALETTE["bg"],
         edgecolor=PALETTE["grid"],
         labelcolor=PALETTE["text"],
         fontsize=9,
-        ncol=3,
+        ncol=4,
     )
     fmt_ax(ax2, ylabel="Drawdown (%)")
 
@@ -220,8 +245,17 @@ def plot_tax_backtest(
     ax7.axis("off")
     col_labels = list(metrics[0].keys())
     row_vals = [[str(m[k]) for k in col_labels] for m in metrics]
-    row_bg = ["#0D2E26", "#1A1230", "#2A1A10"]
-    txt_colors = [PALETTE["pretax"], PALETTE["aftertax"], PALETTE["ibov"]]
+
+    row_bg = ["#0D2E26", "#1A1230", "#2A1A10", "#1E2A3A", "#332211"]
+
+    # Need to match the number of metrics provided
+    txt_colors = [
+        PALETTE["pretax"],
+        PALETTE["aftertax"],
+        PALETTE["ibov"],
+        "#A8B2C1",
+        "#FFC947",
+    ]
 
     tbl = ax7.table(
         cellText=row_vals, colLabels=col_labels, cellLoc="center", loc="center"
@@ -237,8 +271,9 @@ def plot_tax_backtest(
             cell.get_text().set_color(PALETTE["text"])
             cell.get_text().set_fontweight("bold")
         else:
-            cell.set_facecolor(row_bg[r - 1])
-            cell.get_text().set_color(txt_colors[r - 1])
+            color_idx = (r - 1) % len(row_bg)
+            cell.set_facecolor(row_bg[color_idx])
+            cell.get_text().set_color(txt_colors[color_idx])
 
     ax7.set_title(
         "Performance Summary", color=PALETTE["text"], fontsize=10, pad=6, y=0.98
