@@ -1,6 +1,15 @@
 """
-B3 Multi-Factor Strategy Backtest (Value + Momentum)
+B3 Risk-Parity Momentum Backtest
 =======================================================================
+Strategy: Standard momentum equal-weights all winners. This means highly 
+volatile meme-stocks dominate the portfolio's actual risk profile.
+
+This strategy applies "Inverse Volatility" (Risk Parity) weighting to the 
+momentum portfolio. It selects the Top 10% highest momentum stocks, but 
+allocates capital to them inversely proportional to their 6-month volatility.
+
+A steady, low-volatility compounder will receive 3x the capital allocation 
+of a wild, highly-volatile stock that just happened to spike recently.
 """
 import warnings
 warnings.filterwarnings("ignore")
@@ -27,12 +36,13 @@ LOOKBACK_YEARS = 1
 period_map = {"ME": 12, "QE": 4, "YE": 1, "W": 52, "W-FRI": 52, "W-MON": 52}
 PERIODS_PER_YEAR = period_map.get(REBALANCE_FREQ, 12)
 LOOKBACK_PERIODS = int(LOOKBACK_YEARS * PERIODS_PER_YEAR)
+VOL_LOOKBACK = int(0.5 * PERIODS_PER_YEAR)  # 6-month volatility for weighting
 SKIP_PERIODS = 1 if REBALANCE_FREQ == "ME" else 0
 
 TOP_DECILE = 0.10
 TAX_RATE = 0.15
 SLIPPAGE = 0.001
-START_DATE = "2000-01-01"
+START_DATE = "2012-01-01"
 END_DATE = datetime.today().strftime("%Y-%m-%d")
 INITIAL_CAPITAL = 100_000
 MIN_ADTV = 1_000_000
@@ -47,53 +57,63 @@ def generate_signals(adj_close, close_px, fin_vol):
     raw_close = close_px.resample(REBALANCE_FREQ).last()
     adtv = fin_vol.resample(REBALANCE_FREQ).mean()
 
+    # ── Signal: 12-Month Momentum ──
     log_ret = np.log1p(ret)
     mom_signal = log_ret.shift(SKIP_PERIODS).rolling(LOOKBACK_PERIODS).sum()
+    
     mom_glitch = ((ret > 1.0) | (ret < -0.90)).shift(SKIP_PERIODS).rolling(LOOKBACK_PERIODS).max()
     mom_signal[mom_glitch == 1] = np.nan
     
-    vol_signal = -ret.shift(1).rolling(LOOKBACK_PERIODS).std()
-    vol_glitch = ((ret > 1.0) | (ret < -0.90)).shift(1).rolling(LOOKBACK_PERIODS).max()
-    vol_signal[vol_glitch == 1] = np.nan
-
-    mom_rank = mom_signal.rank(axis=1, pct=True)
-    vol_rank = vol_signal.rank(axis=1, pct=True)
-
-    composite = (mom_rank * 0.5) + (vol_rank * 0.5)
+    # ── Weighting Metric: 6-Month Volatility ──
+    vol_matrix = ret.shift(SKIP_PERIODS).rolling(VOL_LOOKBACK).std()
     
     target_weights = pd.DataFrame(0.0, index=ret.index, columns=ret.columns)
-    start_idx = LOOKBACK_PERIODS + SKIP_PERIODS + 1
+    start_idx = max(LOOKBACK_PERIODS, VOL_LOOKBACK) + SKIP_PERIODS + 1
     
-    prev_sel = set()
+    prev_sel_weights = {}
     
     for i in range(start_idx, len(ret)):
-        sig_row = composite.iloc[i - 1]
+        mom_row = mom_signal.iloc[i - 1]
+        vol_row = vol_matrix.iloc[i - 1]
+        
         adtv_row = adtv.iloc[i - 1]
         raw_close_row = raw_close.iloc[i - 1]
         
         valid_mask = (adtv_row >= MIN_ADTV) & (raw_close_row >= 1.0)
-        valid = sig_row[valid_mask].dropna()
+        valid = mom_row[valid_mask].dropna()
         
         if len(valid) < 5:
-            sel = prev_sel
-        else:
-            n_sel = max(1, int(len(valid) * TOP_DECILE))
-            sel = set(valid.nlargest(n_sel).index)
-            
-        if not sel:
+            # Keep previous weights if we lack data
+            for t, w in prev_sel_weights.items():
+                target_weights.iloc[i, target_weights.columns.get_loc(t)] = w
             continue
             
-        weight_per_stock = 1.0 / len(sel)
-        for t in sel:
-            target_weights.iloc[i, target_weights.columns.get_loc(t)] = weight_per_stock
+        # 1. Select the Winners
+        n_sel = max(1, int(len(valid) * TOP_DECILE))
+        winners = valid.nlargest(n_sel).index
+        
+        # 2. Extract their volatilities
+        winner_vols = vol_row[winners]
+        
+        # If any volatility is 0 or NaN, fill with cross-sectional median to prevent div by zero
+        if winner_vols.isna().any() or (winner_vols == 0).any():
+            median_vol = winner_vols[winner_vols > 0].median()
+            winner_vols = winner_vols.replace(0, np.nan).fillna(median_vol)
             
-        prev_sel = sel
+        # 3. Calculate Inverse Volatility Weights (Risk Parity)
+        inv_vol = 1.0 / winner_vols
+        weights = inv_vol / inv_vol.sum()
+        
+        prev_sel_weights = {}
+        for t, w in weights.items():
+            target_weights.iloc[i, target_weights.columns.get_loc(t)] = w
+            prev_sel_weights[t] = w
 
     return ret, target_weights
 
 def main():
     print("\n" + "=" * 70)
-    print("  B3 NATIVE MULTI-FACTOR BACKTEST (15% CGT)")
+    print("  B3 RISK-PARITY MOMENTUM BACKTEST (15% CGT)")
     print("=" * 70)
 
     adj_close, close_px, fin_vol = load_b3_data(DB_PATH, START_DATE, END_DATE)
@@ -108,7 +128,6 @@ def main():
 
     print("\n🧠 Generating target weights matrix...")
     ret, target_weights = generate_signals(adj_close, close_px, fin_vol)
-    
     ret = ret.fillna(0.0)
 
     print(f"\n🚀 Running generic simulation engine ({REBALANCE_FREQ})...")
@@ -118,7 +137,7 @@ def main():
         initial_capital=INITIAL_CAPITAL,
         tax_rate=TAX_RATE,
         slippage=SLIPPAGE,
-        name="Factor"
+        name="Risk-Parity Mom"
     )
 
     common = result["pretax_values"].index.intersection(ibov_ret.index)
@@ -131,7 +150,7 @@ def main():
     aftertax_ret = value_to_ret(aftertax_val)
     total_tax = result["tax_paid"].sum()
 
-    m_pretax = build_metrics(pretax_ret, "Factor Pre-Tax", PERIODS_PER_YEAR)
+    m_pretax = build_metrics(pretax_ret, "Risk-Parity Pre-Tax", PERIODS_PER_YEAR)
     m_aftertax = build_metrics(aftertax_ret, "After-Tax 15% CGT", PERIODS_PER_YEAR)
     m_ibov = build_metrics(ibov_ret, "IBOV", PERIODS_PER_YEAR)
     m_cdi = build_metrics(cdi_ret, "CDI", PERIODS_PER_YEAR)
@@ -139,7 +158,7 @@ def main():
     display_metrics_table([m_pretax, m_aftertax, m_ibov, m_cdi])
 
     plot_tax_backtest(
-        title=f"Multi-Factor Rank: 50% Mom + 50% Low Vol\nTop {int(TOP_DECILE * 100)}% of R$ {MIN_ADTV / 1_000_000:.0f}M+ ADTV  ·  15% CGT + {SLIPPAGE*100}% Slippage\n{START_DATE[:4]}–{END_DATE[:4]}",
+        title=f"Risk-Parity Momentum  ·  Inverse Vol Weighted\nTop {int(TOP_DECILE * 100)}% Momentum  ·  R$ {MIN_ADTV / 1_000_000:.0f}M+ ADTV  ·  15% CGT + {SLIPPAGE*100}% Slippage\n{START_DATE[:4]}–{END_DATE[:4]}",
         pretax_val=pretax_val,
         aftertax_val=aftertax_val,
         ibov_ret=ibov_ret,
@@ -148,7 +167,7 @@ def main():
         turnover=result["turnover"].loc[common],
         metrics=[m_pretax, m_aftertax, m_ibov, m_cdi],
         total_tax_brl=total_tax,
-        out_path="multifactor_backtest.png",
+        out_path="risk_parity_momentum_backtest.png",
         cdi_ret=cdi_ret
     )
 

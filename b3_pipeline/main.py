@@ -119,8 +119,11 @@ def run_pipeline(
                 ticker_roots = sorted(set(t[:4] for t in tickers if len(t) >= 4))
                 logger.info(f"Fetching data for {len(ticker_roots)} company codes")
 
+                ticker_to_isin = storage.get_ticker_isin_map(conn)
                 corporate_actions, stock_actions = (
-                    b3_corporate_actions.fetch_all_corporate_actions(ticker_roots)
+                    b3_corporate_actions.fetch_all_corporate_actions(
+                        ticker_roots, ticker_to_isin
+                    )
                 )
 
                 if not corporate_actions.empty:

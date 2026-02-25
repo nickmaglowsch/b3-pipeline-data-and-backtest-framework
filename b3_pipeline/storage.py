@@ -296,13 +296,18 @@ def get_all_tickers(conn: sqlite3.Connection) -> List[str]:
     return [row[0] for row in cursor.fetchall()]
 
 
-def get_all_isins(conn: sqlite3.Connection) -> List[str]:
-    """Get all unique ISIN codes from the database."""
+def get_ticker_isin_map(conn: sqlite3.Connection) -> dict:
+    """Get mapping of ticker to most recent ISIN code."""
     cursor = conn.cursor()
-    cursor.execute(
-        "SELECT DISTINCT isin_code FROM prices WHERE isin_code != 'UNKNOWN' ORDER BY isin_code"
-    )
-    return [row[0] for row in cursor.fetchall()]
+    # Find the most recent ISIN for each ticker
+    cursor.execute("""
+        SELECT ticker, isin_code 
+        FROM prices 
+        WHERE isin_code != 'UNKNOWN' 
+        GROUP BY ticker 
+        HAVING MAX(date)
+    """)
+    return {row[0]: row[1] for row in cursor.fetchall()}
 
 
 def get_tickers_by_company_code(

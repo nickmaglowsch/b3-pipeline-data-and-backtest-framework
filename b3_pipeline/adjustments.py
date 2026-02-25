@@ -319,7 +319,7 @@ def compute_dividend_adjustment_factors(
         for j in range(len(dates) - 1, -1, -1):
             row_date = dates[j]
 
-            while div_idx >= 0 and div_factors_df.iloc[div_idx]["ex_date"] <= row_date:
+            while div_idx >= 0 and div_factors_df.iloc[div_idx]["ex_date"] > row_date:
                 last_cumulative *= div_factors_df.iloc[div_idx]["factor"]
                 div_idx -= 1
 
