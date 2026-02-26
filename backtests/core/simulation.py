@@ -24,6 +24,13 @@ def _apply_returns(
                 r = 0.0
 
         r = min(max(r, min_ret), max_ret)
+
+        # If it is a short position (negative current value), apply a forced Stop Loss.
+        # If the stock goes up more than 50% in a single period, the broker forcefully
+        # closes the short position. We simulate this by hard-capping the short loss.
+        if pos["current_value"] < 0 and r > 0.50:
+            r = 0.50
+
         pos["current_value"] *= 1.0 + r
 
 
@@ -53,14 +60,29 @@ def _compute_tax(
         pos = positions[t]
 
         # Calculate what percentage of the position is being sold
-        if pos["current_value"] <= 0:
+        if pos["current_value"] == 0:
             continue
 
-        fraction_sold = min(1.0, amount_sold / pos["current_value"])
+        fraction_sold = min(1.0, amount_sold / abs(pos["current_value"]))
 
         # Calculate the proportional PnL for this sale
+        # If short, cost_basis is negative. Covering a short means buying back the shares.
+        # Say cost basis is -100. Current value is -80 (it dropped, we made money).
+        # We sell/cover all 80. amount_sold = 80.
+        # Pnl = cost_basis - current_value = (-100) - (-80) = -20
+        # Actually standard long: amount_sold=80, cost=100 -> PnL = 80-100 = -20.
+        # So PnL is ALWAYS the difference between extracted value and cost basis.
+
         cost_of_sold_portion = pos["cost_basis"] * fraction_sold
-        pnl = amount_sold - cost_of_sold_portion
+
+        if pos["current_value"] > 0:
+            # Long position
+            pnl = amount_sold - cost_of_sold_portion
+        else:
+            # Short position. We spent 'amount_sold' cash to cover.
+            # cost_basis is negative (the cash we originally received).
+            # So PnL = abs(cost_basis) - amount_sold (cash spent)
+            pnl = abs(cost_of_sold_portion) - amount_sold
 
         # Receita Federal does not allow deducting margin interest/short losses from capital gains
         if ignore_short_losses and cost_of_sold_portion < 0 and pnl < 0:
@@ -120,17 +142,32 @@ def _execute_rebalance(
 
         diff = target_val - current_val
 
-        # If we need to sell (or short more)
+        # If diff is negative, we want less exposure than we currently have.
+        # This means either SELLING a long position, or SHORTING MORE (increasing a negative position).
         if diff < -0.01:
             sell_amount = abs(diff)
-            sells[t] = sell_amount
-            turnover_cash += sell_amount
+            # If we are initiating a new short, it goes straight to buys/deploy logic
+            # (we don't "sell" an asset we don't own to calculate taxes, we just allocate negative capital)
+            if t not in positions and target_w < 0:
+                buys[t] = diff  # This will be negative capital deployment
+                turnover_cash += sell_amount
+            else:
+                sells[t] = sell_amount
+                turnover_cash += sell_amount
 
-        # If we need to buy (or cover short)
+        # If diff is positive, we want more exposure than we currently have.
+        # This means either BUYING more of a long position, or COVERING a short position.
         elif diff > 0.01:
             buy_amount = diff
-            buys[t] = buy_amount
-            turnover_cash += buy_amount
+
+            # If we are covering a short back towards 0, that is technically a "sale" (closing an active position)
+            # which needs to be run through the tax engine!
+            if t in positions and positions[t]["current_value"] < 0:
+                sells[t] = buy_amount  # To trigger tax on the covered portion
+                turnover_cash += buy_amount
+            else:
+                buys[t] = buy_amount
+                turnover_cash += buy_amount
 
     # 2. Calculate Tax on Sales
     tax_paid, loss_carryforward = _compute_tax(
@@ -146,16 +183,25 @@ def _execute_rebalance(
     # 3. Update the Ledger
     for t, sell_amount in sells.items():
         pos = positions[t]
-        fraction_sold = (
-            min(1.0, sell_amount / pos["current_value"])
-            if pos["current_value"] > 0
-            else 1.0
-        )
+
+        # Determine the fraction sold based on whether it is a long or short position
+        if pos["current_value"] > 0:
+            fraction_sold = min(1.0, sell_amount / pos["current_value"])
+        elif pos["current_value"] < 0:
+            # We are covering a short. "sell_amount" is positive here representing the cash required to cover.
+            fraction_sold = min(1.0, sell_amount / abs(pos["current_value"]))
+        else:
+            fraction_sold = 1.0
 
         if fraction_sold >= 0.999:
             del positions[t]
         else:
-            pos["current_value"] -= sell_amount
+            if pos["current_value"] > 0:
+                pos["current_value"] -= sell_amount
+            else:
+                # Covering a short moves current value closer to 0
+                pos["current_value"] += sell_amount
+
             pos["cost_basis"] -= pos["cost_basis"] * fraction_sold
 
     # Deploy buys (after reducing them proportionately by cash_drag if we are fully invested)
