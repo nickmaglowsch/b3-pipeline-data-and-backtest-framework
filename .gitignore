@@ -1,2 +1,2 @@
 # Automatically created by ruff.
-/data/*
+/data/**.sqlite
