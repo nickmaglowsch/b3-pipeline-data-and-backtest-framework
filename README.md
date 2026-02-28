@@ -183,6 +183,84 @@ ORDER BY date DESC
 LIMIT 10;
 ```
 
+## Backtesting Framework
+
+The `backtests/` directory contains a full quantitative backtesting framework built on top of the data pipeline. It includes 30+ individual strategy backtests, portfolio optimization tools, and research utilities.
+
+### Core Modules (`backtests/core/`)
+
+| Module | Description |
+|--------|-------------|
+| `data.py` | Loads B3 data from SQLite + downloads CDI (BCB API) and IBOV (Yahoo Finance) |
+| `simulation.py` | Tax-aware portfolio simulator (15% CGT, loss carryforward, slippage, R$20K monthly sales exemption) |
+| `metrics.py` | Performance metrics: Sharpe, Calmar, max drawdown, annualized return/volatility |
+| `plotting.py` | Standardized dark-theme tear sheets and equity curve plots |
+| `strategy_returns.py` | Runs all 8 core strategies in one call, returns a clean DataFrame of monthly after-tax returns |
+| `portfolio_opt.py` | Portfolio weight functions: equal-weight, inverse-vol, ERC, HRP, rolling Sharpe, regime-conditional |
+| `param_scanner.py` | Generic 2D parameter sweep framework with heatmap visualization |
+
+### Quick Start
+
+```bash
+# Install backtesting dependencies
+pip install -r requirements.txt
+
+# Run the portfolio comparison dashboard (all 7 optimization methods)
+cd backtests && python portfolio_compare_all.py
+
+# Run sub-period stability analysis
+cd backtests && python portfolio_stability_analysis.py
+
+# Run parameter sensitivity heatmaps
+cd backtests && python param_sensitivity_analysis.py
+```
+
+### Building a Custom Portfolio
+
+```python
+from core.strategy_returns import build_strategy_returns
+from core.portfolio_opt import hrp_weights, compute_portfolio_returns
+from core.metrics import build_metrics
+
+# Load all 8 strategy return streams + IBOV/CDI benchmarks
+returns_df, sim_results, regime_signals = build_strategy_returns()
+
+# Select liquid strategies (ADTV >= R$1M)
+liquid = [c for c in returns_df.columns if c not in ("IBOV", "CDI", "SmallcapMom")]
+
+# Build an HRP-weighted portfolio
+port_ret, weights_df = compute_portfolio_returns(
+    returns_df, liquid, lambda w: hrp_weights(w, 36)
+)
+
+# Check performance
+print(build_metrics(port_ret, "My HRP Portfolio", 12))
+```
+
+### Available Strategies
+
+**Stock-selection signals:** Momentum (12M), Smooth Momentum / Sharpe, Low Volatility, MultiFactor (mom + low-vol), Research MultiFactor (5 factors + regime), Smallcap Momentum, Anti-Lottery, Frog-in-the-Pan, Volume Breakout, Mean Reversion, Dividend Yield, and more.
+
+**Regime/allocation filters:** COPOM easing/tightening, IBOV trend (10M SMA), IBOV volatility percentile, dual momentum, global flight (IBOV vs IVVB11).
+
+**Portfolio optimization methods:** Equal Weight, Inverse Volatility, Equal Risk Contribution (ERC), Hierarchical Risk Parity (HRP), Rolling Sharpe, Regime-Conditional, and Combined (regime budget + rolling Sharpe within equity).
+
+### Research Scripts
+
+| Script | Description |
+|--------|-------------|
+| `compare_all.py` | Side-by-side comparison of all individual strategies |
+| `correlation_matrix.py` | Strategy return correlation heatmap |
+| `portfolio_risk_parity_backtest.py` | Equal-weight vs inverse-vol vs ERC |
+| `portfolio_hrp_backtest.py` | Hierarchical Risk Parity + dendrogram |
+| `portfolio_dynamic_backtest.py` | Rolling Sharpe, regime, and combined dynamic allocation |
+| `portfolio_compare_all.py` | All 7 portfolio methods: 4-panel dashboard + CSV export |
+| `portfolio_stability_analysis.py` | Sub-period metrics (4 eras) + rolling 36-month Sharpe |
+| `param_sensitivity_analysis.py` | 2D parameter sweep heatmaps for key strategies |
+| `seasonal_effects_backtest.py` | Turn-of-month, monthly seasonality, Dec/Jan, Sell-in-May |
+| `earnings_proxy_backtest.py` | Volume-confirmed momentum around B3 reporting windows |
+| `sector_rotation_backtest.py` | Sector-level momentum with heuristic ticker classification |
+
 ## License
 
 MIT License
