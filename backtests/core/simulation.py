@@ -117,6 +117,9 @@ def _execute_rebalance(
     slippage: float,
     tax_rate: float,
     loss_carryforward: float,
+    monthly_sales_exemption: float = 0.0,
+    defer_tax: bool = False,
+    pending_tax_payment: float = 0.0,
 ) -> Tuple[float, float, float, float]:
     """
     Execute a strict rebalance to match target weights.
@@ -170,15 +173,29 @@ def _execute_rebalance(
                 turnover_cash += buy_amount
 
     # 2. Calculate Tax on Sales
-    tax_paid, loss_carryforward = _compute_tax(
-        sells, positions, loss_carryforward, tax_rate
+    # If total sell proceeds <= exemption threshold, skip tax entirely.
+    # Under Brazilian law, exempt months don't consume loss carryforward.
+    exempt = (
+        monthly_sales_exemption > 0
+        and sum(sells.values()) <= monthly_sales_exemption
     )
+
+    if exempt:
+        tax_paid = 0.0
+    else:
+        tax_paid, loss_carryforward = _compute_tax(
+            sells, positions, loss_carryforward, tax_rate
+        )
 
     # We must pay tax out of the cash we raised. If there isn't enough cash,
     # we simulate an automatic drag on the portfolio NAV.
     # We also deduct slippage from all trades.
     total_slippage = turnover_cash * slippage
-    cash_drag = tax_paid + total_slippage
+    if defer_tax:
+        # Don't pay current tax now; pay last month's deferred tax instead
+        cash_drag = total_slippage + pending_tax_payment
+    else:
+        cash_drag = tax_paid + total_slippage
 
     # 3. Update the Ledger
     for t, sell_amount in sells.items():
@@ -235,6 +252,8 @@ def run_simulation(
     tax_rate: float = 0.15,
     slippage: float = 0.0,
     name: str = "Strategy",
+    monthly_sales_exemption: float = 0.0,
+    defer_tax: bool = False,
 ) -> dict:
     """
     Run a generic, institutional-grade portfolio simulation.
@@ -255,6 +274,7 @@ def run_simulation(
     at_pos = {}  # After-tax ledger
 
     loss_carryforward = 0.0
+    pending_tax = 0.0
 
     pretax_values, aftertax_values = [], []
     tax_paid_list, loss_cf_list, turnover_list, dates = [], [], [], []
@@ -322,7 +342,14 @@ def run_simulation(
             slippage=slippage,
             tax_rate=tax_rate,
             loss_carryforward=loss_carryforward,
+            monthly_sales_exemption=monthly_sales_exemption,
+            defer_tax=defer_tax,
+            pending_tax_payment=pending_tax if defer_tax else 0.0,
         )
+
+        # Update pending tax for next period
+        if defer_tax:
+            pending_tax = tax_paid
 
         pt_final_nav = sum(p["current_value"] for p in pt_pos.values())
         at_final_nav = sum(p["current_value"] for p in at_pos.values())
@@ -334,6 +361,10 @@ def run_simulation(
         loss_cf_list.append(loss_carryforward)
         turnover_list.append(turnover)
         dates.append(date)
+
+    # Deduct any remaining deferred tax from final NAV
+    if defer_tax and pending_tax > 0:
+        aftertax_values[-1] -= pending_tax
 
     idx = pd.DatetimeIndex(dates)
     return {
