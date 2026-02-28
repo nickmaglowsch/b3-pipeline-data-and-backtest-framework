@@ -1,102 +1,137 @@
-# Code Review Report
+# Code Review Report -- Streamlit Management UI
 
 ## Summary
 
-The implementation covers all 10 PRD tasks across three phases (portfolio optimization, robustness testing, new signal discovery). Core algorithms are implemented correctly, conventions are mostly followed, and the code is well-structured. **The implementation is largely ready to ship**, subject to a handful of issues -- one critical (API type annotation mismatch), several important (private import leakage, heavy code duplication, missing `has_glitch` filter in LowVol), and some minor items.
+The implementation is structurally sound and covers the vast majority of PRD requirements across all four modules plus the two cross-cutting concerns (job runner, strategy plugins). The code is well-organized, follows established project conventions, and demonstrates thoughtful architecture decisions. However, there are a handful of bugs that will cause runtime crashes, one security concern, and several behavioral discrepancies versus the legacy backtest scripts that should be addressed before shipping.
 
 ## PRD Compliance
 
 | # | Requirement | Status | Notes |
 |---|-------------|--------|-------|
-| 1 | Strategy Return Extraction Module (`core/strategy_returns.py`) | ✅ Complete | All 8 strategies extracted from compare_all.py. Clean public API via `build_strategy_returns()`. SmallcapMom ADTV caveat properly noted. |
-| 2 | Risk Parity Portfolio (inverse-var + ERC) | ✅ Complete | Both naive inverse-vol and full ERC implemented in `core/portfolio_opt.py`. Solver uses SLSQP with proper fallback. Regularization term added. |
-| 3 | HRP Portfolio (Lopez de Prado) | ✅ Complete | Full pipeline: correlation -> distance -> Ward linkage -> quasi-diag -> recursive bisection. Dendrogram visualization included. |
-| 4 | Dynamic Allocation Portfolio | ✅ Complete | Three modes: rolling Sharpe, regime-conditional, combined. Explores multiple Sharpe lookbacks (6, 12, 24). Turnover analysis included. |
-| 5 | Portfolio Comparison Dashboard | ✅ Complete | `portfolio_compare_all.py` runs all 7 methods side-by-side. 4-panel plot (equity curves, drawdowns, rolling Sharpe, metrics table), correlation heatmap, CSV export. |
-| 6 | Parameter Sensitivity Scanner | ✅ Complete | `core/param_scanner.py` framework + `param_sensitivity_analysis.py` driver. 4 strategies scanned (MultiFactor, COPOM Easing, MomSharpe, Res.MultiFactor). Heatmaps with robust zone identification. |
-| 7 | Sub-Period Stability Analysis | ✅ Complete | 4 sub-periods (2005-2010, 2010-2015, 2015-2020, 2020-present). Consistency scores, rolling 36-month Sharpe with stress-period shading, CSV export. |
-| 8 | Seasonal/Calendar Effects | ✅ Complete | 4 calendar anomalies tested (TOM, monthly seasonality, Dec/Jan, Sell-in-May). Both MF-stock and IBOV variants. Monthly seasonality statistics with t-stats. |
-| 9 | Earnings Momentum Proxy | ✅ Complete | 3 variants (volume-confirmed momentum, post-earnings drift 3-month hold, earnings+COPOM regime). Uses B3 reporting months {3,4,5,8,11}. |
-| 10 | Sector Rotation | ✅ Complete | Heuristic ticker-to-sector mapping (first 4 chars). 3 variants (sector momentum, sector+MF stock selection, sector+COPOM). Sector annual return heatmap. |
-| -- | scipy in requirements.txt | ✅ Complete | `scipy>=1.10.0` added. |
-| -- | Backtest period 2005-present | ✅ Complete | All scripts use `START = "2005-01-01"` and `END = datetime.today()`. |
-| -- | Monthly rebalance (ME) | ✅ Complete | All strategies use `FREQ = "ME"`. |
-| -- | Tax-aware (15% CGT, 0.1% slip, R$20K exemption) | ✅ Complete | All simulation calls pass `tax_rate=0.15`, `slippage=0.001`, `monthly_sales_exemption=20_000`. |
-| -- | Long-only, liquid universe (ADTV >= R$1M, price >= R$1) | ✅ Complete | All scripts filter on `MIN_ADTV = 1_000_000` and `MIN_PRICE = 1.0`. SmallcapMom ADTV exception noted and handled. |
-| -- | Plots use PALETTE / plotting conventions | ✅ Complete | All plotting code uses `PALETTE` dict and `fmt_ax()` from `core/plotting.py`. Dark theme consistently applied. |
-| -- | Scripts runnable from backtests/ directory | ✅ Complete | All scripts have `sys.path` manipulation pattern matching existing convention. All have `if __name__ == "__main__"` blocks. |
+| **Module 1: Data Pipeline Management** | | | |
+| 1.1 | View database summary stats (total records, tickers, date range, tables) | Complete | `ui/pages/1_pipeline.py` lines 46-56 + `ui/components/metrics_table.py:render_db_stats()` |
+| 1.2 | Trigger pipeline run with options: rebuild, year, skip corporate actions | Complete | `ui/pages/1_pipeline.py` lines 93-147. Form with all three options. |
+| 1.3 | View raw data files in `data/raw/` with sizes and dates | Complete | `ui/pages/1_pipeline.py` lines 61-71 + `pipeline_service.get_raw_files()` |
+| 1.4 | Real-time log streaming during pipeline execution | Complete | `ui/components/log_stream.py` + `ui/services/job_runner.py` |
+| 1.5 | View sample data from each table (prices, corporate_actions, stock_actions, detected_splits) | Complete | `ui/pages/1_pipeline.py` lines 73-89 with tabs per table |
+| **Module 2: Backtest Runner** | | | |
+| 2.1 | Browse registered strategies from the plugin registry | Complete | `ui/pages/2_backtest_runner.py` lines 54-68 |
+| 2.2 | View strategy description, default parameters, and parameter schema | Complete | Line 72 shows description; parameter form shows all specs |
+| 2.3 | Edit all parameters via dynamically generated form | Complete | `ui/components/parameter_form.py` handles int, float, str, date, choice types |
+| 2.4 | Run selected strategy with custom parameters | Complete | Lines 102-108 submit to JobRunner |
+| 2.5 | Real-time log streaming during execution | Complete | Line 115 calls `render_log_stream` |
+| 2.6 | Display results inline: Plotly tear sheet, metrics table | Complete | Lines 132-180 with tabbed equity/drawdown/tax/metrics views |
+| 2.7 | Save results to disk for later viewing in dashboard | Complete | Lines 121-127 use `ResultStore.save()` |
+| **Module 3: Results Dashboard** | | | |
+| 3.1 | Browse all saved backtest results (UI + legacy) | Complete | `ui/pages/3_dashboard.py` lines 46-67 + `ResultStore.list_results()` |
+| 3.2 | View individual result: Plotly tear sheet, metrics table, parameter snapshot | Complete | Lines 121-183 with 5-tab view |
+| 3.3 | Compare multiple strategies side-by-side | Complete | Lines 186-238: equity overlay + metrics comparison |
+| 3.4 | Correlation matrix heatmap of strategy returns | Complete | Lines 222-234 |
+| 3.5 | Display pre-existing PNG results from legacy runs as fallback | Complete | Lines 125-129 for legacy PNG display; `ResultStore._discover_legacy_results()` |
+| **Module 4: ML Research Viewer** | | | |
+| 4.1 | Trigger research pipeline run with streaming logs | Complete | `ui/pages/4_research.py` lines 125-148 |
+| 4.2 | View feature importance rankings (interactive bar charts) | Complete | Lines 159-183 with model/target selectors |
+| 4.3 | View model performance metrics (accuracy, AUC, precision, recall, F1) | Complete | Lines 187-213 |
+| 4.4 | View robustness comparison across targets | Complete | Lines 234-238 (PNG display) |
+| 4.5 | Display research summary report | Complete | Lines 218-223 |
+| **Cross-cutting: Job Runner** | | | |
+| 5.1 | Execute Python functions in background threads | Complete | `ui/services/job_runner.py` |
+| 5.2 | Capture stdout/stderr in real-time via queue | Complete | `_CapturingStream` + `_RedirectingStream` |
+| 5.3 | Provide status (pending, running, completed, failed) and progress | Partial | Status is tracked; **progress percentage is not implemented** |
+| 5.4 | Store job results for retrieval | Complete | `job.result` field |
+| 5.5 | Allow only one job of each type at a time | Complete | Lines 164-169: returns existing job ID if already running |
+| **Cross-cutting: Strategy Plugin Architecture** | | | |
+| 6.1 | Abstract base class StrategyBase with name, description, get_default_parameters, get_parameter_schema, generate_signals | Complete | `backtests/core/strategy_base.py`. Note: method is `get_parameter_specs()` instead of PRD's `get_parameter_schema()` but functionally equivalent. |
+| 6.2 | Registry that discovers strategies from `backtests/strategies/` | Complete | `backtests/core/strategy_registry.py` with auto-discovery |
+| 6.3 | Shared data loader that prepares common DataFrames once per session | Complete | `backtests/core/shared_data.py` + `@st.cache_resource` in backtest_service |
+| 6.4 | Legacy scripts remain runnable from CLI unchanged | Complete | All 43 `*_backtest.py` files untouched |
+| **Infrastructure** | | | |
+| 7.1 | Streamlit + Plotly added to requirements.txt | Complete | `streamlit>=1.30.0` and `plotly>=5.18.0` added |
+| 7.2 | Directory structure matches PRD | Complete | All specified files present |
+| 7.3 | .gitignore updated for results/ and .streamlit/ | Complete | `.gitignore` updated |
 
-**Compliance Score**: 10/10 tasks fully met + all 7 technical requirements met.
+**Compliance Score**: 26/27 requirements fully met, 1 partial (progress percentage not implemented in job runner)
 
 ## Issues Found
 
 ### Critical (must fix before shipping)
 
-- **`/Users/nickmaglowsch/person-projects/b3-data-pipeline/backtests/core/strategy_returns.py:416`**: The return type annotation is `tuple[pd.DataFrame, dict]` (2-tuple) but the function actually returns a 3-tuple `(returns_df, sim_results, regime_signals)` on line 603. The docstring at lines 440-449 correctly describes 3 return values, but the type hint is wrong. Every caller unpacks 3 values, so this will not crash at runtime, but it will confuse static analysis tools and future maintainers. The fix is trivial: change the annotation to `tuple[pd.DataFrame, dict, dict]`.
+- **`/Users/nickmaglowsch/person-projects/b3-data-pipeline/ui/services/backtest_service.py:101`**: Format string crash. `{metrics[1].get('Sharpe', 'N/A'):.2f}` will raise `ValueError: Unknown format code 'f' for object of type 'str'` if the `'Sharpe'` key is missing from the metrics dict. The fallback `'N/A'` is a string and cannot be formatted with `:.2f`. Fix: either remove the format spec or handle the case, e.g. `f"... {metrics[1].get('Sharpe', 0):.2f}"` or use a conditional.
+
+- **`/Users/nickmaglowsch/person-projects/b3-data-pipeline/ui/pages/1_pipeline.py:127-135`**: Rebuild confirmation logic is broken. When `submitted` is `True` and `rebuild` is `True`, the code calls `st.warning()` and then `st.button("Confirm Rebuild")`. But because Streamlit reruns the entire script on every interaction, the `submitted` variable will be `False` on the next rerun (the form was already submitted), so the confirmation button will never be visible long enough to click. The confirmation flow needs to use `st.session_state` to persist the "rebuild requested" state across reruns.
+
+- **`/Users/nickmaglowsch/person-projects/b3-data-pipeline/ui/components/log_stream.py:53-59`**: Blocking while-loop in Streamlit. The `while runner.get_active_job(job_type).status == JobStatus.RUNNING` loop with `time.sleep(0.5)` will block the Streamlit script thread. While the intention is to show live logs, this will prevent the page from responding to user interactions and may cause Streamlit to appear frozen. Modern Streamlit idiom is to use `st.rerun()` with session state, or use `st.fragment` (Streamlit >=1.33) for partial reruns. On Streamlit 1.50.0 the `log_container.code()` updates inside the `while` loop may work visually because they update `st.empty()`, but the entire page is unresponsive during this time (no sidebar navigation, no other interactions).
 
 ### Important (should fix)
 
-- **`/Users/nickmaglowsch/person-projects/b3-data-pipeline/backtests/portfolio_hrp_backtest.py:39`**, **`/Users/nickmaglowsch/person-projects/b3-data-pipeline/backtests/portfolio_dynamic_backtest.py:41`**, **`/Users/nickmaglowsch/person-projects/b3-data-pipeline/backtests/portfolio_compare_all.py:53`**, **`/Users/nickmaglowsch/person-projects/b3-data-pipeline/backtests/portfolio_stability_analysis.py:54`**: These files import `_equal_weights` and `_REGIME_EQUITY_BUDGET` from `core/portfolio_opt`. These are private names (prefixed with underscore) indicating they are internal implementation details. Importing private symbols from a module breaks encapsulation and makes future refactoring fragile. Either promote them to public API (remove the underscore) or add thin public wrappers. The module has no `__all__` list, so this is not mechanically enforced, but it is a convention violation.
+- **`/Users/nickmaglowsch/person-projects/b3-data-pipeline/ui/services/backtest_service.py:75-82`**: Missing `monthly_sales_exemption` parameter. The `run_simulation()` call does not pass `monthly_sales_exemption`. Some legacy scripts use `monthly_sales_exemption=20_000` (the R$20K Brazilian tax exemption for small monthly sales). The UI backtests will produce different after-tax results than the legacy CLI runs. Either add a `monthly_sales_exemption` ParameterSpec to the common parameters, or document this as an intentional deviation.
 
-- **Massive code duplication of `compute_portfolio_returns()` and `compute_regime_portfolio()`**: These two functions are copy-pasted nearly identically into 5 different files:
-  - `portfolio_risk_parity_backtest.py` (lines 45-84)
-  - `portfolio_hrp_backtest.py` (lines 49-69)
-  - `portfolio_dynamic_backtest.py` (lines 52-82)
-  - `portfolio_compare_all.py` (lines 65-86)
-  - `portfolio_stability_analysis.py` (lines 80-92)
+- **`/Users/nickmaglowsch/person-projects/b3-data-pipeline/ui/services/pipeline_service.py:119`**: SQL injection via f-string. `f"SELECT * FROM {table_name} LIMIT {limit}"` injects `table_name` directly into SQL. While current callers only pass hardcoded table names, the function signature accepts arbitrary strings. Should validate `table_name` against a whitelist (e.g., `ALLOWED_TABLES = {"prices", "corporate_actions", "stock_actions", "detected_splits"}`).
 
-  Similarly, `compute_regime_portfolio()` is duplicated across `portfolio_dynamic_backtest.py`, `portfolio_compare_all.py`, and `portfolio_stability_analysis.py`. These should be consolidated into `core/portfolio_opt.py` or a new `core/portfolio_backtest.py` helper module. This is the same code duplication anti-pattern that `strategy_returns.py` was created to solve for individual strategies.
+- **`/Users/nickmaglowsch/person-projects/b3-data-pipeline/ui/services/pipeline_service.py:31-38`**: Import inside cached function. `from b3_pipeline.storage import get_summary_stats` is called inside `get_db_stats()` which is decorated with `@st.cache_data(ttl=60)`. The import itself will execute every time the cache expires. More importantly, `get_summary_stats(conn)` is called, but the `conn` object is created before the import. If the import fails, the function falls through to `_manual_stats(conn)` which is good, but the try/except catches `ImportError` only -- if `get_summary_stats` raises a different exception, it propagates unhandled. Should catch `Exception` or be more explicit.
 
-- **`/Users/nickmaglowsch/person-projects/b3-data-pipeline/backtests/core/strategy_returns.py:328`**: The `_run_low_vol` function uses `vol_sig = -ret.rolling(_LOOKBACK).std()` without `shift(1)`. This matches the original `compare_all.py` code (line 300), so it is a faithful extraction. However, it is **inconsistent** with the MultiFactor and MomSharpe strategies in the same module which all use `shift(1)` on their signals. This means LowVol uses the current period's volatility to make the current period's allocation decision -- a mild lookahead issue. The PRD does not specify fixing existing strategies, so this is not a compliance issue, but it should be noted for future cleanup.
+- **`/Users/nickmaglowsch/person-projects/b3-data-pipeline/ui/pages/4_research.py:41-64`**: Duplicated PALETTE dict and `_apply_dark_theme` function. These are already defined in `ui/components/charts.py`. The research page re-declares them locally, creating maintenance burden and potential drift. Should import from `ui.components.charts`.
 
-- **`/Users/nickmaglowsch/person-projects/b3-data-pipeline/backtests/core/strategy_returns.py:519-523`**: The comment on line 519 says `vol_60d = ret.rolling(5).std()  # approximation: 5 weekly periods` but we are using monthly data (`FREQ = "ME"`), so `rolling(5)` is 5 months, not 5 weeks. The comment is misleading. Similarly, `vol_20d = ret.rolling(2).std()` is 2 monthly periods. The same misleading pattern exists in `param_sensitivity_analysis.py` lines 119-123. This matches the original `compare_all.py` code, but the comment in `strategy_returns.py` adds confusion where there was none before.
+- **`/Users/nickmaglowsch/person-projects/b3-data-pipeline/backtests/core/strategy_registry.py:54-68`**: Silent exception swallowing during discovery. When a strategy module fails to import or instantiate, the exception is caught with bare `except Exception: continue/pass`. This makes debugging registration failures extremely difficult. Should at minimum log a warning.
 
-- **`/Users/nickmaglowsch/person-projects/b3-data-pipeline/backtests/seasonal_effects_backtest.py:213-221`**: The TOM (Turn-of-Month) strategy is described as capturing the turn-of-month effect, but the actual implementation at the monthly level just holds MultiFactor equities every month. The comment on line 209 acknowledges "TOM days dominate monthly returns" but then just holds equities all months. This does not actually isolate the TOM effect -- it is effectively identical to MultiFactor. The daily-level analysis (computing `tom_ibov_monthly_ret` vs `non_tom_ibov_monthly_ret`) is informative but disconnected from the actual strategy being simulated. The PRD asked for a turn-of-month strategy, not just analysis.
+- **`/Users/nickmaglowsch/person-projects/b3-data-pipeline/ui/services/backtest_service.py:20-27`**: `@st.cache_resource` used for mutable DataFrames. The `_get_shared_data_cached` function returns a dict of pandas DataFrames. `@st.cache_resource` does not copy the return value -- all callers share the same object instances. While the current strategy implementations correctly call `.copy()` on `ret`, a future strategy that accidentally mutates a shared DataFrame (e.g., `shared_data["ret"]["NEW_COL"] = ...` without copying first) will corrupt the cache for all subsequent callers. Consider using `@st.cache_data` (which serializes/deserializes, creating independent copies) or adding a deep-copy wrapper.
+
+- **`/Users/nickmaglowsch/person-projects/b3-data-pipeline/ui/services/result_store.py:22-23`**: Module-level side effect. `RESULTS_DIR.mkdir(exist_ok=True)` executes at import time, creating a `results/` directory whenever any module imports `result_store`. This is a side effect that can surprise users. Should be deferred to first use (e.g., inside `save()`).
 
 ### Minor (nice to fix)
 
-- **`/Users/nickmaglowsch/person-projects/b3-data-pipeline/backtests/core/portfolio_opt.py:101-106`**: In `equal_risk_contribution_weights()`, the risk contribution formula uses `rc = w * marginal / np.sqrt(port_var)`. The standard ERC formulation defines RC_i as `w_i * (Sigma @ w)_i / sigma_p` which matches this code. However, the docstring at line 76 says `RC_i = w_i * (Sigma @ w)_i / sqrt(w' Sigma w)` which is redundant with the code. This is fine. What is worth noting is that the objective function target on line 111 is `target = rc.sum() / n`, which is the mean risk contribution. This is correct for the ERC objective.
+- **`/Users/nickmaglowsch/person-projects/b3-data-pipeline/run_ui.py:11`**: `import sys` is unused. Remove the dead import.
 
-- **`/Users/nickmaglowsch/person-projects/b3-data-pipeline/backtests/earnings_proxy_backtest.py:124-126`**: The `prev_month` calculation `date.month - 1 if date.month > 1 else 12` does not account for year boundary correctly in a conceptual sense. For January dates, it maps to December. This is used to check if the previous month was a reporting month. Since this is just a month number check (not date arithmetic), the logic is functionally correct, but it could be more readable.
+- **`/Users/nickmaglowsch/person-projects/b3-data-pipeline/ui/pages/3_dashboard.py:224`**: `import numpy as np` inside a conditional block. Should be at the top of the file with other imports.
 
-- **`/Users/nickmaglowsch/person-projects/b3-data-pipeline/backtests/sector_rotation_backtest.py:181`**: The sector equal-weighted returns use `ret[sector_tickers].mean(axis=1)` without any liquidity filter. This means sector return computations include illiquid stocks. The per-stock selection later applies liquidity filters, so this only affects the *sector momentum signal*, not the actual portfolio holdings. Still, sector momentum ranking could be noisy due to illiquid tickers in the sector return calculation.
+- **`/Users/nickmaglowsch/person-projects/b3-data-pipeline/ui/pages/3_dashboard.py:243`**: `from pathlib import Path` inside `st.expander`. Should be at the top of the file.
 
-- **`/Users/nickmaglowsch/person-projects/b3-data-pipeline/backtests/core/param_scanner.py:35-42`**: The fallback PALETTE definition (lines 36-42) is a defensive pattern that handles the case where `core.plotting` cannot be imported. However, the incomplete fallback (missing keys like `"pretax"`, `"aftertax"`, etc.) means that if plotting.py genuinely fails to import, the param_scanner would still crash on any code that uses the missing keys. This is a minor robustness concern.
+- **`/Users/nickmaglowsch/person-projects/b3-data-pipeline/ui/pages/1_pipeline.py:65`**: `import pandas as pd` inside `st.expander`. Should be at the top of the file.
 
-- **`/Users/nickmaglowsch/person-projects/b3-data-pipeline/backtests/portfolio_risk_parity_backtest.py:75`**: In `compute_portfolio_returns`, the window passed to `weight_fn` is `sub_df.iloc[:i]` (all history up to but not including row i). This means the weight function receives the full history, but the weight functions like `inverse_vol_weights()` and `equal_risk_contribution_weights()` internally call `.tail(lookback)` to use only the trailing window. This is correct behavior but means the caller passes more data than needed. Not a bug, just slightly wasteful.
+- **`/Users/nickmaglowsch/person-projects/b3-data-pipeline/ui/components/charts.py:300`**: `format=[None] + [",.2f"] * (len(df.columns) - 1)` assumes the first column is always non-numeric. If the metrics dict doesn't have a "Strategy" column first, this format specification will be wrong.
 
-- **No unit tests**: None of the new core modules (`strategy_returns.py`, `portfolio_opt.py`, `param_scanner.py`) have unit tests. Given that these are numerical optimization routines, even basic smoke tests (e.g., "weights sum to 1.0", "HRP produces valid output for a known correlation matrix") would add significant confidence.
+- **`/Users/nickmaglowsch/person-projects/b3-data-pipeline/ui/services/pipeline_service.py:118-120`**: Connection not closed in exception case. If `pd.read_sql_query` raises, the `conn.close()` on line 120 will not execute. Should use a `try/finally` or context manager.
+
+- **`/Users/nickmaglowsch/person-projects/b3-data-pipeline/backtests/core/shared_data.py:92-96`**: Misleading variable names persist from legacy code. `vol_60d = ret.rolling(5).std()` computes a 5-period rolling std on monthly data, which is ~5 months, not 60 days. Similarly `vol_20d = ret.rolling(2).std()` is a 2-month rolling std, not 20 days. These names are inherited from the original codebase (documented in memory), but propagating them into new shared_data infrastructure cements the confusion.
+
+- **`/Users/nickmaglowsch/person-projects/b3-data-pipeline/ui/components/metrics_table.py:65`**: Type annotation `specs: list = None` should be `specs: list | None = None` or `Optional[list]` for correctness.
+
+- **`/Users/nickmaglowsch/person-projects/b3-data-pipeline/backtests/strategies/copom_easing.py:61`**: `bool(is_easing.iloc[i])` can raise if `is_easing.iloc[i]` is NaN. Should use `pd.notna(is_easing.iloc[i]) and bool(is_easing.iloc[i])` or handle NaN explicitly. Same pattern in `cdi_ma200.py:61`, `research_multifactor.py:72`, `adaptive_low_vol.py:95`.
 
 ## What Looks Good
 
-- **Clean separation of concerns**: The `strategy_returns.py` module cleanly separates signal generation from portfolio construction, eliminating the massive code duplication that existed across `compare_all.py`, `correlation_matrix.py`, and `portfolio_low_corr_backtest.py`. The shared data precomputation pattern is well designed.
+- **Clean separation of concerns.** The `ui/services/`, `ui/components/`, `ui/pages/` layering is well thought out. Services handle business logic, components handle reusable UI rendering, pages compose them together.
 
-- **Faithful strategy extraction**: Each of the 8 strategy implementations in `strategy_returns.py` was carefully cross-checked against the original `compare_all.py` code. The logic matches line-for-line.
+- **Strategy plugin architecture is solid.** `ParameterSpec` provides rich metadata for UI form generation. The `StrategyBase` abstract class has a minimal, clean interface. The auto-discovery registry with `pkgutil.iter_modules` is the right approach.
 
-- **Robust fallback behavior**: All optimization functions in `portfolio_opt.py` gracefully degrade -- ERC falls back to inverse-vol, inverse-vol falls back to equal-weight, HRP falls back to inverse-vol. The solver includes regularization (`np.eye(n) * 1e-8`) to handle singular covariance matrices.
+- **Shared data loader centralizes expensive computations.** `build_shared_data()` mirrors what 43 scripts each did independently and avoids redundant DB queries and computations. Caching with `@st.cache_resource` is appropriate.
 
-- **HRP implementation is algorithmically correct**: The four steps (correlation -> distance -> hierarchical clustering -> recursive bisection) follow the canonical Lopez de Prado (2016) algorithm. The distance metric `d = sqrt(0.5 * (1 - corr))` is correct. The inverse-variance allocation at each bisection split (`alloc_left = var_right / total`) is the standard formulation.
+- **Thread-based stdout capture is well-engineered.** The `_RedirectingStream` / `_CapturingStream` pattern in `job_runner.py` correctly handles per-thread output capture without breaking the main thread's stdout. The thread-local approach is the right design.
 
-- **Comprehensive coverage**: Every PRD task has a corresponding implementation. The portfolio comparison dashboard is particularly thorough, with 4-panel plots, correlation heatmaps, CSV exports, weight analysis, and turnover metrics.
+- **All 13 strategy plugins correctly copy shared data before mutation.** Every strategy does `r = ret.copy()` before adding synthetic columns, preventing corruption of the cached shared data.
 
-- **Consistent plotting conventions**: All new scripts use the existing dark-theme PALETTE, `fmt_ax()`, and the standard figure size / font patterns. The visual style is cohesive.
+- **Plotly chart library is comprehensive.** 8 chart functions covering equity curves, drawdown, tax detail, tax drag, metrics table, correlation heatmap, strategy comparison, and parameter sensitivity. Dark theme is consistently applied.
 
-- **SmallcapMom handling**: The module properly flags that SmallcapMom uses ADTV < R$1M via a constant `SMALLCAP_MOM_NOTE` and downstream scripts consistently separate `all_strats` from `liquid_strats` to test with and without this strategy.
+- **ResultStore gracefully handles legacy results.** The `_discover_legacy_results()` method finds PNG files from CLI runs and presents them alongside new UI results. The fallback to PNG display for legacy results is a nice touch.
 
-- **Sector mapping pragmatism**: The sector rotation backtest uses a hardcoded heuristic mapping (first 4 ticker characters) rather than trying to pull sector data from an external source. This is appropriate given the constraints, and the script reports coverage statistics to let the user judge reliability.
+- **Defensive error handling throughout.** Try/except blocks around chart rendering, data loading, and service calls with user-friendly error messages. The graceful degradation when services are not available (import error guards on each page) is well done.
 
-- **Regime-conditional presets**: The `_REGIME_EQUITY_BUDGET` table in `portfolio_opt.py` is a clean, explicit encoding of the regime-based allocation logic. The 2x2 grid (easing/tightening x calm/stressed) with budget percentages is easy to understand and modify.
+- **Parameter form component handles edge cases.** Date parsing, choice index lookup, float formatting precision, and the "Reset to Defaults" button are all thoughtfully implemented.
 
 ## Recommendations
 
-1. **Fix the type annotation on `build_strategy_returns()`** (critical -- 1 minute fix). Change line 416 of `strategy_returns.py` from `tuple[pd.DataFrame, dict]` to `tuple[pd.DataFrame, dict, dict]`.
+1. **Fix the three critical issues first** -- the format string crash in `backtest_service.py:101`, the broken rebuild confirmation flow in `1_pipeline.py:127-135`, and the blocking while-loop in `log_stream.py:53-59`. The first will crash at runtime, the second silently fails, and the third freezes the UI.
 
-2. **Promote `_equal_weights` and `_REGIME_EQUITY_BUDGET` to public API** in `portfolio_opt.py` by removing the underscore prefix. Four downstream scripts depend on them. Alternatively, add an `__all__` list to make the public API explicit.
+2. **Add `monthly_sales_exemption` as a common parameter** or document the deviation. This is a real-world tax calculation difference that will produce noticeably different after-tax results.
 
-3. **Extract `compute_portfolio_returns()` and `compute_regime_portfolio()` into a shared module** (e.g., `core/portfolio_backtest.py`) to eliminate the 5-way copy-paste duplication. This is the highest-impact refactoring recommendation.
+3. **Add input validation to `get_table_sample()`** with a whitelist of allowed table names.
 
-4. **Fix the misleading comment** on `strategy_returns.py:519`. Either remove the "weekly periods" comment or clarify that `rolling(5)` on monthly data is a 5-month window used as a proxy for 60 trading days.
+4. **Extract the duplicated PALETTE and `_apply_dark_theme`** from `4_research.py` into imports from `ui.components.charts`.
 
-5. **Redesign the TOM strategy** in `seasonal_effects_backtest.py` to actually capture the turn-of-month effect at the monthly level -- for example, by adjusting the equity weight based on whether the month-end falls within a TOM window, or by documenting explicitly that the monthly framework cannot capture intra-month timing effects.
+5. **Add logging to strategy discovery failures** in `strategy_registry.py`. Even a `print()` would be better than silent `pass`.
 
-6. **Add basic unit tests** for `portfolio_opt.py` functions -- at minimum: weights sum to 1.0, non-negative, known input produces expected output for a small (3-asset) example.
+6. **Consider `@st.cache_data` instead of `@st.cache_resource`** for `_get_shared_data_cached` to prevent accidental cache mutation. The serialization overhead is worth the safety guarantee.
+
+7. **Move module-level `RESULTS_DIR.mkdir()`** into the `save()` method to avoid import-time side effects.
+
+8. **For the log streaming component**, consider using Streamlit's `st.fragment` decorator (available in 1.33+) to create a rerunnable fragment that polls without blocking the full page.

@@ -41,18 +41,23 @@ All data is stored in a clean SQLite database ready for quantitative analysis or
 
 ## Installation
 
-Requirements: Python 3.11+
+Requirements: Python 3.9+
 
 ```bash
 # Clone the repository
 git clone <repository_url>
 cd b3-data-pipeline
 
-# Install dependencies
+# Create and activate a virtual environment
+python -m venv .venv
+source .venv/bin/activate   # Linux/macOS
+# .venv\Scripts\activate    # Windows
+
+# Install all dependencies
 pip install -r requirements.txt
 ```
 
-Dependencies are intentionally kept light: only `requests` and `pandas` are required.
+This installs everything needed for the data pipeline, backtesting framework, ML research, and the Streamlit web UI.
 
 ## Usage
 
@@ -182,6 +187,59 @@ WHERE ticker = 'PETR4'
 ORDER BY date DESC
 LIMIT 10;
 ```
+
+## Web UI
+
+A Streamlit-based management UI for running the pipeline, executing backtests, browsing results, and viewing ML research -- all from the browser.
+
+### Running the UI
+
+```bash
+# Option 1: using streamlit directly
+streamlit run ui/app.py
+
+# Option 2: using the convenience launcher
+python run_ui.py
+```
+
+Then open http://localhost:8501 in your browser.
+
+### Pages
+
+| Page | Description |
+|------|-------------|
+| **Pipeline Manager** | View database stats, browse raw COTAHIST files, explore table data, and trigger pipeline runs with real-time log streaming |
+| **Backtest Runner** | Select from 13 registered strategies, configure all parameters via dynamic forms, run backtests in background with live logs, view interactive Plotly results |
+| **Results Dashboard** | Browse all saved results (new + legacy PNGs), compare multiple strategies side-by-side with equity overlays and correlation matrices |
+| **Research Viewer** | View ML feature importance rankings, model performance metrics, and trigger the research pipeline |
+
+### Strategy Plugin System
+
+Strategies are registered via a plugin architecture. Each strategy extends `StrategyBase` and is auto-discovered from `backtests/strategies/`. To add a new strategy:
+
+```python
+# backtests/strategies/my_strategy.py
+from backtests.core.strategy_base import StrategyBase, ParameterSpec, COMMON_START_DATE, COMMON_END_DATE
+
+class MyStrategy(StrategyBase):
+    @property
+    def name(self) -> str:
+        return "My Strategy"
+
+    @property
+    def description(self) -> str:
+        return "Description shown in the UI."
+
+    def get_parameter_specs(self) -> list[ParameterSpec]:
+        return [COMMON_START_DATE, COMMON_END_DATE]
+
+    def generate_signals(self, shared_data: dict, params: dict):
+        ret = shared_data["ret"]
+        # ... compute target weights ...
+        return returns_matrix, target_weights
+```
+
+The strategy will automatically appear in the Backtest Runner dropdown on the next page load.
 
 ## Backtesting Framework
 
