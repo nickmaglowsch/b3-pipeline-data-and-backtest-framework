@@ -87,6 +87,61 @@ def download_benchmark(ticker: str, start: str, end: str) -> pd.Series:
     return index_data
 
 
+def load_b3_hlc_data(
+    db_path: str, start: str, end: str
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """
+    Load split-adjusted HLC + adj_close + raw close + financial volume for ATR computation.
+
+    Uses split_adj_* (split-only adjustment) for ATR to avoid false True Range
+    spikes from ex-dividend gaps. Returns adj_close separately for the returns
+    matrix (simulation needs dividend-adjusted returns).
+
+    Returns:
+        tuple: (adj_close, split_adj_high, split_adj_low, split_adj_close, close_px, fin_vol)
+        All as wide DataFrames with shape (date, ticker)
+    """
+    print(f"⬇  Loading B3 HLC data from {db_path} ({start} to {end})...")
+
+    conn = sqlite3.connect(db_path)
+
+    query = f"""
+        SELECT date, ticker, split_adj_high, split_adj_low, split_adj_close,
+               adj_close, close, volume
+        FROM prices
+        WHERE date >= '{start}' AND date <= '{end}'
+        AND (
+            (LENGTH(ticker) = 5 AND SUBSTR(ticker, 5, 1) IN ('3', '4', '5', '6'))
+            OR
+            (LENGTH(ticker) = 6 AND SUBSTR(ticker, 5, 2) = '11')
+        )
+    """
+
+    df = pd.read_sql_query(query, conn)
+    conn.close()
+
+    df["date"] = pd.to_datetime(df["date"])
+    df["fin_volume"] = df["volume"] / 100.0
+
+    print("🔄  Pivoting HLC data to wide format...")
+    adj_close = df.pivot(index="date", columns="ticker", values="adj_close")
+    split_high = df.pivot(index="date", columns="ticker", values="split_adj_high")
+    split_low = df.pivot(index="date", columns="ticker", values="split_adj_low")
+    split_close = df.pivot(index="date", columns="ticker", values="split_adj_close")
+    close_px = df.pivot(index="date", columns="ticker", values="close")
+    fin_vol = df.pivot(index="date", columns="ticker", values="fin_volume")
+
+    # Forward fill prices to handle missing days, leave volume as-is
+    adj_close = adj_close.ffill()
+    split_high = split_high.ffill()
+    split_low = split_low.ffill()
+    split_close = split_close.ffill()
+    close_px = close_px.ffill()
+
+    print(f"✅  Loaded HLC for {adj_close.shape[1]} unique standard tickers.")
+    return adj_close, split_high, split_low, split_close, close_px, fin_vol
+
+
 from dateutil.relativedelta import relativedelta
 
 
