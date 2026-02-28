@@ -1,0 +1,119 @@
+{
+  "target_20d": {
+    "RandomForest": {
+      "accuracy": 0.488,
+      "roc_auc": 0.474,
+      "precision": 0.477,
+      "recall": 0.5629,
+      "f1": 0.5164,
+      "confusion_matrix": [
+        [
+          67702,
+          94506
+        ],
+        [
+          66940,
+          86199
+        ]
+      ]
+    },
+    "XGBoost": {
+      "accuracy": 0.4926,
+      "roc_auc": 0.4873,
+      "precision": 0.4822,
+      "recall": 0.6074,
+      "f1": 0.5376,
+      "confusion_matrix": [
+        [
+          62320,
+          99888
+        ],
+        [
+          60118,
+          93021
+        ]
+      ]
+    }
+  },
+  "target_60d": {
+    "RandomForest": {
+      "accuracy": 0.4722,
+      "roc_auc": 0.4543,
+      "precision": 0.4609,
+      "recall": 0.5793,
+      "f1": 0.5134,
+      "confusion_matrix": [
+        [
+          60581,
+          101768
+        ],
+        [
+          63182,
+          87004
+        ]
+      ]
+    },
+    "XGBoost": {
+      "accuracy": 0.4743,
+      "roc_auc": 0.4821,
+      "precision": 0.4676,
+      "recall": 0.6786,
+      "f1": 0.5537,
+      "confusion_matrix": [
+        [
+          46323,
+          116026
+        ],
+        [
+          48274,
+          101912
+        ]
+      ]
+    }
+  },
+  "target_20d_median": {
+    "RandomForest": {
+      "accuracy": 0.4877,
+      "roc_auc": 0.4735,
+      "precision": 0.477,
+      "recall": 0.5694,
+      "f1": 0.5191,
+      "confusion_matrix": [
+        [
+          66610,
+          95598
+        ],
+        [
+          65946,
+          87193
+        ]
+      ]
+    },
+    "XGBoost": {
+      "accuracy": 0.4915,
+      "roc_auc": 0.4816,
+      "precision": 0.4822,
+      "recall": 0.6401,
+      "f1": 0.5501,
+      "confusion_matrix": [
+        [
+          56949,
+          105259
+        ],
+        [
+          55109,
+          98030
+        ]
+      ]
+    }
+  },
+  "split_info": {
+    "train_start": "2005-10-19",
+    "train_end": "2020-01-06",
+    "test_start": "2020-01-07",
+    "test_end": "2026-01-21",
+    "total_samples": 813410,
+    "train_samples": 498063,
+    "test_samples": 315347
+  }
+}

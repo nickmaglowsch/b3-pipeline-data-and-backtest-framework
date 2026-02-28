@@ -1,0 +1,141 @@
+======================================================================
+B3 FEATURE IMPORTANCE DISCOVERY -- RESEARCH SUMMARY
+Generated: 2026-02-28 00:37:33
+======================================================================
+
+1. DATASET OVERVIEW
+----------------------------------------
+Date range: 2005-10-19 to 2026-01-21
+Total observations: 813,410
+Unique tickers: 620
+Features: 19
+Target (20d >0) class balance: 0.510
+
+2. MODEL PERFORMANCE
+----------------------------------------
+
+  Target: target_20d
+    RandomForest:
+      Accuracy:  0.4880
+      ROC AUC:   0.4740
+      Precision: 0.4770
+      Recall:    0.5629
+      F1:        0.5164
+    XGBoost:
+      Accuracy:  0.4926
+      ROC AUC:   0.4873
+      Precision: 0.4822
+      Recall:    0.6074
+      F1:        0.5376
+
+  Target: target_60d
+    RandomForest:
+      Accuracy:  0.4722
+      ROC AUC:   0.4543
+      Precision: 0.4609
+      Recall:    0.5793
+      F1:        0.5134
+    XGBoost:
+      Accuracy:  0.4743
+      ROC AUC:   0.4821
+      Precision: 0.4676
+      Recall:    0.6786
+      F1:        0.5537
+
+  Target: target_20d_median
+    RandomForest:
+      Accuracy:  0.4877
+      ROC AUC:   0.4735
+      Precision: 0.4770
+      Recall:    0.5694
+      F1:        0.5191
+    XGBoost:
+      Accuracy:  0.4915
+      ROC AUC:   0.4816
+      Precision: 0.4822
+      Recall:    0.6401
+      F1:        0.5501
+
+3. TOP FEATURES (Primary Target: 20-Day Forward Return > 0)
+----------------------------------------
+
+  RandomForest -- Top 10:
+     1. CDI_3m_change              builtin=0.1967  perm=-0.0142
+     2. Ibovespa_vol_20d           builtin=0.1231  perm=0.0012
+     3. Ibovespa_return_20d        builtin=0.0785  perm=0.0021
+     4. Rolling_vol_60d            builtin=0.0563  perm=-0.0005
+     5. Distance_to_MA200          builtin=0.0562  perm=-0.0004
+     6. Rank_volume                builtin=0.0525  perm=0.0012
+     7. Rank_volatility_20d        builtin=0.0492  perm=0.0010
+     8. Rolling_vol_20d            builtin=0.0449  perm=0.0015
+     9. ATR_14                     builtin=0.0437  perm=0.0051
+    10. Rank_momentum_60d          builtin=0.0431  perm=-0.0019
+
+  XGBoost -- Top 10:
+     1. CDI_3m_change              builtin=0.1342  perm=-0.0090
+     2. Ibovespa_return_20d        builtin=0.1104  perm=-0.0006
+     3. Ibovespa_vol_20d           builtin=0.1013  perm=0.0009
+     4. Distance_to_MA200          builtin=0.0540  perm=0.0009
+     5. ATR_14                     builtin=0.0504  perm=0.0053
+     6. Rolling_vol_60d            builtin=0.0502  perm=0.0040
+     7. Rank_volatility_20d        builtin=0.0499  perm=0.0010
+     8. Rank_volume                builtin=0.0485  perm=0.0015
+     9. Distance_to_MA50           builtin=0.0480  perm=0.0000
+    10. Return_60d                 builtin=0.0474  perm=0.0060
+
+4. RF vs XGB OVERLAP (Primary Target)
+----------------------------------------
+  RF top 10:  ['ATR_14', 'CDI_3m_change', 'Distance_to_MA200', 'Ibovespa_return_20d', 'Ibovespa_vol_20d', 'Rank_momentum_60d', 'Rank_volatility_20d', 'Rank_volume', 'Rolling_vol_20d', 'Rolling_vol_60d']
+  XGB top 10: ['ATR_14', 'CDI_3m_change', 'Distance_to_MA200', 'Distance_to_MA50', 'Ibovespa_return_20d', 'Ibovespa_vol_20d', 'Rank_volatility_20d', 'Rank_volume', 'Return_60d', 'Rolling_vol_60d']
+  Overlap (8 features): ['ATR_14', 'CDI_3m_change', 'Distance_to_MA200', 'Ibovespa_return_20d', 'Ibovespa_vol_20d', 'Rank_volatility_20d', 'Rank_volume', 'Rolling_vol_60d']
+
+5. FEATURE STABILITY ACROSS TARGETS
+----------------------------------------
+
+  RandomForest -- stable top-10 across all 3 targets (9):
+    - CDI_3m_change
+    - Distance_to_MA200
+    - Ibovespa_return_20d
+    - Ibovespa_vol_20d
+    - Rank_momentum_60d
+    - Rank_volatility_20d
+    - Rank_volume
+    - Rolling_vol_20d
+    - Rolling_vol_60d
+
+  XGBoost -- stable top-10 across all 3 targets (8):
+    - CDI_3m_change
+    - Distance_to_MA200
+    - Ibovespa_return_20d
+    - Ibovespa_vol_20d
+    - Rank_volatility_20d
+    - Rank_volume
+    - Return_60d
+    - Rolling_vol_60d
+
+6. KEY FINDINGS
+----------------------------------------
+
+  a) Average ROC AUC on primary target: 0.4807
+     -> Weak/no predictive signal (AUC near 0.50)
+
+  b) Overlapping top features by category:
+     Momentum/trend: 1
+     Volatility:     3
+     Volume:         1
+     Regime/macro:   3
+
+7. CONCLUSION
+----------------------------------------
+  There is little evidence of meaningful predictive signal
+  from these features for binary return classification.
+  This does not mean the features are useless -- they may
+  still be valuable in a portfolio construction context
+  (ranking/sorting) rather than point prediction.
+
+  Note: This is a hypothesis discovery exercise. These results
+  should inform further research, not drive trading decisions.
+
+======================================================================
+END OF REPORT
+======================================================================
