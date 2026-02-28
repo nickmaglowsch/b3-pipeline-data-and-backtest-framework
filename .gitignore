@@ -2,3 +2,6 @@
 /data/**.sqlite
 *.sqlite
 /data/*
+.devcontainer/.env
+.claude-worktrees/
+.DS_Store
