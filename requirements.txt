@@ -7,3 +7,6 @@ xgboost>=2.0.0
 yfinance>=0.2.0
 python-dateutil>=2.8.0
 scipy>=1.10.0
+hmmlearn>=0.3.0
+streamlit>=1.30.0
+plotly>=5.18.0
