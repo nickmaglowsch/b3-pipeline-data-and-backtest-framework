@@ -17,6 +17,16 @@ from . import config
 
 logger = logging.getLogger(__name__)
 
+# Sanity bounds for split adjustment factors.
+# Individual event: allow up to 1000:1 splits or 1:1000 reverse splits.
+# Anything beyond this is almost certainly bad data from B3's API.
+_MAX_INDIVIDUAL_SPLIT_FACTOR = 1000.0
+_MIN_INDIVIDUAL_SPLIT_FACTOR = 1.0 / 1000.0
+
+# Cumulative factor: allow up to 100,000x total adjustment across all events.
+_MAX_CUMULATIVE_FACTOR = 100_000.0
+_MIN_CUMULATIVE_FACTOR = 1.0 / 100_000.0
+
 
 def _normalize_date(val) -> Optional[date]:
     """Convert various date formats to datetime.date object."""
@@ -87,6 +97,14 @@ def convert_stock_actions_to_splits(stock_actions: pd.DataFrame) -> pd.DataFrame
             split_factor = 1.0 / (1.0 + b3_factor / 100.0)
             description = f"Bonus {b3_factor}%"
         else:
+            continue
+
+        # Sanity check: skip obviously bad factors from B3's API
+        if split_factor > _MAX_INDIVIDUAL_SPLIT_FACTOR or split_factor < _MIN_INDIVIDUAL_SPLIT_FACTOR:
+            logger.warning(
+                f"Skipping extreme split factor for {isin_code} on {ex_date}: "
+                f"{description} (factor={split_factor:.6f})"
+            )
             continue
 
         splits.append(
@@ -170,6 +188,12 @@ def compute_split_adjustment_factors(
                     split_idx += 1
                 else:
                     break
+
+            # Cap cumulative factor to prevent extreme adjustments
+            cumulative_factor = max(
+                _MIN_CUMULATIVE_FACTOR,
+                min(_MAX_CUMULATIVE_FACTOR, cumulative_factor),
+            )
 
             result.loc[idx, "split_adj_open"] = (
                 result.loc[idx, "open"] * cumulative_factor
@@ -349,6 +373,22 @@ def compute_all_adjustments(
     prices = compute_split_adjustment_factors(prices, splits)
 
     prices = compute_dividend_adjustment_factors(prices, corporate_actions)
+
+    # Final sanity check: cap adj_close / close ratio to prevent extreme values
+    # from surviving through to backtests
+    close_vals = prices["close"].replace(0, np.nan)
+    ratio = prices["adj_close"] / close_vals
+    extreme_mask = (ratio.abs() > _MAX_CUMULATIVE_FACTOR) | ratio.isna()
+    n_extreme = extreme_mask.sum()
+    if n_extreme > 0:
+        logger.warning(
+            f"Clamping {n_extreme} rows with extreme adj_close/close ratio "
+            f"(>{_MAX_CUMULATIVE_FACTOR}x)"
+        )
+        # Fall back to split_adj_close for extreme rows
+        prices.loc[extreme_mask, "adj_close"] = prices.loc[
+            extreme_mask, "split_adj_close"
+        ]
 
     logger.info("Adjustment computation complete")
 
