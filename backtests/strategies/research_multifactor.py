@@ -96,7 +96,7 @@ class ResearchMultifactorStrategy(StrategyBase):
             if len(valid) < 5:
                 tw.iloc[i, tw.columns.get_loc("CDI_ASSET")] = 1.0
                 continue
-            n = max(1, int(len(valid) * top_pct))
+            n = max(5, int(len(valid) * top_pct))
             sel = valid.nlargest(n).index.tolist()
             w = 1.0 / len(sel)
             for t in sel:

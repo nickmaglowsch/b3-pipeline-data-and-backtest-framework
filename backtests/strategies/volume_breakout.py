@@ -82,7 +82,7 @@ class VolumeBreakoutStrategy(StrategyBase):
             if len(valid) < 5:
                 sel = prev_sel
             else:
-                n = max(1, int(len(valid) * top_pct))
+                n = max(5, int(len(valid) * top_pct))
                 sel = set(valid.nlargest(n).index)
 
             if not sel:
