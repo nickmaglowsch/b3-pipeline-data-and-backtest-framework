@@ -21,10 +21,20 @@ DB_PATH = PROJECT_ROOT / "b3_market_data.sqlite"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 START_YEAR = 1994
-CURRENT_YEAR = datetime.now().year
+
+
+def get_current_year() -> int:
+    """Return the current year at call time (not import time)."""
+    return datetime.now().year
+
+
+CURRENT_YEAR = get_current_year()  # Keep backward compat; prefer get_current_year() in new code
 
 EQUITY_BDI_CODES = {"02"}
 
+# NOTE: This layout dictionary is for reference only and may not exactly match
+# the field positions used in parser.py (which hardcodes the correct offsets).
+# Do not use this dict for programmatic parsing.
 COTAHIST_LAYOUT = {
     "tipo_registro": (0, 2),
     "data_pregao": (2, 10),

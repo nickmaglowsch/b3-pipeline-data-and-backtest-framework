@@ -137,7 +137,8 @@ def main():
         initial_capital=INITIAL_CAPITAL,
         tax_rate=TAX_RATE,
         slippage=SLIPPAGE,
-        name="Risk-Parity Mom"
+        name="Risk-Parity Mom",
+        monthly_sales_exemption=20_000,
     )
 
     common = result["pretax_values"].index.intersection(ibov_ret.index)

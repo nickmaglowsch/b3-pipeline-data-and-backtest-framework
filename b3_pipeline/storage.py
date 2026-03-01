@@ -126,8 +126,15 @@ def upsert_prices(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
     cursor = conn.cursor()
 
     sql = """
-        INSERT OR IGNORE INTO prices (ticker, isin_code, date, open, high, low, close, volume)
+        INSERT INTO prices (ticker, isin_code, date, open, high, low, close, volume)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(ticker, date) DO UPDATE SET
+            isin_code = excluded.isin_code,
+            open = excluded.open,
+            high = excluded.high,
+            low = excluded.low,
+            close = excluded.close,
+            volume = excluded.volume
     """
 
     records = []
@@ -301,11 +308,15 @@ def get_ticker_isin_map(conn: sqlite3.Connection) -> dict:
     cursor = conn.cursor()
     # Find the most recent ISIN for each ticker
     cursor.execute("""
-        SELECT ticker, isin_code 
-        FROM prices 
-        WHERE isin_code != 'UNKNOWN' 
-        GROUP BY ticker 
-        HAVING MAX(date)
+        SELECT p.ticker, p.isin_code
+        FROM prices p
+        INNER JOIN (
+            SELECT ticker, MAX(date) as max_date
+            FROM prices
+            WHERE isin_code != 'UNKNOWN'
+            GROUP BY ticker
+        ) latest ON p.ticker = latest.ticker AND p.date = latest.max_date
+        WHERE p.isin_code != 'UNKNOWN'
     """)
     return {row[0]: row[1] for row in cursor.fetchall()}
 

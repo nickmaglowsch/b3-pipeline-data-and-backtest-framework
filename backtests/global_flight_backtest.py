@@ -29,6 +29,6 @@ for i in range(11, len(ret)):
     else:
         target_weights.iloc[i]["IVVB11"] = 1.0
 
-result = run_simulation(ret.fillna(0.0), target_weights, 100000, 0.15, 0.001)
+result = run_simulation(ret.fillna(0.0), target_weights, 100000, 0.15, 0.001, monthly_sales_exemption=20_000)
 ann = (1 + result['aftertax_values'].pct_change().dropna()).prod() ** (12 / len(result['aftertax_values'])) - 1
 print(f"\nGlobal Flight-to-Quality Return: {ann*100:.2f}%")

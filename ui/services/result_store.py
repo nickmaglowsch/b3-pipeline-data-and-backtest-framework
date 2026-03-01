@@ -4,12 +4,14 @@ Result Store Service
 Persists backtest results to disk and discovers legacy CLI results (PNGs/CSVs).
 Each new result is saved as a directory: results/{timestamp}_{strategy_name}/
   - metadata.json  -- strategy name, parameters, timestamp, metrics
-  - data.pkl       -- serialised pandas objects (equity curves, tax series, etc.)
+  - data/          -- parquet files for each pandas Series (equity curves, etc.)
+
+Legacy results that were saved with data.pkl are still loadable (read-only).
 """
 from __future__ import annotations
 
 import json
-import pickle
+import os
 import shutil
 from datetime import datetime
 from pathlib import Path
@@ -19,6 +21,17 @@ import pandas as pd
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 RESULTS_DIR = PROJECT_ROOT / "results"
+
+# Keys that are persisted as individual parquet files inside the data/ subdirectory.
+_DATA_KEYS = [
+    "pretax_values",
+    "aftertax_values",
+    "ibov_ret",
+    "cdi_ret",
+    "tax_paid",
+    "loss_carryforward",
+    "turnover",
+]
 
 
 def _serialize_params(params: dict) -> dict:
@@ -32,6 +45,19 @@ def _serialize_params(params: dict) -> dict:
         else:
             safe[k] = str(v)
     return safe
+
+
+def _validate_inside_results_dir(path: Path) -> None:
+    """Raise ValueError if *path* resolves outside the results directory.
+
+    This prevents path-traversal attacks where a crafted result_id such as
+    ``../../etc`` could trick ``shutil.rmtree`` or file-loading operations
+    into acting on arbitrary filesystem locations.
+    """
+    resolved = os.path.realpath(path)
+    results_base = os.path.realpath(RESULTS_DIR)
+    if not resolved.startswith(results_base + os.sep) and resolved != results_base:
+        raise ValueError(f"Invalid result path (outside results directory): {path}")
 
 
 class BacktestResult:
@@ -73,6 +99,9 @@ class ResultStore:
         """
         Save a backtest result dict (from run_backtest()) to disk.
 
+        Data is persisted as individual parquet files (one per Series) instead
+        of a single pickle blob, avoiding arbitrary-code-execution risks.
+
         Returns:
             The result_id string.
         """
@@ -95,17 +124,17 @@ class ResultStore:
         with open(result_dir / "metadata.json", "w") as f:
             json.dump(metadata, f, indent=2, default=str)
 
-        data = {
-            "pretax_values": result_dict.get("pretax_values"),
-            "aftertax_values": result_dict.get("aftertax_values"),
-            "ibov_ret": result_dict.get("ibov_ret"),
-            "cdi_ret": result_dict.get("cdi_ret"),
-            "tax_paid": result_dict.get("tax_paid"),
-            "loss_carryforward": result_dict.get("loss_carryforward"),
-            "turnover": result_dict.get("turnover"),
-        }
-        with open(result_dir / "data.pkl", "wb") as f:
-            pickle.dump(data, f)
+        # Persist each data series as a parquet file.
+        data_dir = result_dir / "data"
+        data_dir.mkdir(exist_ok=True)
+        for key in _DATA_KEYS:
+            value = result_dict.get(key)
+            if value is None:
+                continue
+            if isinstance(value, pd.Series):
+                value.to_frame(name=key).to_parquet(data_dir / f"{key}.parquet")
+            elif isinstance(value, pd.DataFrame):
+                value.to_parquet(data_dir / f"{key}.parquet")
 
         return result_id
 
@@ -129,7 +158,7 @@ class ResultStore:
                             timestamp=meta.get("timestamp", ""),
                             params=meta.get("params", {}),
                             metrics=meta.get("metrics", []),
-                            data_path=d / "data.pkl",
+                            data_path=d,
                         ))
                     except Exception:
                         pass
@@ -140,20 +169,65 @@ class ResultStore:
     # ── Load ──────────────────────────────────────────────────────────────────
 
     def load_data(self, result: BacktestResult) -> Optional[dict]:
-        """Load the full data dict for a new-format result."""
-        if result.data_path and result.data_path.exists():
+        """Load the full data dict for a new-format result.
+
+        Tries the new parquet-based layout first (``data/*.parquet``), then
+        falls back to the legacy ``data.pkl`` pickle file for backward
+        compatibility.  Path validation is performed before any I/O to guard
+        against path-traversal attacks.
+        """
+        if result.data_path is None or not result.data_path.exists():
+            return None
+
+        _validate_inside_results_dir(result.data_path)
+
+        # --- New format: data/ directory with individual parquet files --------
+        data_dir = result.data_path / "data"
+        if data_dir.is_dir():
+            data: dict = {}
+            for key in _DATA_KEYS:
+                pq_path = data_dir / f"{key}.parquet"
+                if pq_path.exists():
+                    df = pd.read_parquet(pq_path)
+                    # If the parquet was saved from a Series via to_frame(),
+                    # convert it back to a Series.
+                    if len(df.columns) == 1:
+                        data[key] = df.iloc[:, 0]
+                    else:
+                        data[key] = df
+                else:
+                    data[key] = None
+            return data
+
+        # --- Legacy format: data.pkl (pickle) --------------------------------
+        # SECURITY WARNING: pickle.load can execute arbitrary code.  This
+        # fallback exists only for backward compatibility with results saved
+        # before the migration to parquet.  The path has already been validated
+        # above so at least we know the file lives inside the results directory.
+        import pickle  # noqa: S403 – intentional, guarded by path validation
+
+        pkl_path = result.data_path / "data.pkl"
+        if pkl_path.exists():
+            _validate_inside_results_dir(pkl_path)
             try:
-                with open(result.data_path, "rb") as f:
-                    return pickle.load(f)
+                with open(pkl_path, "rb") as f:
+                    return pickle.load(f)  # noqa: S301
             except Exception:
                 return None
+
         return None
 
     # ── Delete ────────────────────────────────────────────────────────────────
 
     def delete(self, result_id: str) -> None:
-        """Delete a saved result directory."""
+        """Delete a saved result directory.
+
+        Validates that the resolved path is inside the results directory
+        before deletion to prevent path-traversal attacks via crafted
+        ``result_id`` values (e.g. ``../../important_dir``).
+        """
         result_dir = RESULTS_DIR / result_id
+        _validate_inside_results_dir(result_dir)
         if result_dir.exists():
             shutil.rmtree(result_dir)
 

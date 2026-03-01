@@ -546,6 +546,7 @@ def main():
         tax_rate=TAX_RATE,
         slippage=SLIPPAGE,
         name="TripleBlend",
+        monthly_sales_exemption=20_000,
     )
 
     # ── Run 2: 15% CGT with deferred DARF payment ───────────────
@@ -557,6 +558,7 @@ def main():
         tax_rate=TAX_RATE,
         slippage=SLIPPAGE,
         name="TripleBlend (Deferred DARF)",
+        monthly_sales_exemption=20_000,
         defer_tax=True,
     )
 

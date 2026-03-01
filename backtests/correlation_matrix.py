@@ -106,6 +106,7 @@ def run_and_get_returns(name, ret_matrix, weights):
         tax_rate=TAX,
         slippage=SLIP,
         name=name,
+        monthly_sales_exemption=20_000,
     )
     common = result["pretax_values"].index.intersection(ibov_ret.index)
     at_val = result["aftertax_values"].loc[common]

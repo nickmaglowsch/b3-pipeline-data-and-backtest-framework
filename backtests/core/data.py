@@ -22,23 +22,21 @@ def load_b3_data(
     """
     print(f"⬇  Loading B3 data from {db_path} ({start} to {end})...")
 
-    conn = sqlite3.connect(db_path)
-
     # Query: standard lot tickers ending in 3, 4, 5, 6, 11
     # BDRs (34, 35, etc.) and other weird assets are excluded using strict length and suffix checks.
-    query = f"""
+    query = """
         SELECT date, ticker, close, adj_close, volume
         FROM prices
-        WHERE date >= '{start}' AND date <= '{end}'
+        WHERE date >= ? AND date <= ?
         AND (
             (LENGTH(ticker) = 5 AND SUBSTR(ticker, 5, 1) IN ('3', '4', '5', '6'))
-            OR 
+            OR
             (LENGTH(ticker) = 6 AND SUBSTR(ticker, 5, 2) = '11')
         )
     """
 
-    df = pd.read_sql_query(query, conn)
-    conn.close()
+    with sqlite3.connect(db_path) as conn:
+        df = pd.read_sql_query(query, conn, params=[start, end])
 
     df["date"] = pd.to_datetime(df["date"])
 
@@ -103,13 +101,11 @@ def load_b3_hlc_data(
     """
     print(f"⬇  Loading B3 HLC data from {db_path} ({start} to {end})...")
 
-    conn = sqlite3.connect(db_path)
-
-    query = f"""
+    query = """
         SELECT date, ticker, split_adj_high, split_adj_low, split_adj_close,
                adj_close, close, volume
         FROM prices
-        WHERE date >= '{start}' AND date <= '{end}'
+        WHERE date >= ? AND date <= ?
         AND (
             (LENGTH(ticker) = 5 AND SUBSTR(ticker, 5, 1) IN ('3', '4', '5', '6'))
             OR
@@ -117,8 +113,8 @@ def load_b3_hlc_data(
         )
     """
 
-    df = pd.read_sql_query(query, conn)
-    conn.close()
+    with sqlite3.connect(db_path) as conn:
+        df = pd.read_sql_query(query, conn, params=[start, end])
 
     df["date"] = pd.to_datetime(df["date"])
     df["fin_volume"] = df["volume"] / 100.0
@@ -183,6 +179,8 @@ def download_cdi_daily(start: str, end: str) -> pd.Series:
         current_start = current_end + relativedelta(days=1)
 
     if not series:
+        import warnings
+        warnings.warn("CDI daily data download returned empty. Check network connectivity.")
         return pd.Series(dtype=float, name="CDI")
 
     result = pd.concat(series)

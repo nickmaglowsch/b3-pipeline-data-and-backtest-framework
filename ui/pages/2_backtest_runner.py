@@ -68,6 +68,12 @@ selected_name = st.selectbox(
     key="selected_strategy",
 )
 
+# Bug #23 fix: Clear stale job when strategy changes
+if st.session_state.get("_prev_selected_strategy") != selected_name:
+    st.session_state["_prev_selected_strategy"] = selected_name
+    # Drop the previous job id so we don't show stale results
+    st.session_state.pop("current_backtest_job_id", None)
+
 strategy = registry.get(selected_name)
 st.info(strategy.description)
 
@@ -118,13 +124,16 @@ if current_job_id:
             result = job.result
             st.session_state.last_backtest_result = result
 
-            # Save result to disk
-            try:
-                store = ResultStore()
-                result_id = store.save(result)
-                st.toast(f"Result saved: {result_id}", icon="check_mark")
-            except Exception as e:
-                st.warning(f"Could not save result: {e}")
+            # Bug #22 fix: Only save once per job using a session state flag
+            save_flag = f"result_saved_{current_job_id}"
+            if not st.session_state.get(save_flag):
+                try:
+                    store = ResultStore()
+                    result_id = store.save(result)
+                    st.session_state[save_flag] = True
+                    st.toast(f"Result saved: {result_id}", icon="check_mark")
+                except Exception as e:
+                    st.warning(f"Could not save result: {e}")
 
         elif job.status == JobStatus.FAILED:
             st.error(f"Backtest failed: {job.error}")
@@ -132,6 +141,15 @@ if current_job_id:
 # ── Results Display ───────────────────────────────────────────────────────────
 result = st.session_state.last_backtest_result
 if result and result.get("strategy_name") == selected_name:
+    # Guard: check if the simulation produced any data
+    if result.get("pretax_values") is not None and len(result["pretax_values"]) == 0:
+        st.warning(
+            "The strategy produced no data for the selected date range. "
+            "This usually means no stocks passed the filters (e.g., ADTV, price). "
+            "Try relaxing the parameters."
+        )
+        st.stop()
+
     st.subheader(f"Results: {result['strategy_name']}")
 
     tab_equity, tab_dd, tab_tax, tab_metrics = st.tabs([

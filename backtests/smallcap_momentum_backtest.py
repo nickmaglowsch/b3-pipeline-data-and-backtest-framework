@@ -483,6 +483,7 @@ def main():
         tax_rate=TAX_RATE,
         slippage=SLIPPAGE,
         name="SmallCap Momentum",
+        monthly_sales_exemption=20_000,
     )
 
     # ── Run 2: 15% CGT with deferred DARF payment ───────────────
@@ -494,6 +495,7 @@ def main():
         tax_rate=TAX_RATE,
         slippage=SLIPPAGE,
         name="SmallCap Momentum (Deferred DARF)",
+        monthly_sales_exemption=20_000,
         defer_tax=True,
     )
 

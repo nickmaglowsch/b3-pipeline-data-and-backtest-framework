@@ -141,7 +141,7 @@ def main():
     ret = ret.fillna(0.0)
 
     print(f"\n🚀 Running generic simulation engine ({REBALANCE_FREQ})...")
-    result = run_simulation(ret, target_weights, INITIAL_CAPITAL, TAX_RATE, SLIPPAGE, name="Macro Osc.")
+    result = run_simulation(ret, target_weights, INITIAL_CAPITAL, TAX_RATE, SLIPPAGE, name="Macro Osc.", monthly_sales_exemption=20_000)
 
     common = result["pretax_values"].index.intersection(ibov_ret.index)
     m_pretax = build_metrics(value_to_ret(result["pretax_values"].loc[common]), "Oscillator Pre-Tax", PERIODS_PER_YEAR)

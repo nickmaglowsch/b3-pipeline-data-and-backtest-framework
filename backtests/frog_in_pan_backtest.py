@@ -121,7 +121,8 @@ def main():
 
     print(f"\n🚀 Running generic simulation engine ({REBALANCE_FREQ})...")
     result = run_simulation(
-        ret, target_weights, INITIAL_CAPITAL, TAX_RATE, SLIPPAGE, name="Frog Mom"
+        ret, target_weights, INITIAL_CAPITAL, TAX_RATE, SLIPPAGE, name="Frog Mom",
+        monthly_sales_exemption=20_000,
     )
 
     common = result["pretax_values"].index.intersection(ibov_ret.index)

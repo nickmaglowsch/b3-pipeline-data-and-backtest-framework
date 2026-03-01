@@ -114,7 +114,6 @@ def compute_split_adjustment_factors(
     2. For each trading date, cumulative_factor = product of all split_factors
        for splits on or after that date
     3. Apply to open, high, low, close
-    4. Adjust volume inversely: volume / cumulative_factor
 
     Args:
         prices: DataFrame with raw price data
@@ -129,7 +128,6 @@ def compute_split_adjustment_factors(
     result["split_adj_high"] = result["high"].astype(float)
     result["split_adj_low"] = result["low"].astype(float)
     result["split_adj_close"] = result["close"].astype(float)
-    result["split_adj_volume"] = result["volume"].astype(float)
 
     if splits.empty:
         logger.info("No splits to apply")
@@ -185,11 +183,6 @@ def compute_split_adjustment_factors(
             result.loc[idx, "split_adj_close"] = (
                 result.loc[idx, "close"] * cumulative_factor
             )
-
-            if cumulative_factor > 0:
-                result.loc[idx, "split_adj_volume"] = (
-                    result.loc[idx, "volume"] / cumulative_factor
-                )
 
     logger.info("Split adjustments applied")
     return result
@@ -260,7 +253,7 @@ def compute_dividend_adjustment_factors(
         if isin_prices.empty:
             continue
 
-        isin_prices = isin_prices.sort_values("date_normalized").reset_index(drop=True)
+        isin_prices = isin_prices.sort_values("date_normalized")
 
         isin_dividends = dividend_actions[
             dividend_actions["isin_code"] == isin_code
@@ -304,7 +297,7 @@ def compute_dividend_adjustment_factors(
 
         isin_prices = isin_prices.sort_values(
             "date_normalized", ascending=True
-        ).reset_index(drop=True)
+        )
 
         div_factors_df["cumulative_factor"] = div_factors_df["factor"][::-1].cumprod()[
             ::-1

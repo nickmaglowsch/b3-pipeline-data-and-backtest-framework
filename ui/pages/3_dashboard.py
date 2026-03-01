@@ -202,7 +202,10 @@ elif len(selected_results) >= 2:
             if data and "aftertax_values" in data:
                 curve = data["aftertax_values"]
                 curve = curve / curve.iloc[0]
-                equity_curves[r.strategy_name] = curve
+                # Use a unique key that includes the timestamp to avoid
+                # silently dropping duplicate strategy names (bug #21).
+                label = f"{r.strategy_name} ({r.timestamp})"
+                equity_curves[label] = curve
 
         with tab_overlay:
             if equity_curves:

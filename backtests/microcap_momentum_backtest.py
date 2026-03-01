@@ -41,6 +41,6 @@ def generate_signals(adj_close, close_px, fin_vol):
 
 adj_close, close_px, fin_vol = load_b3_data("b3_market_data.sqlite", "2012-01-01", "2026-02-24")
 ret, target_weights = generate_signals(adj_close, close_px, fin_vol)
-result = run_simulation(ret.fillna(0.0), target_weights, 100000, 0.15, 0.001)
+result = run_simulation(ret.fillna(0.0), target_weights, 100000, 0.15, 0.001, monthly_sales_exemption=20_000)
 ann = (1 + result['aftertax_values'].pct_change().dropna()).prod() ** (12 / len(result['aftertax_values'])) - 1
 print(f"\nMicro-Cap Momentum Return: {ann*100:.2f}%")

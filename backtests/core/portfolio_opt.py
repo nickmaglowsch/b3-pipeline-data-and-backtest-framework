@@ -484,6 +484,11 @@ def compute_regime_portfolio(
     all_cols = list(sub_df.columns)
     equity_cols = [c for c in strategy_cols if c != "CDI"]
 
+    # Pre-align regime signals to sub_df's index to avoid positional misalignment
+    # and O(n²) reindex inside the loop.
+    is_easing_aligned = is_easing.reindex(sub_df.index, method="ffill").fillna(False)
+    ibov_calm_aligned = ibov_calm.reindex(sub_df.index, method="ffill").fillna(True)
+
     port_rets = []
     dates = []
     weights_history = []
@@ -491,8 +496,8 @@ def compute_regime_portfolio(
     for i in range(len(sub_df)):
         date = sub_df.index[i]
 
-        easing = bool(is_easing.iloc[i]) if i < len(is_easing) else False
-        calm = bool(ibov_calm.reindex(sub_df.index).iloc[i]) if i < len(ibov_calm) else True
+        easing = bool(is_easing_aligned.iloc[i])
+        calm = bool(ibov_calm_aligned.iloc[i])
 
         if mode == "rolling_sharpe":
             if i < lookback_sharpe:

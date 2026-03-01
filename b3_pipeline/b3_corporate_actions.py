@@ -36,14 +36,18 @@ def _parse_b3_date(date_str: str) -> Optional[datetime]:
         return None
 
 
-def _parse_b3_float(value_str: str) -> float:
+def _parse_b3_float(value_str) -> float:
     """Parse B3 localized float string (comma as decimal separator)."""
+    if value_str is None:
+        return 0.0
+    if isinstance(value_str, (int, float)):
+        return float(value_str)
     if not value_str:
         return 0.0
     try:
-        normalized = value_str.strip().replace(".", "").replace(",", ".")
+        normalized = str(value_str).strip().replace(".", "").replace(",", ".")
         return float(normalized)
-    except ValueError:
+    except (ValueError, AttributeError):
         return 0.0
 
 
@@ -158,7 +162,7 @@ def fetch_company_data(trading_name: str) -> Optional[dict]:
     except (json.JSONDecodeError, ValueError) as e:
         logger.warning(f"Failed to parse response for {trading_name}: {e}")
         return None
-    except (json.JSONDecodeError, ValueError) as e:
+    except (AttributeError, TypeError) as e:
         logger.warning(f"Failed to parse response for {trading_name}: {e}")
         return None
 

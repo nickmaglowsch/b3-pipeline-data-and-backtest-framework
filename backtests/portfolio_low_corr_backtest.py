@@ -86,11 +86,11 @@ ibov_uptrend = ibov_ret_m > 0
 
 # Multifactor signals
 dist_ma200 = px / ma200_m - 1
-vol_60d = ret.rolling(5).std()
+vol_60d = ret.rolling(60).std()
 daily_ret_abs = adj_close.pct_change().abs()
 atr_proxy = daily_ret_abs.ewm(span=14, min_periods=14).mean()
 atr_m = atr_proxy.resample(FREQ).last()
-vol_20d = ret.rolling(2).std()
+vol_20d = ret.rolling(20).std()
 
 
 def run_and_get_returns(name, ret_matrix, weights):
@@ -102,6 +102,7 @@ def run_and_get_returns(name, ret_matrix, weights):
         tax_rate=TAX,
         slippage=SLIP,
         name=name,
+        monthly_sales_exemption=20_000,
     )
     common = result["pretax_values"].index.intersection(ibov_ret.index)
     at_val = result["aftertax_values"].loc[common]
