@@ -74,7 +74,7 @@ class MeanReversionStrategy(StrategyBase):
             if len(valid) < 5:
                 sel = prev_sel
             else:
-                n_sel = max(1, int(len(valid) * top_pct))
+                n_sel = max(5, int(len(valid) * top_pct))
                 sel = set(valid.nlargest(n_sel).index)
 
             if not sel:

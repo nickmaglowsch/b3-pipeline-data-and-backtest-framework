@@ -79,7 +79,7 @@ class MultifactorStrategy(StrategyBase):
             valid = sig_row[mask].dropna()
             if len(valid) < 5:
                 continue
-            n = max(1, int(len(valid) * top_pct))
+            n = max(5, int(len(valid) * top_pct))
             sel = valid.nlargest(n).index.tolist()
             w = 1.0 / len(sel)
             for t in sel:
