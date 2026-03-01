@@ -478,6 +478,7 @@ def main():
         tax_rate=0.0,
         slippage=SLIPPAGE,
         name="Regime-Switch",
+        monthly_sales_exemption=20_000,
     )
 
     # ── Run 2: Always High-Beta (Pre-Tax) ─────────────────────────
@@ -489,6 +490,7 @@ def main():
         tax_rate=0.0,
         slippage=SLIPPAGE,
         name="Always High-Beta",
+        monthly_sales_exemption=20_000,
     )
 
     # ── Run 3: Always Low-Beta (Pre-Tax) ──────────────────────────
@@ -500,6 +502,7 @@ def main():
         tax_rate=0.0,
         slippage=SLIPPAGE,
         name="Always Low-Beta",
+        monthly_sales_exemption=20_000,
     )
 
     # ── Run 4: Regime-Switch (After-Tax) ──────────────────────────
@@ -511,6 +514,7 @@ def main():
         tax_rate=TAX_RATE,
         slippage=SLIPPAGE,
         name="Regime-Switch (AT)",
+        monthly_sales_exemption=20_000,
     )
 
     # ── Align to common index ─────────────────────────────────────

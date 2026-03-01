@@ -146,7 +146,8 @@ def main():
         initial_capital=INITIAL_CAPITAL,
         tax_rate=TAX_RATE,
         slippage=SLIPPAGE,
-        name=f"{int(WEIGHT_EQUITY * 100)}/{int(WEIGHT_CDI * 100)}/{int(WEIGHT_IVVB11 * 100)}"
+        name=f"{int(WEIGHT_EQUITY * 100)}/{int(WEIGHT_CDI * 100)}/{int(WEIGHT_IVVB11 * 100)}",
+        monthly_sales_exemption=20_000,
     )
 
     common = result["pretax_values"].index.intersection(ibov_ret.index)

@@ -59,7 +59,7 @@ def generate_signals(adj_close, close_px, fin_vol):
 def main():
     adj_close, close_px, fin_vol = load_b3_data("b3_market_data.sqlite", START_DATE, END_DATE)
     ret, target_weights = generate_signals(adj_close, close_px, fin_vol)
-    result = run_simulation(ret.fillna(0.0), target_weights, 100000, 0.15, 0.001, "Vol Spike")
+    result = run_simulation(ret.fillna(0.0), target_weights, 100000, 0.15, 0.001, "Vol Spike", monthly_sales_exemption=20_000)
     ann = (1 + result['aftertax_values'].pct_change().dropna()).prod() ** (12 / len(result['aftertax_values'])) - 1
     print(f"\nVolume Z-Score Strategy Return: {ann*100:.2f}%")
 

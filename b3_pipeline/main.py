@@ -75,6 +75,9 @@ def run_pipeline(
         logger.info("")
         logger.info("Step 2/9: Detecting available years...")
         available_years = downloader.detect_available_years()
+        if not available_years:
+            logger.error("No available years detected from B3. Check network connectivity.")
+            return
         logger.info(
             f"Found {len(available_years)} years with data: {available_years[0]} to {available_years[-1]}"
         )

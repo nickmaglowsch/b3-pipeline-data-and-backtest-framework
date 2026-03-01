@@ -111,6 +111,46 @@ class Job:
     started_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
     thread: Optional[threading.Thread] = None
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+
+    def set_running(self) -> None:
+        """Atomically mark the job as running with a start timestamp."""
+        with self._lock:
+            self.started_at = datetime.now()
+            self.status = JobStatus.RUNNING
+
+    def set_completed(self, result: Any = None) -> None:
+        """Atomically mark the job as completed.
+
+        Sets ``completed_at`` *before* ``status`` so that any reader that
+        observes ``COMPLETED`` will always see a non-None ``completed_at``.
+        """
+        with self._lock:
+            self.result = result
+            self.completed_at = datetime.now()
+            self.status = JobStatus.COMPLETED
+
+    def set_failed(self, error: str) -> None:
+        """Atomically mark the job as failed.
+
+        Sets ``completed_at`` *before* ``status`` so that any reader that
+        observes ``FAILED`` will always see a non-None ``completed_at``.
+        """
+        with self._lock:
+            self.error = error
+            self.completed_at = datetime.now()
+            self.status = JobStatus.FAILED
+
+    def get_snapshot(self) -> dict[str, Any]:
+        """Return a consistent snapshot of status, timestamps, and result."""
+        with self._lock:
+            return {
+                "status": self.status,
+                "started_at": self.started_at,
+                "completed_at": self.completed_at,
+                "result": self.result,
+                "error": self.error,
+            }
 
 
 # ── JobRunner ─────────────────────────────────────────────────────────────────
@@ -127,8 +167,8 @@ def _install_redirectors() -> None:
     with _redirect_lock:
         _redirect_ref_count += 1
         if _redirect_ref_count == 1:
-            _stdout_redirector = _RedirectingStream("stdout", sys.stdout)
-            _stderr_redirector = _RedirectingStream("stderr", sys.stderr)
+            _stdout_redirector = _RedirectingStream("stdout", sys.__stdout__)
+            _stderr_redirector = _RedirectingStream("stderr", sys.__stderr__)
             sys.stdout = _stdout_redirector  # type: ignore[assignment]
             sys.stderr = _stderr_redirector  # type: ignore[assignment]
 
@@ -180,8 +220,7 @@ class JobRunner:
             name=f"job-{job_type}-{job_id}",
         )
         job.thread = thread
-        job.status = JobStatus.RUNNING
-        job.started_at = datetime.now()
+        job.set_running()
         thread.start()
         return job_id
 
@@ -192,17 +231,17 @@ class JobRunner:
         capturing = _CapturingStream(job.log_queue, _stdout_redirector._original if _stdout_redirector else sys.__stdout__)
         _thread_local.capturing_stream = capturing
         try:
-            job.result = fn(*args, **kwargs)
-            job.status = JobStatus.COMPLETED
+            result = fn(*args, **kwargs)
+            job.set_completed(result)
         except Exception:
-            job.error = traceback.format_exc()
-            job.status = JobStatus.FAILED
-            # Push error to queue
-            for line in job.error.splitlines():
+            error_tb = traceback.format_exc()
+            # Push error to log queue before changing status so the UI
+            # sees the error lines as soon as the status flips to FAILED.
+            for line in error_tb.splitlines():
                 job.log_queue.put(f"[ERROR] {line}")
+            job.set_failed(error_tb)
         finally:
             _thread_local.capturing_stream = None
-            job.completed_at = datetime.now()
 
     def get_job(self, job_id: str) -> Optional[Job]:
         return self._jobs.get(job_id)

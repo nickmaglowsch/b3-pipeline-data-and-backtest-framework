@@ -124,13 +124,28 @@ else:
 
         submitted = st.form_submit_button("Run Pipeline", type="primary")
 
+    # Handle form submission: either run directly or show confirmation for rebuild
     if submitted:
         if rebuild:
+            # Store params and show confirmation dialog on next rerun
             st.session_state["pipeline_pending_rebuild"] = True
             st.session_state["pipeline_year_choice"] = year_choice
             st.session_state["pipeline_skip_corporate"] = skip_corporate
             st.rerun()
+        else:
+            # Non-rebuild: run immediately
+            year = None if year_choice == "All" else int(year_choice)
+            job_id = runner.submit(
+                "pipeline",
+                run_pipeline_job,
+                rebuild=False,
+                year=year,
+                skip_corporate_actions=skip_corporate,
+            )
+            st.success(f"Pipeline job started (ID: {job_id})")
+            st.rerun()
 
+    # Handle pending rebuild confirmation dialog
     if st.session_state.get("pipeline_pending_rebuild"):
         st.warning(
             "You are about to REBUILD the database. This will delete all existing data. "
@@ -139,34 +154,25 @@ else:
         col_confirm, col_cancel = st.columns(2)
         with col_confirm:
             if st.button("Confirm Rebuild", type="primary", key="confirm_rebuild"):
-                st.session_state.pop("pipeline_pending_rebuild", None)
-                rebuild = True
                 year_choice = st.session_state.pop("pipeline_year_choice", "All")
                 skip_corporate = st.session_state.pop("pipeline_skip_corporate", False)
-                submitted = True
-            else:
-                submitted = False
+                st.session_state.pop("pipeline_pending_rebuild", None)
+                year = None if year_choice == "All" else int(year_choice)
+                job_id = runner.submit(
+                    "pipeline",
+                    run_pipeline_job,
+                    rebuild=True,
+                    year=year,
+                    skip_corporate_actions=skip_corporate,
+                )
+                st.success(f"Pipeline job started (ID: {job_id})")
+                st.rerun()
         with col_cancel:
             if st.button("Cancel", key="cancel_rebuild"):
                 st.session_state.pop("pipeline_pending_rebuild", None)
                 st.session_state.pop("pipeline_year_choice", None)
                 st.session_state.pop("pipeline_skip_corporate", None)
                 st.rerun()
-            submitted = False
-
-    if submitted:
-
-        year = None if year_choice == "All" else int(year_choice)
-
-        job_id = runner.submit(
-            "pipeline",
-            run_pipeline_job,
-            rebuild=rebuild,
-            year=year,
-            skip_corporate_actions=skip_corporate,
-        )
-        st.success(f"Pipeline job started (ID: {job_id})")
-        st.rerun()
 
 # ── Show completed job logs ───────────────────────────────────────────────────
 if active_job and active_job.status in (JobStatus.COMPLETED, JobStatus.FAILED):

@@ -62,7 +62,6 @@ class SmallcapMomentumStrategy(StrategyBase):
 
         mom = log_ret.shift(1).rolling(lookback).sum()
         mom[has_glitch == 1] = np.nan
-        adtv_median = adtv.median(axis=1)
 
         tw = pd.DataFrame(0.0, index=ret.index, columns=ret.columns)
         r = ret.copy()
@@ -72,9 +71,19 @@ class SmallcapMomentumStrategy(StrategyBase):
             sig_row = mom.iloc[i - 1]
             adtv_r = adtv.iloc[i - 1]
             raw_r = raw_close.iloc[i - 1]
-            med = adtv_median.iloc[i - 1]
-            mask = (adtv_r >= min_adtv) & (adtv_r < med) & (raw_r >= min_price)
-            valid = sig_row[mask].dropna()
+
+            # Liquidity filter first
+            liquid_mask = (adtv_r >= min_adtv) & (raw_r >= min_price)
+            liquid_universe = sig_row[liquid_mask].dropna()
+
+            if len(liquid_universe) < 5:
+                continue
+
+            # Small-cap filter: below median ADTV within the liquid universe
+            liquid_adtv = adtv_r[liquid_universe.index]
+            med = liquid_adtv.median()
+            smallcap_mask = liquid_adtv <= med
+            valid = liquid_universe[smallcap_mask]
             if len(valid) < 5:
                 continue
             n = max(1, int(len(valid) * top_pct))

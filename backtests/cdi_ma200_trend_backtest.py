@@ -162,6 +162,7 @@ def main():
         tax_rate=TAX_RATE,
         slippage=SLIPPAGE,
         name="CDI+MA200",
+        monthly_sales_exemption=20_000,
     )
 
     common = result["pretax_values"].index.intersection(ibov_ret.index)

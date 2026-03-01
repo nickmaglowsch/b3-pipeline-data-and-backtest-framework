@@ -139,7 +139,7 @@ def plot_param_heatmap(
     ax=None,
     fig=None,
     robust_threshold: float = 0.80,
-) -> None:
+) -> list:
     """
     Plot a 2D heatmap of a metric across two parameter dimensions.
 
@@ -202,12 +202,15 @@ def plot_param_heatmap(
     for (yi, xi), val in np.ndenumerate(data):
         if np.isnan(val):
             txt = "n/a"
+            text_color = "white"
         else:
             txt = f"{val:.2f}"
+            norm = (val - vmin) / max(vmax - vmin, 1e-9)
+            text_color = "black" if 0.3 < norm < 0.9 else "white"
         ax.text(
             xi, yi, txt,
             ha="center", va="center", fontsize=8,
-            color="black" if 0.3 < (val - vmin) / max(vmax - vmin, 1e-9) < 0.9 else "white",
+            color=text_color,
             fontweight="bold",
         )
 
@@ -285,7 +288,7 @@ def identify_robust_zone(
 
     lines = [
         f"  Metric: {metric}",
-        f"  Peak: {np.nanmax(data) if metric != 'max_dd' else np.nanmin(data):.3f}",
+        f"  Peak: {np.nanmax(data) if metric != 'max_dd' else np.nanmax(data):.3f}",
         f"  Robust {param_x} values (within {threshold*100:.0f}% of peak): {robust_x}",
         f"  Robust {param_y} values (within {threshold*100:.0f}% of peak): {robust_y}",
     ]

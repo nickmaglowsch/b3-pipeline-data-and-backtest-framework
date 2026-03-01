@@ -57,11 +57,15 @@ def _apply_dark_theme(fig: go.Figure, **extra_layout) -> go.Figure:
 
 def _to_cumret(values: pd.Series) -> pd.Series:
     """Convert value series to cumulative return (starts at 0%)."""
+    if values.empty or values.iloc[0] == 0:
+        return pd.Series(dtype=float)
     return values / values.iloc[0] * 100 - 100
 
 
 def _drawdown_series(values: pd.Series) -> pd.Series:
     """Compute drawdown (%) from peak."""
+    if values.empty:
+        return pd.Series(dtype=float)
     peak = values.cummax()
     return (values / peak - 1) * 100
 
@@ -115,20 +119,21 @@ def plot_equity_curves(
     ))
 
     # IBOV benchmark
-    ibov_cum = (1 + ibov_ret).cumprod()
-    ibov_cum = ibov_cum / ibov_cum.iloc[0] * 100 - 100
-    fig.add_trace(go.Scatter(
-        x=ibov_cum.index, y=ibov_cum,
-        name="IBOV",
-        line=dict(color=PALETTE["ibov"], width=1.5, dash="dot"),
-        hovertemplate=(
-            "<b>IBOV</b><br>Date: %{x}<br>"
-            "Cum. Return: %{y:.2f}%<extra></extra>"
-        ),
-    ))
+    if not ibov_ret.empty:
+        ibov_cum = (1 + ibov_ret).cumprod()
+        ibov_cum = ibov_cum / ibov_cum.iloc[0] * 100 - 100
+        fig.add_trace(go.Scatter(
+            x=ibov_cum.index, y=ibov_cum,
+            name="IBOV",
+            line=dict(color=PALETTE["ibov"], width=1.5, dash="dot"),
+            hovertemplate=(
+                "<b>IBOV</b><br>Date: %{x}<br>"
+                "Cum. Return: %{y:.2f}%<extra></extra>"
+            ),
+        ))
 
     # CDI (optional)
-    if cdi_ret is not None:
+    if cdi_ret is not None and not cdi_ret.empty:
         cdi_cum = (1 + cdi_ret).cumprod()
         cdi_cum = cdi_cum / cdi_cum.iloc[0] * 100 - 100
         fig.add_trace(go.Scatter(
@@ -177,16 +182,17 @@ def plot_drawdown(
     ))
 
     # IBOV
-    ibov_cum = (1 + ibov_ret).cumprod()
-    dd_ibov = _drawdown_series(ibov_cum)
-    fig.add_trace(go.Scatter(
-        x=dd_ibov.index, y=dd_ibov,
-        name="IBOV",
-        line=dict(color=PALETTE["ibov"], width=1, dash="dot"),
-        hovertemplate="<b>IBOV DD</b><br>Date: %{x}<br>DD: %{y:.2f}%<extra></extra>",
-    ))
+    if not ibov_ret.empty:
+        ibov_cum = (1 + ibov_ret).cumprod()
+        dd_ibov = _drawdown_series(ibov_cum)
+        fig.add_trace(go.Scatter(
+            x=dd_ibov.index, y=dd_ibov,
+            name="IBOV",
+            line=dict(color=PALETTE["ibov"], width=1, dash="dot"),
+            hovertemplate="<b>IBOV DD</b><br>Date: %{x}<br>DD: %{y:.2f}%<extra></extra>",
+        ))
 
-    if cdi_ret is not None:
+    if cdi_ret is not None and not cdi_ret.empty:
         cdi_cum = (1 + cdi_ret).cumprod()
         dd_cdi = _drawdown_series(cdi_cum)
         fig.add_trace(go.Scatter(

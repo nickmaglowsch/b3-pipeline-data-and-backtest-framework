@@ -35,8 +35,8 @@ def compute_price_features(adj_close: pd.DataFrame) -> dict:
         "Distance_to_MA20": adj_close / adj_close.rolling(20).mean() - 1,
         "Distance_to_MA50": adj_close / adj_close.rolling(50).mean() - 1,
         "Distance_to_MA200": adj_close / adj_close.rolling(200).mean() - 1,
-        "Rolling_vol_20d": daily_ret.rolling(20).std(),
-        "Rolling_vol_60d": daily_ret.rolling(60).std(),
+        "Rolling_vol_20d": daily_ret.rolling(20).std().shift(1),
+        "Rolling_vol_60d": daily_ret.rolling(60).std().shift(1),
         "Drawdown_60d": adj_close / adj_close.rolling(60).max() - 1,
     }
     return features
@@ -120,7 +120,7 @@ def compute_market_features(ibov: pd.Series, cdi_daily: pd.Series) -> dict:
     """
     ibov_daily_ret = ibov.pct_change()
     ibovespa_return_20d = ibov.pct_change(config.IBOV_WINDOW)
-    ibovespa_vol_20d = ibov_daily_ret.rolling(config.IBOV_WINDOW).std()
+    ibovespa_vol_20d = ibov_daily_ret.rolling(config.IBOV_WINDOW).std().shift(1)
 
     # CDI cumulative 3-month return (vectorized via cumprod + shift, avoids slow .apply)
     window = config.CDI_CUMULATIVE_WINDOW

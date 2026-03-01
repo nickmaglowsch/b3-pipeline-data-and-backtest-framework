@@ -64,6 +64,7 @@ def generate_signals(adj_close, close_px, fin_vol):
 
     # Information Ratio (Sharpe-like)
     signal = mom / vol
+    signal = signal.replace([np.inf, -np.inf], np.nan)
 
     # Glitch protection
     has_glitch = (
@@ -132,6 +133,7 @@ def main():
         tax_rate=TAX_RATE,
         slippage=SLIPPAGE,
         name="Smooth Mom",
+        monthly_sales_exemption=20_000,
     )
 
     common = result["pretax_values"].index.intersection(ibov_ret.index)

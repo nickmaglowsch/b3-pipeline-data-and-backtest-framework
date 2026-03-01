@@ -104,7 +104,7 @@ def parse_cotahist_file(zip_path: Path) -> pd.DataFrame:
                     high_price = _parse_price(line[69:82])
                     low_price = _parse_price(line[82:95])
                     close_price = _parse_price(line[108:121])
-                    volume = _parse_int(line[170:188])
+                    volume = _parse_price(line[170:188])
                     isin_code = line[230:242].strip()
 
                     records.append(

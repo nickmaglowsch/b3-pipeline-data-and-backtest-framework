@@ -55,6 +55,13 @@ def _log_poll_fragment(job_type: str, runner: JobRunner) -> None:
         with st.expander("Error details", expanded=True):
             st.code(job.error, language="python")
 
+    # When job finishes, trigger a full page rerun so the main page can
+    # pick up the result and render charts/metrics.
+    rerun_key = f"_rerun_triggered_{job.id}"
+    if job.status in (JobStatus.COMPLETED, JobStatus.FAILED) and not st.session_state.get(rerun_key):
+        st.session_state[rerun_key] = True
+        st.rerun(scope="app")
+
 
 def render_log_stream(job_type: str, runner: JobRunner) -> Any:
     """

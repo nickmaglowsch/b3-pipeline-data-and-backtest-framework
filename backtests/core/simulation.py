@@ -224,7 +224,7 @@ def _execute_rebalance(
     # Deploy buys (after reducing them proportionately by cash_drag if we are fully invested)
     # If the portfolio is not 100% invested, this cash drag is just a reduction in NAV.
     # To keep it mathematically simple: we scale all buys down slightly so we don't over-leverage to pay taxes.
-    total_buy_cash = sum(buys.values())
+    total_buy_cash = sum(v for v in buys.values() if v > 0)
     buy_adjustment_factor = 1.0
     if total_buy_cash > 0 and cash_drag > 0:
         if cash_drag < total_buy_cash:
