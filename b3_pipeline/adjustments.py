@@ -349,6 +349,287 @@ def compute_dividend_adjustment_factors(
     return result
 
 
+def detect_splits_from_prices(
+    prices: pd.DataFrame,
+    existing_stock_actions: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    Detect missing stock splits from price data by looking for overnight price jumps.
+
+    This is a fallback heuristic for splits not returned by B3's API. It compares
+    consecutive-day close prices and flags jumps matching common split ratios.
+
+    Algorithm:
+    1. For each ISIN, compute consecutive-day price ratios from the close column.
+    2. Identify jumps where ratio > SPLIT_DETECTION_THRESHOLD_HIGH (e.g., 1.8) or
+       ratio < SPLIT_DETECTION_THRESHOLD_LOW (e.g., 0.55) within a 5-trading-day window.
+    3. Skip if a stock_actions entry already exists for that ISIN and date range.
+    4. Skip if a quotation_factor transition on that date explains the jump.
+    5. Attempt to match remaining jumps against common split ratios with 8% tolerance.
+    6. Return matched splits as stock_actions with source='DETECTED'.
+
+    Args:
+        prices: DataFrame with raw price data (must include isin_code, date, close,
+                and optionally quotation_factor columns).
+        existing_stock_actions: DataFrame of already-known stock actions (to avoid
+                                duplicates).
+
+    Returns:
+        DataFrame of newly detected stock actions with source='DETECTED'.
+        Columns: [isin_code, ex_date, action_type, factor, source]
+    """
+    # Common split ratios to try: (N, direction) where N is the integer multiple
+    _common_ratios = [2, 3, 4, 5, 6, 8, 10, 15, 20, 25, 50, 100]
+    _tolerance = 0.08  # 8% tolerance -- wider than backtest's 4% for pipeline auditing
+
+    detected = []
+
+    if prices.empty:
+        return pd.DataFrame(
+            columns=["isin_code", "ex_date", "action_type", "factor", "source"]
+        )
+
+    # Normalize date column
+    prices = prices.copy()
+    prices["date"] = prices["date"].apply(_normalize_date)
+
+    # Build a lookup set of (isin_code, ex_date) for existing actions
+    existing_keys: set = set()
+    if not existing_stock_actions.empty:
+        for _, row in existing_stock_actions.iterrows():
+            ex = _normalize_date(row["ex_date"])
+            if ex is not None:
+                existing_keys.add((row["isin_code"], ex))
+
+    for isin_code, group in prices.groupby("isin_code"):
+        group = group.sort_values("date").reset_index(drop=True)
+
+        if len(group) < 2:
+            continue
+
+        closes = group["close"].values
+        dates = group["date"].values
+        factors = group["quotation_factor"].values if "quotation_factor" in group.columns else None
+
+        for i in range(1, len(closes)):
+            prev_close = closes[i - 1]
+            curr_close = closes[i]
+
+            if prev_close <= 0 or curr_close <= 0:
+                continue
+
+            ratio = curr_close / prev_close
+
+            # Only flag large jumps
+            if config.SPLIT_DETECTION_THRESHOLD_LOW <= ratio <= config.SPLIT_DETECTION_THRESHOLD_HIGH:
+                continue
+
+            jump_date = dates[i]
+
+            # Skip if existing stock_action already covers this date (within 5-day window)
+            already_recorded = False
+            for lookback_i in range(max(0, i - 5), i + 1):
+                candidate_date = dates[lookback_i]
+                if (isin_code, candidate_date) in existing_keys:
+                    already_recorded = True
+                    break
+            if already_recorded:
+                continue
+
+            # Skip if this is a quotation_factor transition that explains the jump.
+            # After normalization, a fatcot transition produces a continuous series --
+            # prices are already per-share on both sides. However, if the fatcot
+            # column is not yet normalized (pre-normalization pipeline), we check
+            # whether the fatcot changed on this date.
+            if factors is not None:
+                prev_factor = factors[i - 1]
+                curr_factor = factors[i]
+                if prev_factor != curr_factor and prev_factor > 0 and curr_factor > 0:
+                    # The "jump" is accounted for by the quotation factor change.
+                    # Since the parser already normalizes prices by dividing by
+                    # quotation_factor, if prices are still jumping here it means
+                    # something else is going on. We skip if the ratio of factors
+                    # explains the price ratio within tolerance.
+                    factor_ratio = curr_factor / prev_factor
+                    if abs(ratio - (1.0 / factor_ratio)) / max(abs(1.0 / factor_ratio), 0.001) < _tolerance:
+                        continue
+                    # Also skip if prices are already per-share and the fatcot
+                    # transition just changes the metadata (no jump expected)
+                    if abs(ratio - 1.0) < _tolerance:
+                        continue
+
+            # Try to match against common forward split ratios (close drops by 1/N)
+            matched = False
+            for n in _common_ratios:
+                # Forward split: close drops to 1/N of previous
+                target_forward = 1.0 / n
+                if abs(ratio - target_forward) / target_forward < _tolerance:
+                    detected.append({
+                        "isin_code": isin_code,
+                        "ex_date": jump_date,
+                        "action_type": config.EVENT_TYPE_STOCK_SPLIT,
+                        "factor": float(n),
+                        "source": "DETECTED",
+                    })
+                    matched = True
+                    logger.info(
+                        f"Detected forward split {n}:1 for {isin_code} on {jump_date} "
+                        f"(ratio={ratio:.4f})"
+                    )
+                    break
+
+                # Reverse split: close rises to N times previous
+                target_reverse = float(n)
+                if abs(ratio - target_reverse) / target_reverse < _tolerance:
+                    detected.append({
+                        "isin_code": isin_code,
+                        "ex_date": jump_date,
+                        "action_type": config.EVENT_TYPE_REVERSE_SPLIT,
+                        "factor": 1.0 / float(n),
+                        "source": "DETECTED",
+                    })
+                    matched = True
+                    logger.info(
+                        f"Detected reverse split 1:{n} for {isin_code} on {jump_date} "
+                        f"(ratio={ratio:.4f})"
+                    )
+                    break
+
+            if not matched and (ratio > 3.0 or ratio < 0.33):
+                logger.warning(
+                    f"Large unmatched price jump for {isin_code} on {jump_date}: "
+                    f"ratio={ratio:.4f} (prev={prev_close:.4f}, curr={curr_close:.4f}). "
+                    f"Manual review recommended."
+                )
+
+    if detected:
+        df = pd.DataFrame(detected)
+        df = df.drop_duplicates(subset=["isin_code", "ex_date", "action_type"])
+        logger.info(
+            f"Split detection: found {len(df)} new potential splits from price data"
+        )
+        return df
+
+    return pd.DataFrame(
+        columns=["isin_code", "ex_date", "action_type", "factor", "source"]
+    )
+
+
+def filter_fatcot_redundant_splits(
+    stock_actions: pd.DataFrame,
+    prices: pd.DataFrame,
+    tolerance: float = 0.15,
+    date_window: int = 5,
+) -> pd.DataFrame:
+    """
+    Remove B3 API stock_actions that duplicate a quotation_factor transition.
+
+    When a stock transitions from lot-based pricing (fatcot=1000) to per-share
+    pricing (fatcot=1), B3's API sometimes also reports a DESDOBRAMENTO (split)
+    for the same date and ratio. Since the parser already normalizes prices by
+    dividing by quotation_factor, applying the API split would double-adjust.
+
+    This function identifies and removes such redundant splits by checking whether
+    a fatcot transition on or near the ex_date explains the reported split factor.
+
+    Args:
+        stock_actions: DataFrame of stock actions (must include source, isin_code,
+                       ex_date, factor, action_type columns).
+        prices: DataFrame of price data (must include isin_code, date,
+                quotation_factor columns).
+        tolerance: Relative tolerance for matching the fatcot ratio to the split
+                   factor (default 15%).
+        date_window: Number of trading days around the ex_date to search for a
+                     fatcot transition (default 5).
+
+    Returns:
+        Filtered stock_actions DataFrame with redundant entries removed.
+    """
+    if stock_actions.empty or prices.empty:
+        return stock_actions
+
+    if "quotation_factor" not in prices.columns:
+        return stock_actions
+
+    # Only check B3 API splits (not DETECTED ones)
+    b3_mask = stock_actions["source"] == "B3"
+    if not b3_mask.any():
+        return stock_actions
+
+    prices_copy = prices.copy()
+    prices_copy["date"] = prices_copy["date"].apply(_normalize_date)
+
+    redundant_indices = []
+
+    for idx, row in stock_actions[b3_mask].iterrows():
+        isin = row["isin_code"]
+        ex_date = _normalize_date(row["ex_date"])
+        b3_factor = row["factor"]
+        action_type = row["action_type"]
+
+        if ex_date is None:
+            continue
+
+        # Get prices for this ISIN around the ex_date
+        isin_prices = prices_copy[prices_copy["isin_code"] == isin].sort_values("date")
+        if len(isin_prices) < 2:
+            continue
+
+        # Look for a fatcot transition within the date window
+        dates = isin_prices["date"].values
+        factors = isin_prices["quotation_factor"].values
+
+        for i in range(1, len(dates)):
+            d = dates[i]
+            if d is None:
+                continue
+
+            # Check if this date is within the window of the ex_date
+            day_diff = abs((d - ex_date).days) if hasattr(d, 'days') else abs((pd.Timestamp(d) - pd.Timestamp(ex_date)).days)
+            if day_diff > date_window:
+                continue
+
+            prev_fatcot = factors[i - 1]
+            curr_fatcot = factors[i]
+
+            if prev_fatcot == curr_fatcot or prev_fatcot <= 0 or curr_fatcot <= 0:
+                continue
+
+            # The fatcot ratio: e.g., 1000->1 gives fatcot_ratio = 1000
+            fatcot_ratio = prev_fatcot / curr_fatcot
+
+            # For a STOCK_SPLIT with factor N, the expected fatcot ratio is N
+            # For a REVERSE_SPLIT with factor < 1, the expected fatcot ratio is 1/factor
+            if action_type == config.EVENT_TYPE_STOCK_SPLIT:
+                expected_ratio = b3_factor
+            elif action_type == config.EVENT_TYPE_REVERSE_SPLIT:
+                expected_ratio = 1.0 / b3_factor if b3_factor > 0 else 0
+            else:
+                continue
+
+            if expected_ratio <= 0:
+                continue
+
+            rel_diff = abs(fatcot_ratio - expected_ratio) / expected_ratio
+            if rel_diff < tolerance:
+                redundant_indices.append(idx)
+                logger.info(
+                    f"Filtering FATCOT_REDUNDANT split for {isin} on {ex_date}: "
+                    f"B3 factor={b3_factor}, fatcot transition={prev_fatcot}->{curr_fatcot} "
+                    f"(ratio={fatcot_ratio:.1f}, expected={expected_ratio:.1f})"
+                )
+                break  # Found the matching transition, no need to check more dates
+
+    if redundant_indices:
+        logger.info(
+            f"Filtered {len(redundant_indices)} FATCOT_REDUNDANT splits "
+            f"(would have caused double-adjustment)"
+        )
+        return stock_actions.drop(index=redundant_indices).reset_index(drop=True)
+
+    return stock_actions
+
+
 def compute_all_adjustments(
     prices: pd.DataFrame,
     corporate_actions: pd.DataFrame,
@@ -366,6 +647,9 @@ def compute_all_adjustments(
         Tuple of (adjusted_prices, splits)
     """
     logger.info("Starting adjustment computation...")
+
+    # Filter out B3 API splits that are redundant with fatcot transitions
+    stock_actions = filter_fatcot_redundant_splits(stock_actions, prices)
 
     splits = convert_stock_actions_to_splits(stock_actions)
     logger.info(f"Converted {len(stock_actions)} stock actions to {len(splits)} splits")

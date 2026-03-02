@@ -2,6 +2,8 @@
 
 ## Project Structure
 - SQLite DB: `b3_market_data.sqlite` at project root
+- Pipeline: `b3_pipeline/` with parser.py, storage.py, adjustments.py, b3_corporate_actions.py, config.py, main.py
+- Tests: `tests/` with test_parser_fatcot.py, test_split_detection.py, test_label_handling.py, test_failure_tracking.py
 - Backtests: `backtests/` with `core/data.py` for data loading, `core/metrics.py`, `core/plotting.py`, `core/simulation.py`
 - New core modules (Feb 2026): `core/strategy_returns.py`, `core/portfolio_opt.py`, `core/param_scanner.py`
 - Strategy plugins (Feb 2026): `backtests/strategies/` (13 classes), `backtests/core/strategy_base.py`, `strategy_registry.py`, `shared_data.py`
@@ -32,6 +34,11 @@
 - `compute_portfolio_returns()` and `compute_regime_portfolio()` duplicated in 5 files -- should be extracted
 - `vol_60d = ret.rolling(5).std()` comment says "weekly periods" but data is monthly -- misleading
 - `build_strategy_returns()` type annotation says 2-tuple but returns 3-tuple
+- **CRITICAL (Mar 2026)**: fatcot normalization + B3 API split double-adjustment not mitigated. No FATCOT_REDUNDANT filtering exists.
+- `COMMON_SPLIT_RATIOS` in config.py is dead code -- `detect_splits_from_prices` uses its own local `_common_ratios` list
+- `retry_failed_companies()` in main.py only processes stockDividends, not cashDividends
+- parser.py close_price reads line[108:121] which config.py says is preco_medio (average), not preco_ultimo_negocio (close at 121:134) -- pre-existing, needs investigation
+- `fetch_company_data` failure tracking only covers RequestException, not JSON/parse errors
 
 ## Streamlit UI Review Notes (Feb 2026)
 - `@st.cache_resource` for shared data dict is fragile -- strategies must `.copy()` before mutation

@@ -123,9 +123,9 @@ def run_pipeline(
                 logger.info(f"Fetching data for {len(ticker_roots)} company codes")
 
                 ticker_to_isin = storage.get_ticker_isin_map(conn)
-                corporate_actions, stock_actions = (
+                corporate_actions, stock_actions, skipped_events = (
                     b3_corporate_actions.fetch_all_corporate_actions(
-                        ticker_roots, ticker_to_isin
+                        ticker_roots, ticker_to_isin, conn=conn
                     )
                 )
 
@@ -134,6 +134,12 @@ def run_pipeline(
 
                 if not stock_actions.empty:
                     storage.upsert_stock_actions(conn, stock_actions)
+
+                if not skipped_events.empty:
+                    storage.upsert_skipped_events(conn, skipped_events)
+                    logger.info(
+                        f"Stored {len(skipped_events)} skipped events for manual review"
+                    )
         else:
             logger.info("")
             logger.info("Step 6/9: Skipping corporate actions fetch...")
@@ -141,7 +147,7 @@ def run_pipeline(
             stock_actions = storage.get_all_stock_actions(conn)
 
         logger.info("")
-        logger.info("Step 7/9: Computing adjustments...")
+        logger.info("Step 7/10: Loading prices and detecting missing splits...")
 
         prices_from_db = storage.get_all_prices(conn)
 
@@ -149,6 +155,21 @@ def run_pipeline(
             corporate_actions = storage.get_all_corporate_actions(conn)
         if stock_actions is None or stock_actions.empty:
             stock_actions = storage.get_all_stock_actions(conn)
+
+        logger.info("Detecting missing splits from price data...")
+        detected_splits = adjustments.detect_splits_from_prices(
+            prices_from_db, stock_actions
+        )
+        if not detected_splits.empty:
+            logger.info(
+                f"Detected {len(detected_splits)} new splits from price data -- "
+                "storing with source='DETECTED'"
+            )
+            storage.upsert_stock_actions(conn, detected_splits)
+            # Reload stock_actions to include newly detected splits
+            stock_actions = storage.get_all_stock_actions(conn)
+        else:
+            logger.info("No new splits detected from price data")
 
         adjusted_prices, splits = adjustments.compute_all_adjustments(
             prices_from_db, corporate_actions, stock_actions
@@ -158,11 +179,14 @@ def run_pipeline(
             storage.upsert_detected_splits(conn, splits)
 
         logger.info("")
-        logger.info("Step 8/9: Updating adjusted columns in database...")
+        logger.info("Step 8/10: Computing adjustments...")
+
+        logger.info("")
+        logger.info("Step 9/10: Updating adjusted columns in database...")
         storage.update_adjusted_columns(conn, adjusted_prices)
 
         logger.info("")
-        logger.info("Step 9/9: Summary statistics...")
+        logger.info("Step 10/10: Summary statistics...")
         stats = storage.get_summary_stats(conn)
 
         logger.info("")
@@ -174,6 +198,8 @@ def run_pipeline(
         logger.info(f"Date range: {stats['date_range'][0]} to {stats['date_range'][1]}")
         logger.info(f"Corporate actions: {stats['total_corporate_actions']:,}")
         logger.info(f"Stock actions (splits/bonuses): {stats['total_stock_actions']:,}")
+        logger.info(f"Skipped events (manual review): {stats.get('total_skipped_events', 0):,}")
+        logger.info(f"Unresolved fetch failures: {stats.get('unresolved_fetch_failures', 0):,}")
 
         end_time = datetime.now()
         duration = end_time - start_time
@@ -183,6 +209,74 @@ def run_pipeline(
     except Exception as e:
         logger.exception(f"Pipeline failed with error: {e}")
         raise
+    finally:
+        conn.close()
+
+
+def retry_failed_companies() -> None:
+    """
+    Re-fetch corporate actions for companies that previously failed.
+
+    Reads the fetch_failures table for unresolved failures, re-attempts
+    the fetch, and marks resolved on success.
+    """
+    logger.info("=" * 60)
+    logger.info("Retrying failed company fetches")
+    logger.info("=" * 60)
+
+    conn = storage.get_connection()
+
+    try:
+        failures = storage.get_unresolved_failures(conn)
+        if not failures:
+            logger.info("No unresolved fetch failures found")
+            return
+
+        logger.info(f"Found {len(failures)} unresolved failures to retry")
+
+        ticker_to_isin = storage.get_ticker_isin_map(conn)
+
+        for failure in failures:
+            company_code = failure["company_code"]
+            logger.info(f"Retrying {company_code}...")
+
+            company_data = b3_corporate_actions.fetch_company_data(
+                company_code, conn=conn
+            )
+            if company_data is None:
+                logger.warning(f"Retry failed for {company_code}")
+                continue
+
+            # Success -- process the data
+            storage.resolve_fetch_failure(conn, company_code, failure["endpoint"])
+            logger.info(f"Successfully fetched {company_code}")
+
+            stock_divs = company_data.get("stockDividends", [])
+            if stock_divs:
+                corp_df, stock_df, skipped_df = b3_corporate_actions.parse_stock_dividends(
+                    stock_divs
+                )
+                if not corp_df.empty:
+                    storage.upsert_corporate_actions(conn, corp_df)
+                if not stock_df.empty:
+                    storage.upsert_stock_actions(conn, stock_df)
+                if not skipped_df.empty:
+                    storage.upsert_skipped_events(conn, skipped_df)
+
+            # Also fetch cash dividends for recovered companies
+            full_trading_name = company_data.get("tradingName", "").strip()
+            if full_trading_name:
+                cash_divs = b3_corporate_actions.fetch_cash_dividends_paginated(
+                    full_trading_name
+                )
+                if cash_divs:
+                    corp_df = b3_corporate_actions.parse_cash_dividends(
+                        cash_divs, company_code, ticker_to_isin
+                    )
+                    if not corp_df.empty:
+                        storage.upsert_corporate_actions(conn, corp_df)
+
+        logger.info("Retry complete")
     finally:
         conn.close()
 
@@ -220,6 +314,12 @@ Examples:
     )
 
     arg_parser.add_argument(
+        "--retry-failures",
+        action="store_true",
+        help="Re-fetch only companies that previously failed (from fetch_failures table)",
+    )
+
+    arg_parser.add_argument(
         "--verbose",
         "-v",
         action="store_true",
@@ -231,11 +331,14 @@ Examples:
     if args.verbose:
         logging.getLogger().setLevel(logging.DEBUG)
 
-    run_pipeline(
-        rebuild=args.rebuild,
-        year=args.year,
-        skip_corporate_actions=args.skip_corporate_actions,
-    )
+    if args.retry_failures:
+        retry_failed_companies()
+    else:
+        run_pipeline(
+            rebuild=args.rebuild,
+            year=args.year,
+            skip_corporate_actions=args.skip_corporate_actions,
+        )
 
 
 if __name__ == "__main__":

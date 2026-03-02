@@ -52,7 +52,8 @@ def parse_cotahist_file(zip_path: Path) -> pd.DataFrame:
         zip_path: Path to COTAHIST ZIP file
 
     Returns:
-        DataFrame with columns: [date, ticker, open, high, low, close, volume]
+        DataFrame with columns: [date, ticker, isin_code, open, high, low, close, volume, quotation_factor]
+        Prices (open/high/low/close) are normalized to per-share basis by dividing by quotation_factor.
     """
     zip_path = Path(zip_path)
     if not zip_path.exists():
@@ -107,6 +108,22 @@ def parse_cotahist_file(zip_path: Path) -> pd.DataFrame:
                     volume = _parse_price(line[170:188])
                     isin_code = line[230:242].strip()
 
+                    # Parse fator_cotacao (positions 210-217).
+                    # This field indicates how many shares one quoted price unit represents:
+                    #   0000001 = price per 1 share (standard, modern)
+                    #   0001000 = price per lot of 1,000 shares
+                    # Normalize OHLC to per-share basis by dividing by quotation_factor.
+                    # Volume (in BRL) is NOT divided -- it is already a monetary amount.
+                    quotation_factor = _parse_int(line[210:217])
+                    if quotation_factor <= 0:
+                        quotation_factor = 1
+
+                    if quotation_factor != 1:
+                        open_price = open_price / quotation_factor
+                        high_price = high_price / quotation_factor
+                        low_price = low_price / quotation_factor
+                        close_price = close_price / quotation_factor
+
                     records.append(
                         {
                             "date": date,
@@ -117,6 +134,7 @@ def parse_cotahist_file(zip_path: Path) -> pd.DataFrame:
                             "low": low_price,
                             "close": close_price,
                             "volume": volume,
+                            "quotation_factor": quotation_factor,
                         }
                     )
 

@@ -77,21 +77,6 @@ B3_CORP_ACTIONS_HEADERS = {
 SPLIT_DETECTION_THRESHOLD_HIGH = 1.8
 SPLIT_DETECTION_THRESHOLD_LOW = 0.55
 
-COMMON_SPLIT_RATIOS = [
-    (1, 2),
-    (2, 1),
-    (1, 3),
-    (3, 1),
-    (1, 4),
-    (4, 1),
-    (2, 3),
-    (3, 2),
-    (1, 5),
-    (5, 1),
-    (1, 10),
-    (10, 1),
-]
-
 RATE_LIMIT_DELAY = 0.1
 
 EVENT_TYPE_CASH_DIVIDEND = "CASH_DIVIDEND"
@@ -106,3 +91,9 @@ B3_LABEL_RENDIMENTO = "RENDIMENTO"
 B3_LABEL_DESDOBRAMENTO = "DESDOBRAMENTO"
 B3_LABEL_GRUPAMENTO = "GRUPAMENTO"
 B3_LABEL_BONIFICACAO = "BONIFICACAO"
+
+# Non-split labels that affect share count but are NOT standard splits.
+# These are stored in skipped_events for manual review.
+B3_LABEL_RESG_TOTAL_RV = "RESG TOTAL RV"    # Total share redemption (delisting event)
+B3_LABEL_CIS_RED_CAP = "CIS RED CAP"        # Spin-off with capital reduction (complex)
+B3_LABEL_INCORPORACAO = "INCORPORACAO"       # Merger/incorporation (complex)

@@ -113,7 +113,7 @@ def _map_isin_to_ticker(isin_code: str, available_tickers: List[str]) -> Optiona
     return None
 
 
-def fetch_company_data(trading_name: str) -> Optional[dict]:
+def fetch_company_data(trading_name: str, conn=None) -> Optional[dict]:
     """
     Fetch all corporate action data for a company from B3.
 
@@ -124,10 +124,13 @@ def fetch_company_data(trading_name: str) -> Optional[dict]:
 
     Args:
         trading_name: Company trading name (e.g., 'PETROBRAS')
+        conn: Optional SQLite connection for recording fetch failures (Phase 4)
 
     Returns:
         Raw JSON response or None on failure
     """
+    from . import storage as _storage
+
     payload = {
         "issuingCompany": trading_name.split()[0]
         if " " in trading_name
@@ -158,12 +161,33 @@ def fetch_company_data(trading_name: str) -> Optional[dict]:
         return None
     except requests.RequestException as e:
         logger.warning(f"Failed to fetch company data for {trading_name}: {e}")
+        if conn is not None:
+            try:
+                _storage.record_fetch_failure(
+                    conn, trading_name, "GetListedSupplementCompany", str(e)
+                )
+            except Exception as track_err:
+                logger.debug(f"Failed to record fetch failure: {track_err}")
         return None
     except (json.JSONDecodeError, ValueError) as e:
         logger.warning(f"Failed to parse response for {trading_name}: {e}")
+        if conn is not None:
+            try:
+                _storage.record_fetch_failure(
+                    conn, trading_name, "GetListedSupplementCompany", f"ParseError: {e}"
+                )
+            except Exception as track_err:
+                logger.debug(f"Failed to record fetch failure: {track_err}")
         return None
     except (AttributeError, TypeError) as e:
         logger.warning(f"Failed to parse response for {trading_name}: {e}")
+        if conn is not None:
+            try:
+                _storage.record_fetch_failure(
+                    conn, trading_name, "GetListedSupplementCompany", f"ParseError: {e}"
+                )
+            except Exception as track_err:
+                logger.debug(f"Failed to record fetch failure: {track_err}")
         return None
 
 
@@ -307,7 +331,9 @@ def parse_cash_dividends(
     )
 
 
-def parse_stock_dividends(records: List[dict]) -> Tuple[pd.DataFrame, pd.DataFrame]:
+def parse_stock_dividends(
+    records: List[dict],
+) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """
     Parse stock dividend records (splits, reverse splits, bonuses) from B3.
 
@@ -316,14 +342,28 @@ def parse_stock_dividends(records: List[dict]) -> Tuple[pd.DataFrame, pd.DataFra
     - GRUPAMENTO -> REVERSE_SPLIT (factor < 1)
     - BONIFICACAO -> BONUS_SHARES
 
+    Unrecognized labels are logged and stored in a skipped_events DataFrame for
+    manual review. They are NOT treated as splits:
+    - RESG TOTAL RV: total share redemption (delisting event, not a split)
+    - CIS RED CAP: spin-off with capital reduction (variable semantics)
+    - INCORPORACAO: merger/incorporation (variable semantics)
+
     Args:
         records: List of stock dividend records from B3
 
     Returns:
-        Tuple of (corporate_actions_df, stock_actions_df)
+        Tuple of (corporate_actions_df, stock_actions_df, skipped_events_df)
     """
     corp_events = []
     stock_events = []
+    skipped_events = []
+
+    # Labels that are known non-split corporate events -- store for audit, don't apply
+    _known_non_split_labels = {
+        config.B3_LABEL_RESG_TOTAL_RV,
+        config.B3_LABEL_CIS_RED_CAP,
+        config.B3_LABEL_INCORPORACAO,
+    }
 
     for record in records:
         label = record.get("label", "")
@@ -348,7 +388,39 @@ def parse_stock_dividends(records: List[dict]) -> Tuple[pd.DataFrame, pd.DataFra
             action_type = config.EVENT_TYPE_REVERSE_SPLIT
         elif label == config.B3_LABEL_BONIFICACAO:
             action_type = config.EVENT_TYPE_BONUS_SHARES
+        elif label in _known_non_split_labels:
+            # Log and store for audit, but do not apply as split
+            reason = (
+                "delisting_event" if label == config.B3_LABEL_RESG_TOTAL_RV
+                else "needs_manual_review"
+            )
+            logger.info(
+                f"Skipping non-split label '{label}' for {isin_code} "
+                f"on {date_str}, factor={factor_str} (reason: {reason})"
+            )
+            skipped_events.append({
+                "isin_code": isin_code,
+                "event_date": ex_date.date(),
+                "label": label,
+                "factor": factor,
+                "source": "B3",
+                "reason": reason,
+            })
+            continue
         else:
+            # Truly unrecognized label -- log for investigation
+            logger.info(
+                f"Unrecognized stockDividend label '{label}' for {isin_code} "
+                f"on {date_str}, factor={factor_str}"
+            )
+            skipped_events.append({
+                "isin_code": isin_code,
+                "event_date": ex_date.date(),
+                "label": label,
+                "factor": factor,
+                "source": "B3",
+                "reason": "unrecognized_label",
+            })
             continue
 
         stock_events.append(
@@ -393,25 +465,38 @@ def parse_stock_dividends(records: List[dict]) -> Tuple[pd.DataFrame, pd.DataFra
             columns=["isin_code", "ex_date", "action_type", "factor", "source"]
         )
     )
+    skipped_df = (
+        pd.DataFrame(skipped_events)
+        if skipped_events
+        else pd.DataFrame(
+            columns=["isin_code", "event_date", "label", "factor", "source", "reason"]
+        )
+    )
 
-    return corp_df, stock_df
+    return corp_df, stock_df, skipped_df
 
 
 def fetch_all_corporate_actions(
-    trading_names: List[str], ticker_to_isin: dict
-) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    trading_names: List[str],
+    ticker_to_isin: dict,
+    conn=None,
+) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """
     Fetch all corporate actions for multiple trading names.
 
     Args:
         trading_names: List of 4-character ticker roots (e.g., 'PETR')
         ticker_to_isin: Dictionary mapping tickers to ISINs
+        conn: Optional SQLite connection for failure tracking (Phase 4)
 
     Returns:
-        Tuple of (corporate_actions_df, stock_actions_df)
+        Tuple of (corporate_actions_df, stock_actions_df, skipped_events_df)
     """
+    from . import storage as _storage
+
     all_corp_actions = []
     all_stock_actions = []
+    all_skipped_events = []
     total = len(trading_names)
 
     for i, name in enumerate(trading_names, 1):
@@ -419,7 +504,7 @@ def fetch_all_corporate_actions(
             logger.info(f"Fetching corporate actions: {i}/{total} ({name})")
 
         # 1. Fetch company data using 4-letter root as issuingCompany
-        company_data = fetch_company_data(name)
+        company_data = fetch_company_data(name, conn=conn)
         if company_data is None:
             continue
 
@@ -430,11 +515,13 @@ def fetch_all_corporate_actions(
         stock_divs = company_data.get("stockDividends", [])
 
         if stock_divs:
-            corp_from_stock, stock_df = parse_stock_dividends(stock_divs)
+            corp_from_stock, stock_df, skipped_df = parse_stock_dividends(stock_divs)
             if not corp_from_stock.empty:
                 all_corp_actions.append(corp_from_stock)
             if not stock_df.empty:
                 all_stock_actions.append(stock_df)
+            if not skipped_df.empty:
+                all_skipped_events.append(skipped_df)
 
         time.sleep(config.RATE_LIMIT_DELAY)
 
@@ -453,6 +540,9 @@ def fetch_all_corporate_actions(
     ]
     valid_stock = [
         df for df in all_stock_actions if not df.empty and not df.isna().all().all()
+    ]
+    valid_skipped = [
+        df for df in all_skipped_events if not df.empty and not df.isna().all().all()
     ]
 
     final_corp = (
@@ -482,6 +572,13 @@ def fetch_all_corporate_actions(
             ]
         )
     )
+    final_skipped = (
+        pd.concat(valid_skipped, ignore_index=True)
+        if valid_skipped
+        else pd.DataFrame(
+            columns=["isin_code", "event_date", "label", "factor", "source", "reason"]
+        )
+    )
 
     if not final_corp.empty:
         final_corp = final_corp.drop_duplicates(
@@ -495,7 +592,13 @@ def fetch_all_corporate_actions(
         )
         logger.info(f"Total stock actions: {len(final_stock)}")
 
-    return final_corp, final_stock
+    if not final_skipped.empty:
+        final_skipped = final_skipped.drop_duplicates(
+            subset=["isin_code", "event_date", "label"], keep="last"
+        )
+        logger.info(f"Total skipped events: {len(final_skipped)}")
+
+    return final_corp, final_stock, final_skipped
 
 
 def build_trading_name_to_code_map(tickers: List[str]) -> Dict[str, str]:

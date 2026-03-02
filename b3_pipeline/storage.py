@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS prices (
     low REAL,
     close REAL,
     volume INTEGER,
+    quotation_factor INTEGER DEFAULT 1,
     split_adj_open REAL,
     split_adj_high REAL,
     split_adj_low REAL,
@@ -67,6 +68,30 @@ CREATE TABLE IF NOT EXISTS detected_splits (
 );
 """
 
+SCHEMA_SKIPPED_EVENTS = """
+CREATE TABLE IF NOT EXISTS skipped_events (
+    isin_code TEXT NOT NULL,
+    event_date DATE NOT NULL,
+    label TEXT NOT NULL,
+    factor REAL,
+    source TEXT DEFAULT 'B3',
+    reason TEXT,
+    PRIMARY KEY (isin_code, event_date, label)
+);
+"""
+
+SCHEMA_FETCH_FAILURES = """
+CREATE TABLE IF NOT EXISTS fetch_failures (
+    company_code TEXT NOT NULL,
+    endpoint TEXT NOT NULL,
+    error_message TEXT,
+    failed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    retry_count INTEGER DEFAULT 0,
+    resolved INTEGER DEFAULT 0,
+    PRIMARY KEY (company_code, endpoint)
+);
+"""
+
 INDEX_PRICES_DATE = "CREATE INDEX IF NOT EXISTS idx_prices_date ON prices(date);"
 INDEX_PRICES_TICKER = "CREATE INDEX IF NOT EXISTS idx_prices_ticker ON prices(ticker);"
 INDEX_PRICES_ISIN = "CREATE INDEX IF NOT EXISTS idx_prices_isin ON prices(isin_code);"
@@ -94,18 +119,39 @@ def init_db(conn: sqlite3.Connection, rebuild: bool = False) -> None:
         cursor.execute("DROP TABLE IF EXISTS corporate_actions")
         cursor.execute("DROP TABLE IF EXISTS stock_actions")
         cursor.execute("DROP TABLE IF EXISTS detected_splits")
+        cursor.execute("DROP TABLE IF EXISTS skipped_events")
+        cursor.execute("DROP TABLE IF EXISTS fetch_failures")
 
     logger.info("Creating database schema...")
     cursor.execute(SCHEMA_PRICES)
     cursor.execute(SCHEMA_CORPORATE_ACTIONS)
     cursor.execute(SCHEMA_STOCK_ACTIONS)
     cursor.execute(SCHEMA_DETECTED_SPLITS)
+    cursor.execute(SCHEMA_SKIPPED_EVENTS)
+    cursor.execute(SCHEMA_FETCH_FAILURES)
     cursor.execute(INDEX_PRICES_DATE)
     cursor.execute(INDEX_PRICES_TICKER)
     cursor.execute(INDEX_PRICES_ISIN)
 
+    # Migrate existing databases: add new columns if they don't exist
+    _migrate_schema(conn)
+
     conn.commit()
     logger.info("Database schema initialized")
+
+
+def _migrate_schema(conn: sqlite3.Connection) -> None:
+    """Apply non-destructive schema migrations for existing databases."""
+    cursor = conn.cursor()
+
+    # Add quotation_factor to prices if missing
+    cursor.execute("PRAGMA table_info(prices)")
+    prices_cols = {row[1] for row in cursor.fetchall()}
+    if "quotation_factor" not in prices_cols:
+        logger.info("Migrating: adding quotation_factor column to prices table")
+        cursor.execute(
+            "ALTER TABLE prices ADD COLUMN quotation_factor INTEGER DEFAULT 1"
+        )
 
 
 def _prepare_date(val) -> Optional[str]:
@@ -126,15 +172,16 @@ def upsert_prices(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
     cursor = conn.cursor()
 
     sql = """
-        INSERT INTO prices (ticker, isin_code, date, open, high, low, close, volume)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO prices (ticker, isin_code, date, open, high, low, close, volume, quotation_factor)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(ticker, date) DO UPDATE SET
             isin_code = excluded.isin_code,
             open = excluded.open,
             high = excluded.high,
             low = excluded.low,
             close = excluded.close,
-            volume = excluded.volume
+            volume = excluded.volume,
+            quotation_factor = excluded.quotation_factor
     """
 
     records = []
@@ -149,6 +196,7 @@ def upsert_prices(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
                 row["low"],
                 row["close"],
                 row["volume"],
+                int(row.get("quotation_factor", 1) or 1),
             )
         )
 
@@ -345,7 +393,8 @@ def get_trading_names(conn: sqlite3.Connection) -> List[str]:
 def get_prices_for_ticker(conn: sqlite3.Connection, ticker: str) -> pd.DataFrame:
     """Get all price records for a specific ticker."""
     query = """
-        SELECT ticker, isin_code, date, open, high, low, close, volume, 
+        SELECT ticker, isin_code, date, open, high, low, close, volume,
+               quotation_factor,
                split_adj_open, split_adj_high, split_adj_low, split_adj_close, adj_close
         FROM prices
         WHERE ticker = ?
@@ -357,7 +406,8 @@ def get_prices_for_ticker(conn: sqlite3.Connection, ticker: str) -> pd.DataFrame
 def get_prices_for_isin(conn: sqlite3.Connection, isin_code: str) -> pd.DataFrame:
     """Get all price records for a specific ISIN code."""
     query = """
-        SELECT ticker, isin_code, date, open, high, low, close, volume, 
+        SELECT ticker, isin_code, date, open, high, low, close, volume,
+               quotation_factor,
                split_adj_open, split_adj_high, split_adj_low, split_adj_close, adj_close
         FROM prices
         WHERE isin_code = ?
@@ -369,7 +419,8 @@ def get_prices_for_isin(conn: sqlite3.Connection, isin_code: str) -> pd.DataFram
 def get_all_prices(conn: sqlite3.Connection) -> pd.DataFrame:
     """Get all price records from the database."""
     query = """
-        SELECT ticker, isin_code, date, open, high, low, close, volume, 
+        SELECT ticker, isin_code, date, open, high, low, close, volume,
+               quotation_factor,
                split_adj_open, split_adj_high, split_adj_low, split_adj_close, adj_close
         FROM prices
         ORDER BY isin_code, date
@@ -407,6 +458,86 @@ def get_all_stock_actions(conn: sqlite3.Connection) -> pd.DataFrame:
     return pd.read_sql_query(query, conn)
 
 
+def upsert_skipped_events(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
+    """Upsert skipped event records (unrecognized B3 labels) into the database."""
+    if df.empty:
+        return 0
+
+    cursor = conn.cursor()
+
+    sql = """
+        INSERT OR REPLACE INTO skipped_events (isin_code, event_date, label, factor, source, reason)
+        VALUES (?, ?, ?, ?, ?, ?)
+    """
+
+    records = []
+    for _, row in df.iterrows():
+        records.append(
+            (
+                row["isin_code"],
+                _prepare_date(row["event_date"]),
+                row["label"],
+                row.get("factor"),
+                row.get("source", "B3"),
+                row.get("reason"),
+            )
+        )
+
+    cursor.executemany(sql, records)
+    conn.commit()
+
+    logger.info(f"Upserted {len(records):,} skipped event records")
+    return len(records)
+
+
+def record_fetch_failure(
+    conn: sqlite3.Connection,
+    company_code: str,
+    endpoint: str,
+    error_message: str,
+) -> None:
+    """Record an API fetch failure, incrementing retry_count if already exists."""
+    cursor = conn.cursor()
+    sql = """
+        INSERT INTO fetch_failures (company_code, endpoint, error_message, retry_count, resolved)
+        VALUES (?, ?, ?, 0, 0)
+        ON CONFLICT(company_code, endpoint) DO UPDATE SET
+            error_message = excluded.error_message,
+            failed_at = CURRENT_TIMESTAMP,
+            retry_count = fetch_failures.retry_count + 1,
+            resolved = 0
+    """
+    cursor.execute(sql, (company_code, endpoint, error_message))
+    conn.commit()
+
+
+def resolve_fetch_failure(
+    conn: sqlite3.Connection, company_code: str, endpoint: str
+) -> None:
+    """Mark a fetch failure as resolved."""
+    cursor = conn.cursor()
+    cursor.execute(
+        "UPDATE fetch_failures SET resolved = 1 WHERE company_code = ? AND endpoint = ?",
+        (company_code, endpoint),
+    )
+    conn.commit()
+
+
+def get_unresolved_failures(conn: sqlite3.Connection) -> list:
+    """Return all unresolved fetch failures as a list of dicts."""
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        SELECT company_code, endpoint, error_message, failed_at, retry_count
+        FROM fetch_failures
+        WHERE resolved = 0
+        ORDER BY company_code
+        """
+    )
+    cols = ["company_code", "endpoint", "error_message", "failed_at", "retry_count"]
+    return [dict(zip(cols, row)) for row in cursor.fetchall()]
+
+
 def get_summary_stats(conn: sqlite3.Connection) -> dict:
     """Get summary statistics from the database."""
     cursor = conn.cursor()
@@ -432,6 +563,12 @@ def get_summary_stats(conn: sqlite3.Connection) -> dict:
     cursor.execute("SELECT COUNT(*) FROM stock_actions")
     total_stock_actions = cursor.fetchone()[0]
 
+    cursor.execute("SELECT COUNT(*) FROM skipped_events")
+    total_skipped = cursor.fetchone()[0]
+
+    cursor.execute("SELECT COUNT(*) FROM fetch_failures WHERE resolved = 0")
+    unresolved_failures = cursor.fetchone()[0]
+
     return {
         "total_prices": total_prices,
         "total_tickers": total_tickers,
@@ -440,4 +577,6 @@ def get_summary_stats(conn: sqlite3.Connection) -> dict:
         "total_corporate_actions": total_actions,
         "total_detected_splits": total_splits,
         "total_stock_actions": total_stock_actions,
+        "total_skipped_events": total_skipped,
+        "unresolved_fetch_failures": unresolved_failures,
     }
