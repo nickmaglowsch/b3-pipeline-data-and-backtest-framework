@@ -231,6 +231,50 @@ class TestSplitDetection:
             "to prevent double-adjustment"
         )
 
+    def test_nonstandard_ratio_detected_when_enabled(self):
+        """
+        GIVEN a price series with a 2.37x jump (non-standard ratio)
+        AND detect_nonstandard=True
+        WHEN detect_splits_from_prices is called
+        THEN it should return a stock_action with source='DETECTED_NONSTANDARD'
+        """
+        isin = "BRTEST1TEST2"
+        dates = self._make_date_sequence(10)
+        # Price rises from 10.0 to 23.7 (ratio=2.37x -> reverse split)
+        closes = [10.0] * 5 + [23.7] * 5
+        prices = _make_prices_df(isin, list(zip(dates, closes)))
+        existing = pd.DataFrame(columns=["isin_code", "ex_date", "action_type", "factor", "source"])
+
+        result = detect_splits_from_prices(prices, existing, detect_nonstandard=True)
+
+        assert not result.empty, "Should detect non-standard ratio when enabled"
+        row = result.iloc[0]
+        assert row["source"] == "DETECTED_NONSTANDARD"
+        assert row["action_type"] == "REVERSE_SPLIT"
+        # factor should be 1/2.37 ≈ 0.422
+        assert abs(row["factor"] - (1.0 / 2.37)) < 0.01, (
+            f"Expected factor ~{1.0/2.37:.4f}, got {row['factor']}"
+        )
+
+    def test_nonstandard_ratio_not_detected_by_default(self):
+        """
+        GIVEN a price series with a 2.37x jump (non-standard ratio)
+        AND detect_nonstandard=False (default)
+        WHEN detect_splits_from_prices is called
+        THEN it should NOT return any detection for that jump
+        """
+        isin = "BRTEST1TEST2"
+        dates = self._make_date_sequence(10)
+        closes = [10.0] * 5 + [23.7] * 5
+        prices = _make_prices_df(isin, list(zip(dates, closes)))
+        existing = pd.DataFrame(columns=["isin_code", "ex_date", "action_type", "factor", "source"])
+
+        result = detect_splits_from_prices(prices, existing, detect_nonstandard=False)
+
+        assert result.empty, (
+            "Non-standard ratios should NOT be detected when detect_nonstandard=False"
+        )
+
     def test_non_fatcot_split_preserved(self):
         """
         GIVEN a B3 API split where there is NO fatcot transition

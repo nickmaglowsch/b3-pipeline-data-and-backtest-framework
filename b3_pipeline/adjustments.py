@@ -352,6 +352,7 @@ def compute_dividend_adjustment_factors(
 def detect_splits_from_prices(
     prices: pd.DataFrame,
     existing_stock_actions: pd.DataFrame,
+    detect_nonstandard: bool = False,
 ) -> pd.DataFrame:
     """
     Detect missing stock splits from price data by looking for overnight price jumps.
@@ -494,6 +495,36 @@ def detect_splits_from_prices(
                         f"(ratio={ratio:.4f})"
                     )
                     break
+
+            if not matched and detect_nonstandard:
+                # Use raw ratio as factor for non-standard splits.
+                # Convention matches standard detection:
+                #   STOCK_SPLIT factor = split multiple (e.g., 2.37 for a 2.37:1 split)
+                #   REVERSE_SPLIT factor = 1/multiple (e.g., 0.42 for a 1:2.37 reverse)
+                if ratio < 1.0:
+                    # Price dropped -> forward split
+                    split_multiple = 1.0 / ratio
+                    action_type = config.EVENT_TYPE_STOCK_SPLIT
+                    factor = split_multiple
+                    label = f"forward {split_multiple:.2f}:1"
+                else:
+                    # Price rose -> reverse split
+                    action_type = config.EVENT_TYPE_REVERSE_SPLIT
+                    factor = 1.0 / ratio
+                    label = f"reverse 1:{ratio:.2f}"
+
+                detected.append({
+                    "isin_code": isin_code,
+                    "ex_date": jump_date,
+                    "action_type": action_type,
+                    "factor": float(factor),
+                    "source": "DETECTED_NONSTANDARD",
+                })
+                matched = True
+                logger.info(
+                    f"Detected nonstandard split {label} for {isin_code} on {jump_date} "
+                    f"(ratio={ratio:.4f})"
+                )
 
             if not matched and (ratio > 3.0 or ratio < 0.33):
                 logger.warning(
