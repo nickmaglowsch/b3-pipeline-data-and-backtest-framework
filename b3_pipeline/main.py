@@ -37,6 +37,7 @@ def run_pipeline(
     rebuild: bool = False,
     year: Optional[int] = None,
     skip_corporate_actions: bool = False,
+    detect_nonstandard_splits: bool = False,
 ) -> None:
     """
     Execute the complete B3 data pipeline.
@@ -158,7 +159,8 @@ def run_pipeline(
 
         logger.info("Detecting missing splits from price data...")
         detected_splits = adjustments.detect_splits_from_prices(
-            prices_from_db, stock_actions
+            prices_from_db, stock_actions,
+            detect_nonstandard=detect_nonstandard_splits,
         )
         if not detected_splits.empty:
             logger.info(
@@ -314,6 +316,12 @@ Examples:
     )
 
     arg_parser.add_argument(
+        "--detect-nonstandard-splits",
+        action="store_true",
+        help="Also correct price jumps that don't match standard integer split ratios, using the raw observed ratio",
+    )
+
+    arg_parser.add_argument(
         "--retry-failures",
         action="store_true",
         help="Re-fetch only companies that previously failed (from fetch_failures table)",
@@ -338,6 +346,7 @@ Examples:
             rebuild=args.rebuild,
             year=args.year,
             skip_corporate_actions=args.skip_corporate_actions,
+            detect_nonstandard_splits=args.detect_nonstandard_splits,
         )
 
 
