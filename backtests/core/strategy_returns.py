@@ -1,7 +1,7 @@
 """
 Strategy Return Extraction Module
 ==================================
-Runs all 8 core B3 strategies and returns their monthly after-tax return series
+Runs all 9 core B3 strategies and returns their monthly after-tax return series
 as a single clean DataFrame. This decouples signal generation from portfolio
 construction and eliminates code duplication across compare_all.py,
 correlation_matrix.py, and portfolio_low_corr_backtest.py.
@@ -33,9 +33,11 @@ for _p in [_PROJECT_ROOT, _BACKTESTS_DIR]:
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from core.data import load_b3_data, download_benchmark, download_cdi_daily
+from core.data import load_b3_data, load_b3_hlc_data, download_benchmark, download_cdi_daily
 from core.metrics import value_to_ret
 from core.simulation import run_simulation
+from core.shared_data import _detect_and_fix_unrecorded_splits
+from core.mean_rev_helpers import compute_mean_rev_features
 
 # ── Default DB path ──────────────────────────────────────────────────────────
 _DEFAULT_DB = os.path.join(_PROJECT_ROOT, "b3_market_data.sqlite")
@@ -389,6 +391,150 @@ def _run_mom_sharpe(shared: dict, cfg: dict) -> dict:
     return _run_sim("MomSharpe", r, tw, cfg)
 
 
+def _run_mean_rev_composite(shared: dict, cfg: dict) -> dict:
+    """
+    Strategy 9: Mean-Reversion Composite Alpha (long-only, default params)
+    Cross-sectional mean-reversion with regime filter, vol-parity, and IC stability guard.
+    """
+    from core.mean_rev_helpers import (
+        compute_regime_filter,
+        compute_alpha_score,
+        compute_signal_stability,
+    )
+
+    ret = shared["ret"]
+    adtv = shared["adtv"]
+    raw_close = shared["raw_close"]
+    cdi_monthly = shared["cdi_monthly"]
+    ibov_ret = shared["ibov_ret"]
+    rolling_vol_20d_daily = shared["rolling_vol_20d_daily"]
+
+    # Default params for the core comparison
+    params = {
+        "w_vol": 0.333, "w_macro": 0.333, "w_autocorr": 0.333,
+        "long_pct": 0.20, "enable_short": "No",
+        "risk_off_exposure": 0.0,
+        "enable_vol_parity": "Yes",
+        "enable_stability_guard": "Yes",
+        "ic_check_freq": 3, "ic_trailing_months": 12, "ic_flip_consecutive": 2,
+        "ibov_drawdown_gate": "No", "ibov_drawdown_threshold": -0.10,
+        "min_adtv": _MIN_ADTV, "min_price": _MIN_PRICE,
+    }
+
+    risk_on = compute_regime_filter(shared, params, _FREQ)
+    alpha, sub_signals = compute_alpha_score(shared, params, _FREQ)
+
+    # Apply glitch mask
+    has_glitch_m = None
+    if "has_glitch" in shared:
+        has_glitch_m = shared["has_glitch"].resample(_FREQ).last()
+        alpha[has_glitch_m == 1] = np.nan
+
+    # Stability guard
+    fwd_ret = ret.shift(-1)
+    base_weights = {"sub_A": 0.333, "sub_B": 0.333, "sub_C": 0.333}
+    stability_weights = compute_signal_stability(sub_signals, fwd_ret, base_weights, params)
+
+    # Vol-parity weights (monthly)
+    rolling_vol_20d_m = rolling_vol_20d_daily.resample(_FREQ).last()
+
+    tw = pd.DataFrame(0.0, index=ret.index, columns=ret.columns)
+    tw["CDI_ASSET"] = 0.0
+    r = ret.copy()
+    r["CDI_ASSET"] = cdi_monthly
+    r["IBOV"] = ibov_ret
+
+    start_idx = 14  # warmup for 12-month lookback + buffer
+
+    risk_off_exposure = params.get("risk_off_exposure", 0.0)
+
+    for i in range(start_idx, len(ret)):
+        date = ret.index[i]
+
+        # Layer 1: Regime check (default to Risk-Off for missing dates)
+        if date in risk_on.index:
+            is_risk_on = bool(risk_on.loc[date])
+        else:
+            is_risk_on = False
+
+        if not is_risk_on and risk_off_exposure == 0.0:
+            tw.iloc[i, tw.columns.get_loc("CDI_ASSET")] = 1.0
+            continue
+
+        # Layer 2+4: Get alpha score with adaptive weights
+        alpha_idx = i - 1
+        if date in stability_weights.index:
+            w_A = stability_weights.loc[date, "w_sub_A"]
+            w_B = stability_weights.loc[date, "w_sub_B"]
+            w_C = stability_weights.loc[date, "w_sub_C"]
+            if alpha_idx < 0 or alpha_idx >= len(sub_signals["sub_A"]):
+                tw.iloc[i, tw.columns.get_loc("CDI_ASSET")] = 1.0
+                continue
+            alpha_row = (
+                w_A * sub_signals["sub_A"].iloc[alpha_idx]
+                + w_B * sub_signals["sub_B"].iloc[alpha_idx]
+                + w_C * sub_signals["sub_C"].iloc[alpha_idx]
+            )
+        else:
+            if alpha_idx < 0 or alpha_idx >= len(alpha):
+                tw.iloc[i, tw.columns.get_loc("CDI_ASSET")] = 1.0
+                continue
+            alpha_row = alpha.iloc[alpha_idx]
+
+        if has_glitch_m is not None and alpha_idx < len(has_glitch_m):
+            glitch_row = has_glitch_m.iloc[alpha_idx]
+            alpha_row = alpha_row.copy()
+            alpha_row[glitch_row == 1] = np.nan
+
+        if alpha_row.notna().sum() < 5 or alpha_row.abs().sum() == 0:
+            tw.iloc[i, tw.columns.get_loc("CDI_ASSET")] = 1.0
+            continue
+
+        # Layer 3: Portfolio construction
+        adtv_r = adtv.iloc[i - 1]
+        raw_r = raw_close.iloc[i - 1]
+        adtv_rank = adtv_r.rank(pct=True)
+        mask = (adtv_r >= _MIN_ADTV) & (raw_r >= _MIN_PRICE) & (adtv_rank >= 0.20)
+        valid = alpha_row[mask].dropna()
+
+        if len(valid) < 5:
+            tw.iloc[i, tw.columns.get_loc("CDI_ASSET")] = 1.0
+            continue
+
+        n_long = max(5, int(len(valid) * params.get("long_pct", 0.20)))
+        sel = valid.nlargest(n_long).index.tolist()
+
+        # Determine gross exposure (scaled down in Risk-Off with partial exposure)
+        long_gross = risk_off_exposure if not is_risk_on else 1.0
+
+        # Vol-parity
+        if i - 1 < len(rolling_vol_20d_m):
+            vol_row = rolling_vol_20d_m.iloc[i - 1]
+            inv_vol = 1.0 / vol_row.reindex(sel).replace(0, np.nan).dropna()
+            if len(inv_vol) == 0:
+                w = long_gross / len(sel)
+                for t in sel:
+                    if t in tw.columns:
+                        tw.iloc[i, tw.columns.get_loc(t)] = w
+            else:
+                weights = (inv_vol / inv_vol.sum()) * long_gross
+                for t, w in weights.items():
+                    if t in tw.columns:
+                        tw.iloc[i, tw.columns.get_loc(t)] = w
+        else:
+            w = long_gross / len(sel)
+            for t in sel:
+                if t in tw.columns:
+                    tw.iloc[i, tw.columns.get_loc(t)] = w
+
+        # If risk-off with partial exposure, allocate remainder to CDI
+        if not is_risk_on and risk_off_exposure > 0.0:
+            cdi_alloc = 1.0 - long_gross
+            tw.iloc[i, tw.columns.get_loc("CDI_ASSET")] = max(0.0, cdi_alloc)
+
+    return _run_sim("MeanRevComposite", r, tw, cfg)
+
+
 def _run_sim(name: str, r: pd.DataFrame, tw: pd.DataFrame, cfg: dict) -> dict:
     """Helper: call run_simulation with config dict, return result."""
     return run_simulation(
@@ -416,7 +562,7 @@ def build_strategy_returns(
     monthly_sales_exemption: float = 20_000,
 ) -> "tuple[pd.DataFrame, dict, dict]":
     """
-    Run all 8 core strategies and return their after-tax monthly return series.
+    Run all 9 core strategies and return their after-tax monthly return series.
 
     Parameters
     ----------
@@ -463,9 +609,14 @@ def build_strategy_returns(
 
     # ── 1. Load shared data once ─────────────────────────────────────────────
     print("  [strategy_returns] Loading market data...")
-    adj_close, close_px, fin_vol = load_b3_data(db_path, start, end)
+    adj_close, split_adj_high, split_adj_low, split_adj_close, close_px, fin_vol = (
+        load_b3_hlc_data(db_path, start, end)
+    )
     cdi_daily = download_cdi_daily(start, end)
     ibov_px = download_benchmark("^BVSP", start, end)
+
+    # Fix unrecorded splits (same as shared_data.py path)
+    adj_close = _detect_and_fix_unrecorded_splits(adj_close, close_px)
 
     ibov_ret = ibov_px.resample(_FREQ).last().pct_change().dropna()
     cdi_ret = (1 + cdi_daily).resample(_FREQ).prod() - 1
@@ -477,7 +628,9 @@ def build_strategy_returns(
     adtv = fin_vol.resample(_FREQ).mean()
 
     log_ret = np.log1p(ret)
-    has_glitch = ((ret > 1.0) | (ret < -0.90)).rolling(_LOOKBACK).max()
+    # Threshold -0.45 catches 2:1 splits (-50%) and 3:1 splits (-67%)
+    # that slip past the heuristic detector (matches shared_data.py)
+    has_glitch = ((ret > 1.0) | (ret < -0.45)).rolling(_LOOKBACK).max()
 
     # ── 2. Precompute regime signals ──────────────────────────────────────────
     # COPOM easing: CDI 3-month ago higher than 1-month ago
@@ -523,6 +676,20 @@ def build_strategy_returns(
     atr_m = atr_proxy.resample(_FREQ).last()
     vol_20d = ret.rolling(2).std()
 
+    # ── Mean-reversion composite features (daily frequency) ─────────────────
+    mr_features = compute_mean_rev_features(
+        adj_close, split_adj_high, split_adj_low, split_adj_close,
+        cdi_daily, ibov_daily_ret, ibov_px,
+    )
+    autocorr_20d = mr_features["autocorr_20d"]
+    autocorr_60d = mr_features["autocorr_60d"]
+    high_low_range_20d = mr_features["high_low_range_20d"]
+    rolling_vol_20d_daily = mr_features["rolling_vol_20d_daily"]
+    rolling_vol_60d_daily = mr_features["rolling_vol_60d_daily"]
+    cdi_cumul_63d = mr_features["cdi_cumul_63d"]
+    ibov_vol_20d_daily = mr_features["ibov_vol_20d_daily"]
+    ibov_ret_20d_daily = mr_features["ibov_ret_20d_daily"]
+
     # ── 3. Package shared data ────────────────────────────────────────────────
     shared = dict(
         ret=ret,
@@ -537,15 +704,30 @@ def build_strategy_returns(
         ibov_calm=ibov_calm,
         ibov_uptrend=ibov_uptrend,
         ibov_above=ibov_above,
+        ibov_vol_pctrank=ibov_vol_pctrank,
         mf_composite=mf_composite,
         vol_60d=vol_60d,
         atr_m=atr_m,
         vol_20d=vol_20d,
         cdi_monthly=cdi_monthly,
+        cdi_daily=cdi_daily,
         ibov_ret=ibov_ret,
+        ibov_px=ibov_px,
         px=px,
         adj_close=adj_close,
         fin_vol=fin_vol,
+        split_adj_high=split_adj_high,
+        split_adj_low=split_adj_low,
+        split_adj_close=split_adj_close,
+        # ── mean-reversion composite features ────────────────────────────────
+        autocorr_20d=autocorr_20d,
+        autocorr_60d=autocorr_60d,
+        high_low_range_20d=high_low_range_20d,
+        rolling_vol_20d_daily=rolling_vol_20d_daily,
+        rolling_vol_60d_daily=rolling_vol_60d_daily,
+        cdi_cumul_63d=cdi_cumul_63d,
+        ibov_vol_20d_daily=ibov_vol_20d_daily,
+        ibov_ret_20d_daily=ibov_ret_20d_daily,
     )
 
     regime_signals = dict(
@@ -555,16 +737,17 @@ def build_strategy_returns(
         ibov_above=ibov_above,
     )
 
-    # ── 4. Run all 8 strategies ───────────────────────────────────────────────
+    # ── 4. Run all 9 strategies ───────────────────────────────────────────────
     strategy_runners = [
-        ("CDI+MA200",       _run_cdi_ma200),
-        ("Res.MultiFactor", _run_res_multifactor),
-        ("RegimeSwitching", _run_regime_switching),
-        ("COPOM Easing",    _run_copom_easing),
-        ("MultiFactor",     _run_multifactor),
-        ("SmallcapMom",     _run_smallcap_mom),   # NOTE: ADTV < R$1M
-        ("LowVol",          _run_low_vol),
-        ("MomSharpe",       _run_mom_sharpe),
+        ("CDI+MA200",         _run_cdi_ma200),
+        ("Res.MultiFactor",   _run_res_multifactor),
+        ("RegimeSwitching",   _run_regime_switching),
+        ("COPOM Easing",      _run_copom_easing),
+        ("MultiFactor",       _run_multifactor),
+        ("SmallcapMom",       _run_smallcap_mom),   # NOTE: ADTV < R$1M
+        ("LowVol",            _run_low_vol),
+        ("MomSharpe",         _run_mom_sharpe),
+        ("MeanRevComposite",  _run_mean_rev_composite),  # NEW: 4-layer composite alpha
     ]
 
     sim_results = {}

@@ -65,6 +65,16 @@
 - REMAINING: Config module-level `mkdir()` side effects (same pattern as `result_store.py` in UI)
 - REMAINING: IC decay plot still doesn't show actual decay bars (shows IC_IR bar instead)
 
+## Mean-Reversion Composite Review Notes (Mar 2026)
+- Files: `backtests/core/mean_rev_helpers.py` (new), `backtests/strategies/mean_reversion.py` (modified), `backtests/core/shared_data.py` (modified), `backtests/core/strategy_returns.py` (modified), `backtests/validate_mean_rev_composite.py` (new)
+- **CRITICAL**: `has_glitch` threshold diverges: shared_data.py uses -0.45, strategy_returns.py uses -0.90
+- **CRITICAL**: Feature computation duplicated ~40 lines between shared_data.py and strategy_returns.py. PRD recommended shared helper but was NOT implemented. Root cause of divergences.
+- `_detect_and_fix_unrecorded_splits` called in shared_data.py but NOT in strategy_returns.py
+- Rank_volume >= 0.20 ADTV rank filter missing from both paths (PRD requirement)
+- Stability guard weight redistribution does proportional rescaling, PRD says "equal redistribution"
+- CDI cumulative NaN guard hardcoded as < 40 instead of `max(20, 63*0.6)` from base_signals.py
+- Regime filter: plugin defaults to Risk-Off when date not in index; strategy_returns defaults to Risk-On
+
 ## Discovery UI Review Notes (Mar 2026)
 - Files: `ui/services/discovery_service.py`, `ui/components/discovery_charts.py`, `ui/pages/5_discovery.py`, modified `ui/app.py`
 - Catalog JSON keys: {generated_at, pipeline_version, evaluation_date_range, primary_horizon, total_generated, total_after_pruning, features, category_summary}

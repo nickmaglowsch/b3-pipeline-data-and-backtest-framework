@@ -131,7 +131,7 @@ if current_job_id:
                     store = ResultStore()
                     result_id = store.save(result)
                     st.session_state[save_flag] = True
-                    st.toast(f"Result saved: {result_id}", icon="check_mark")
+                    st.toast(f"Result saved: {result_id}", icon="\u2705")
                 except Exception as e:
                     st.warning(f"Could not save result: {e}")
 

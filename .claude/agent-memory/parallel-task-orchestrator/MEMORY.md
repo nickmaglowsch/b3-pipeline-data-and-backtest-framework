@@ -61,3 +61,12 @@
 - Results stored in results/ directory (gitignored)
 - Strategy discovery: get_registry().list_all() returns all 13 strategies on first call
 - backtest_service uses @st.cache_resource to cache shared_data (heavy, ~200MB)
+
+### MeanRevComposite Strategy -- created 2026-03-02
+- backtests/core/mean_rev_helpers.py: 3 helpers -- compute_regime_filter(), compute_alpha_score(), compute_signal_stability()
+- backtests/strategies/mean_reversion.py: SimpleMeanReversionStrategy (old) + MeanReversionCompositeStrategy (new, name="MeanRevComposite")
+- backtests/core/shared_data.py: now calls load_b3_hlc_data() (not load_b3_data()), adds 8 new feature keys + 3 HLC keys
+- backtests/core/strategy_returns.py: now 9 strategies; also calls load_b3_hlc_data() and adds same 8 feature keys + ibov_vol_pctrank + ibov_px to shared dict
+- backtests/validate_mean_rev_composite.py: 5-test end-to-end validation script
+- All helper functions (regime filter, alpha scoring, stability guard) are in mean_rev_helpers.py -- NOT split across tasks as the task files suggested
+- strategy_returns.py imports from `core.mean_rev_helpers` (not `backtests.core`) due to its sys.path setup
