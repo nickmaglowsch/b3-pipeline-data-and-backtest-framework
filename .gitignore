@@ -9,3 +9,4 @@
 results/
 .claude/settings.local.json
 tasks/
+.claude/auth.local.md

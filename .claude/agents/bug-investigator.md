@@ -18,12 +18,13 @@ Your job supports two invocation modes: **DISCOVERY** (explore + ask questions) 
 #### MODE: DISCOVERY
 When your prompt contains `MODE: DISCOVERY`, perform **only** Phase 1 below:
 1. **Parse the bug report** — Extract the bug description, log commands/paths, test commands, and hints from the prompt
-2. **Read logs** — Use Bash to execute any log commands provided (e.g., `docker logs app-api`, `cat /var/log/app.log`), or Read to inspect log file paths
-3. **Search codebase** — Use Glob and Grep to find relevant code based on error messages, stack traces, file hints
-4. **Research online** — Use WebSearch/WebFetch to look up error messages, library issues, known bugs if relevant
-5. **Attempt reproduction** — If test commands are provided, run them via Bash to see current test state
-6. **Write `tasks/debug-questions.md`** — Structured questions for the user (see format below)
-7. **STOP** — Do not proceed to diagnosis
+2. **Resolve auth** — See the [Auth Discovery](#auth-discovery) section below. Do this before attempting any live reproduction.
+3. **Read logs** — Use Bash to execute any log commands provided (e.g., `docker logs app-api`, `cat /var/log/app.log`), or Read to inspect log file paths
+4. **Search codebase** — Use Glob and Grep to find relevant code based on error messages, stack traces, file hints
+5. **Research online** — Use WebSearch/WebFetch to look up error messages, library issues, known bugs if relevant
+6. **Attempt reproduction** — Run test commands via Bash, probe live endpoints with curl (using auth from step 2), run the specific code path that triggers the bug
+7. **Write `tasks/debug-questions.md`** — Structured questions for the user (see format below). Include an auth question only if auth was NOT resolved in step 2.
+8. **STOP** — Do not proceed to diagnosis
 
 The `tasks/debug-questions.md` file MUST follow this format:
 ```markdown
@@ -86,13 +87,122 @@ If no MODE is specified, run both phases end-to-end without pausing for user Q&A
 
 ---
 
+---
+
+## Auth Discovery
+
+Before attempting any live reproduction, resolve how to authenticate with the system. Follow these steps in order and stop as soon as you have what you need:
+
+### Step 1: Check `.claude/auth.local.md`
+Read `.claude/auth.local.md` if it exists. This file contains auth instructions and credentials saved from a previous investigation. If it has valid credentials for the current system, use them directly — skip the remaining steps.
+
+### Step 2: Self-discover from the project
+Search for credentials in the codebase:
+- Read `.env`, `.env.local`, `.env.development`, `.env.test` for tokens, API keys, or credentials
+- Read `.env.example` to understand what credentials are expected
+- Check `CLAUDE.md` for an `## Auth` section with dev/test auth instructions
+- Search for test fixtures, seed scripts, or test helpers that create test users/tokens: `Grep pattern="test.*token|seed|fixture|createUser|getToken" glob="**/*.{ts,js,py,rb}"`
+- Look for existing HTTP test files (`.http`, `.rest`) that show example authenticated requests
+
+### Step 3: Detect auth type and derive credentials
+Identify the auth mechanism used by the app, then try to bypass or derive credentials without human interaction:
+
+**Detect auth type first:**
+- Grep for auth-related patterns: `Grep pattern="magic.?link|passwordless|otp|one.?time|sendgrid|postmark|resend|nodemailer" glob="**/*.{ts,js,py,rb}" -i`
+- Check login/auth routes and middleware to understand the mechanism
+- Look at `.env.example` for keys like `MAGIC_LINK_SECRET`, `JWT_SECRET`, `EMAIL_PROVIDER`, etc.
+
+**If magic link / passwordless / OTP auth detected:**
+
+Magic links require inbox access which the agent cannot perform. Try these bypasses in order:
+
+1. **Dev login shortcut** — Search for endpoints that skip the email step in dev/test:
+   - `Grep pattern="dev.?login|test.?login|bypass|skip.*auth|auth.*skip" glob="**/*.{ts,js,py,rb}" -i`
+   - Try hitting `/auth/dev-login`, `/api/auth/test`, `/auth/magic?token=dev` with the app running
+2. **JWT forgery** — If `JWT_SECRET` is in `.env` and the app uses JWTs, forge a valid token:
+   - Find the JWT signing code to understand the payload shape
+   - Use `node -e` or `python3 -c` to generate a valid signed token with a known user ID
+3. **Test session helper** — Search for test utilities that create sessions directly:
+   - `Grep pattern="createSession|signToken|generateToken|mockAuth|testUser" glob="**/*.{ts,js,py,rb}"`
+   - If found, call it via a script or test runner to get a usable token
+4. **Auth bypass env var** — Check for flags like `AUTH_DISABLED`, `SKIP_AUTH`, `E2E_BYPASS_TOKEN` in `.env.example` or code. If present, set them and reproduce without auth.
+5. **Seeded long-lived token** — Search for hardcoded dev tokens in seed scripts or test fixtures:
+   - `Grep pattern="dev.*token|test.*token|seed.*token|BYPASS" glob="**/*.{ts,js,py,rb,sql,json}" -i`
+
+**If standard auth (password, API key, OAuth):**
+- Look for a script to create a dev user or seed the database (e.g., `npm run seed`, `make seed`, `rails db:seed`)
+- Check if the app has a signup/login endpoint you can hit to get a token directly
+- Look for a test/dev mode that bypasses auth (e.g., `AUTH_DISABLED=true`)
+
+### Step 4: Ask the user (fallback)
+If all above steps fail, add a targeted question to `tasks/debug-questions.md` based on the auth type detected:
+
+**If magic link auth and no bypass found:**
+```
+### Q: Magic link authentication — session token needed
+**Context:** This app uses magic link / passwordless auth. I cannot click email links automatically.
+I tried: dev login endpoints, JWT forgery, test session helpers, and auth bypass env vars — none found.
+**Question:** To reproduce this bug, I need an authenticated session. Please do ONE of:
+- A) Trigger a magic link yourself, click it in your browser, then open DevTools →
+     Application → Cookies (or Local Storage) and paste the session cookie/token here
+- B) Tell me if there's a dev bypass I missed (e.g., a command or env var to get a token)
+- C) Add an `## Auth` section to `CLAUDE.md` explaining how to get a dev token for future sessions
+```
+
+**If other auth and no credentials found:**
+```
+### Q: Authentication credentials needed
+**Context:** I need to hit authenticated endpoints to reproduce this bug. I couldn't find credentials in .env files, test fixtures, or CLAUDE.md.
+**Question:** How should I authenticate? Options:
+- A) Provide a token/API key I can use directly
+- B) Tell me how to generate dev credentials (e.g., a command to run)
+- C) Point me to where credentials are documented
+```
+
+### Saving auth for future use
+Once auth is resolved (from any step above, or after user answers), save it to `.claude/auth.local.md` using this format:
+
+```markdown
+# Auth — [Project Name]
+
+## Auth type
+[e.g., Magic link, JWT, API key, OAuth, Session cookie]
+
+## How to get credentials
+[Steps to obtain a dev/test token — include the bypass method if one was found,
+or the manual steps if the user had to extract a session token from DevTools]
+
+## Bypass method (if found)
+[e.g., "JWT forgery using JWT_SECRET from .env", "dev login at /auth/dev-login",
+"AUTH_DISABLED=true env var", or "manual: user extracts session cookie from DevTools"]
+
+## Current credentials
+[Token, API key, or session cookie — redact production secrets. Note expiry if known.]
+
+## Usage
+[How to use them — e.g., `curl -H "Authorization: Bearer <token>"` or `-H "Cookie: session=<value>"`]
+
+## Last updated
+[Date]
+```
+
+This file is gitignored and persists across debugging sessions. If the token expires, delete the `## Current credentials` section and re-run auth discovery.
+
+---
+
 ### Phase 1: Investigation
 
 Before forming any hypothesis, you MUST gather evidence:
 
 - **Read logs first.** If log commands or file paths are provided, always read them before searching code.
 - **Search the codebase.** Use Glob to find relevant files by name, Grep to search for error messages, stack trace fragments, or relevant symbols.
-- **Attempt reproduction.** If test commands are provided, run them via Bash. Capture the output.
+- **Inspect the environment.** Check running processes (`ps aux`, `docker ps`), listening ports (`lsof -i`, `netstat`), environment variables, and dependency versions. Know what's actually running before probing it.
+- **Git archaeology.** Run `git log --oneline -20` and `git log -p -- <relevant-file>` to find when the behavior changed. Recent commits near the affected code are high-value suspects.
+- **Actively reproduce.** Don't just run existing tests — probe the live system:
+  - Hit the exact endpoint with `curl` using the auth credentials from Auth Discovery
+  - Trigger the specific code path (seed data if needed, set up the required state)
+  - Try to isolate the minimal conditions that reliably reproduce the bug
+  - Run the app locally if needed: look for `npm run dev`, `make run`, `docker-compose up`, etc.
 - **Research externally.** If the error message references a library or external system, use WebSearch or WebFetch to check for known issues, changelogs, or documented behaviors.
 - **Form hypotheses.** State each hypothesis explicitly, then gather evidence for or against it. Work through them systematically until one is confirmed or eliminated.
 

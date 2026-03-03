@@ -1,7 +1,7 @@
 ---
 name: build
 description: "Full build pipeline: takes a PRD, breaks it into tasks, implements them in parallel, and reviews the result. Orchestrates prd-task-planner → parallel-task-orchestrator → code-reviewer."
-argument-hint: "[paste PRD or path to PRD file]"
+argument-hint: "[--brainstorm] <PRD or path to PRD file>"
 ---
 
 # Build Pipeline
@@ -10,9 +10,13 @@ You are orchestrating the full build pipeline. Follow these steps strictly in or
 
 ## Input
 
-The user's PRD or feature spec:
+The raw arguments (may include `--brainstorm` flag):
 
 $ARGUMENTS
+
+**Parse flags before proceeding:**
+- If `$ARGUMENTS` starts with or contains `--brainstorm`, set `BRAINSTORM=true` and strip `--brainstorm` from the arguments to get the clean PRD content.
+- Otherwise, `BRAINSTORM=false` and the full arguments are the PRD content.
 
 ## Step 0: Clean up — Remove stale task files
 
@@ -20,14 +24,34 @@ Before starting, remove any leftover files from a previous build run:
 - Use Bash to run `rm -rf tasks/` to clear the entire tasks directory
 - This prevents stale task files from being picked up by the orchestrator
 
+## Step 0.5 (if BRAINSTORM=true): Design brainstorm
+
+**Skip this step if BRAINSTORM=false.**
+
+1. Launch the `prd-task-planner` agent using the Task tool with:
+   - `subagent_type: "prd-task-planner"`
+   - Prompt: `MODE: BRAINSTORM\n\n<clean PRD content>`
+   - Wait for it to complete. **Save the returned agent ID** — this agent will be resumed in Step 1a.
+
+2. Read `tasks/design-options.md`.
+
+3. Present the design options to the user using `AskUserQuestion`. Build one question per option listed in the file, using the option names as labels and their summaries/trade-offs as descriptions. Include a "Custom direction" option. Ask: "Which design approach should we use for this feature?"
+
+4. Collect the user's chosen option. Store it as `CHOSEN_DESIGN`.
+
 ## Step 1: Plan — Two-phase planning with user Q&A
 
 ### Step 1a: Discovery — Explore codebase & surface questions
 
-Launch the `prd-task-planner` agent using the Task tool with:
+**If BRAINSTORM=true** — resume the agent from Step 0.5:
+- `resume: "<agent-id-from-step-0.5>"`
+- Prompt: `MODE: DISCOVERY\n\nChosen design direction: <CHOSEN_DESIGN>\n\n<clean PRD content>`
+- Tell it to output questions to `tasks/planning-questions.md`
+- The agent already has full codebase context from the brainstorm phase — it will skip re-exploration.
+
+**If BRAINSTORM=false** — launch a fresh agent:
 - `subagent_type: "prd-task-planner"`
-- Provide the full PRD content above as the prompt
-- Prepend `MODE: DISCOVERY` to the prompt
+- Prompt: `MODE: DISCOVERY\n\n<PRD content>`
 - Tell it to output questions to `tasks/planning-questions.md`
 
 Wait for it to complete. **Save the returned agent ID** — you will resume this agent in Step 1c.
@@ -47,6 +71,38 @@ Resume the **same** prd-task-planner agent (using the agent ID from Step 1a) wit
 - Tell it to generate the updated PRD and task files in `tasks/`
 
 Wait for it to complete. Confirm that task files were created in `tasks/`.
+
+### Step 1d: Task review — Present plan and get approval
+
+This step always runs. Do not skip it.
+
+1. Read all `task-*.md` files from `tasks/`. For each, extract:
+   - Task number and title (from filename or `# Task N:` heading)
+   - Objective (first line of `## Objective` section)
+   - Dependencies (from `## Dependencies` section)
+
+2. Present the full task plan to the user as a formatted list:
+   ```
+   ## Task Plan (N tasks)
+
+   1. task-01-name — [Objective]
+      Dependencies: None
+   2. task-02-name — [Objective]
+      Dependencies: task-01
+   ...
+   ```
+   Then add: "You can also open and edit any file in `tasks/` directly before proceeding."
+
+3. Use `AskUserQuestion` with a single question: "How would you like to proceed?"
+   - **"Looks good — start implementation"** — continue to Step 2
+   - **"Regenerate with feedback"** — user provides feedback via the "Other" field
+
+4. **If user approves**: proceed to Step 2.
+
+5. **If user requests regeneration**: resume the **same** prd-task-planner agent (from Step 1a/1c) with:
+   - `resume: "<agent-id-from-step-1a>"`
+   - Prompt: `MODE: GENERATE\n\nUser feedback on the task plan:\n<feedback>\n\nPlease regenerate the task files incorporating this feedback.`
+   - Wait for it to complete, then **loop back to the top of Step 1d** to re-present the updated plan.
 
 ## Step 2: Implement — Run parallel-task-orchestrator
 
