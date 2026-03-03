@@ -23,10 +23,10 @@
 - CDI downloaded from BCB SGS API series 12; IBOV from Yahoo via yfinance
 - Plotting: dark theme PALETTE in backtests/core/plotting.py; all matplotlib
 
-## Dependencies (as of 2026-02-28)
-- requirements.txt: requests, pandas, numpy, matplotlib, scikit-learn, xgboost, yfinance, python-dateutil, scipy
+## Dependencies (as of 2026-03-02)
+- requirements.txt: requests, pandas, numpy, matplotlib, scikit-learn, xgboost, yfinance, python-dateutil, scipy, hmmlearn, streamlit>=1.30, plotly>=5.18, pyarrow>=14
 - Python 3.9 with venv at .venv/
-- No web framework installed yet
+- `from __future__ import annotations` required for modern type hints
 
 ## Key Files for Backtest Architecture
 - `backtests/core/strategy_returns.py` -- centralizes 8 core strategies with shared data dict pattern
@@ -35,25 +35,25 @@
 - `backtests/compare_all.py` -- runs 8 strategies side-by-side
 - `backtests/correlation_matrix.py` -- strategy return correlation heatmap
 
-## Streamlit UI Plan (2026-02-28)
-- User chose: Streamlit, Plotly charts, background jobs with streaming, full parameter editor, plugin architecture, local-only
-- New dirs: ui/ (Streamlit app), backtests/strategies/ (plugin classes), results/ (saved backtest results)
-- Strategy base class with ParameterSpec for dynamic form generation
-- Python 3.9 requires `from __future__ import annotations` for modern type hints
+## Streamlit UI (IMPLEMENTED as of 2026-03-02)
+- Entry: `streamlit run ui/app.py` from project root
+- Pages: 1_pipeline, 2_backtest_runner, 3_dashboard, 4_research
+- Services: job_runner.py (bg thread+queue), backtest_service.py, pipeline_service.py, research_service.py, result_store.py
+- Components: charts.py (Plotly, PALETTE, _apply_dark_theme), log_stream.py (st.fragment), metrics_table.py, parameter_form.py
+- All pages use pattern: _PROJECT_ROOT path insert, set_page_config, try/except ImportError for graceful degradation
+- Dark theme: bg=#0D1117, panel=#161B22, grid=#21262D, text=#E6EDF3, sub=#8B949E
 
-## Feature Discovery Engine (2026-03-02) -- IMPLEMENTED with gaps
-- Subpackage: `research/discovery/` (12 files, does NOT modify existing `research/` files)
-- Entry point: `python -m research.discovery.main`
-- Evaluation metric: IC (Spearman rank correlation) not binary classification AUC
-- Feature store: `research/feature_store/` with Parquet + JSON registry for incremental runs
-- 15 of 17 base signal categories implemented (missing: EWM variants, Mean Reversion)
-- All 7 operators defined but only rank/zscore/delta/ratio/product are wired into pipeline
-- `op_diff` and `op_ratio_to_mean` exist in code but NOT registered in operator dicts
-- IC time series computed but not persisted (only summary stats saved to JSON registry)
-- 4 of 6 plots implemented (missing: IC time series line chart, correlation clustering heatmap)
-- `--incremental` flag parsed but not wired to evaluator's `force` parameter
-- `evaluations_dir` created but never written to (intended for IC time series Parquet)
-- Dependencies: pyarrow, hmmlearn, streamlit, plotly, scipy all in requirements.txt
+## Feature Discovery Engine (2026-03-02) -- IMPLEMENTED
+- Subpackage: `research/discovery/` (12 files)
+- Entry point: `python -m research.discovery.main` (--incremental, --force-recompute)
+- 541 features generated (registry.json), 186 survive pruning (feature_catalog.json)
+- Feature store: Parquet files in research/feature_store/features/, JSON registry
+- IC time series Parquet NOT persisted (evaluations/ dir empty)
+- 4 of 6 static PNG plots generated (missing: IC time series, correlation heatmap)
+- Catalog JSON structure: features[] with rank, id, category, level, formula_human, metrics per horizon, turnover, decay
+- Current 4_research.py shows OLD ML study, NOT discovery engine
+- EWM and Mean Reversion base signals ARE now implemented (all 17+ categories present)
+- op_ratio_to_mean IS wired into Level 2 generation (not in UNARY_OPS/BINARY_OPS dicts but called directly)
 
 ## No Tests
 - No test suite exists in the codebase
