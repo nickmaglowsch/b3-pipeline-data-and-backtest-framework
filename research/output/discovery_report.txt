@@ -1,0 +1,96 @@
+================================================================================
+B3 FEATURE DISCOVERY RESULTS
+================================================================================
+
+================================================================================
+1. DATASET OVERVIEW
+================================================================================
+  Training Fraction:   70.0%
+  Min IC Threshold:    0.0050
+  Max Correlation:     0.90
+
+================================================================================
+2. DISCOVERY SUMMARY
+================================================================================
+  Initial Features Generated:        541
+  After NaN Filter:                 453
+  After IC Filter:                  380
+  After Correlation Dedup:          186
+  Final Features (after cap):       186
+
+  Total Removed Features:
+    By NaN/Variance:   88
+    By IC Threshold:   73
+    By Correlation:    194
+    By Cap:            0
+
+================================================================================
+3. TOP 30 FEATURES BY IC_IR
+================================================================================
+
+  Rank | Feature ID (truncated) | Category      | Level | IC_IR
+  ----------------------------------------------------------------------------
+     1 | ratio__High_low_range_ | composite     |     2 | -0.1616
+     2 | ratio__Autocorr_60d__A | composite     |     2 | -0.1479
+     3 | product__Ibov_return_2 | composite     |     2 | 0.1444
+     4 | product__Autocorr_60d_ | composite     |     2 | -0.1384
+     5 | ratio__High_low_range_ | composite     |     2 | -0.1327
+     6 | product__High_low_rang | composite     |     2 | -0.1265
+     7 | ratio__CDI_cumulative_ | composite     |     2 | 0.1238
+     8 | ratio__CDI_cumulative_ | composite     |     2 | 0.1238
+     9 | ratio__CDI_cumulative_ | composite     |     2 | 0.1238
+    10 | ratio__CDI_cumulative_ | composite     |     2 | 0.1238
+    11 | ratio__Autocorr_20d__A | composite     |     2 | -0.1156
+    12 | delta20__High_low_rang | volatility    |     2 | -0.1109
+    13 | product__Ibov_return_2 | composite     |     2 | 0.1083
+    14 | product__Autocorr_20d_ | composite     |     2 | -0.1051
+    15 | ratio__Ibov_vol_40d__W | composite     |     2 | -0.1047
+    16 | ratio__Ibov_vol_20d__W | composite     |     2 | -0.1047
+    17 | product__Ibov_vol_20d_ | composite     |     2 | 0.1047
+    18 | product__Ibov_vol_40d_ | composite     |     2 | 0.1047
+    19 | ratio__Ibov_vol_63d__W | composite     |     2 | -0.1047
+    20 | product__Ibov_vol_10d_ | composite     |     2 | 0.1047
+    21 | product__Ibov_vol_63d_ | composite     |     2 | 0.1047
+    22 | ratio__Ibov_vol_10d__W | composite     |     2 | -0.1047
+    23 | product__Ibov_return_2 | composite     |     2 | 0.1043
+    24 | ratio__Ibov_return_20d | composite     |     2 | -0.1043
+    25 | product__High_low_rang | composite     |     2 | -0.1039
+    26 | product__Ibov_vol_63d_ | composite     |     2 | -0.1021
+    27 | product__Ibov_vol_40d_ | composite     |     2 | -0.1021
+    28 | ratio__Ibov_vol_40d__A | composite     |     2 | 0.1021
+    29 | ratio__Ibov_vol_63d__A | composite     |     2 | 0.1021
+    30 | ratio__Ibov_vol_20d__A | composite     |     2 | 0.1021
+
+================================================================================
+4. CATEGORY BREAKDOWN
+================================================================================
+
+  Category              | Count | % of Total
+  --------------------------------------------------
+  composite            |    61 |  32.80%
+  momentum             |    39 |  20.97%
+  volatility           |    32 |  17.20%
+  extremes             |    20 |  10.75%
+  distribution         |    17 |   9.14%
+  volume               |     6 |   3.23%
+  beta                 |     6 |   3.23%
+  liquidity            |     3 |   1.61%
+  autocorr             |     2 |   1.08%
+
+================================================================================
+5. STABILITY ANALYSIS (Train vs Test)
+================================================================================
+
+  Train IC (mean):       -0.003243
+  Test IC (mean):        -0.004606
+  Train IC (std):        0.013156
+  Test IC (std):         0.025694
+
+  Features potentially overfitted (test IC < 50% train): 76
+
+================================================================================
+FEATURE DISCOVERY COMPLETE
+================================================================================
+Report generated for 186 features
+Primary horizon: 20 days
+Min IC threshold: 0.005

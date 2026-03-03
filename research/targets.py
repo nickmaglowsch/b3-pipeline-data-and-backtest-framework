@@ -133,3 +133,21 @@ def get_dataset_for_target(
     y = df[target_col].astype(int)
     meta = df[["date", "ticker"]]
     return X, y, meta
+
+
+def compute_forward_returns_multi(
+    adj_close,
+    horizons,
+):
+    """
+    Compute forward returns for multiple horizons.
+
+    Args:
+        adj_close: wide DataFrame (date x ticker), forward-filled
+        horizons: list of integers (trading days)
+
+    Returns:
+        dict of {horizon_int: wide DataFrame of forward returns}
+        e.g., {5: df_5d, 10: df_10d, 20: df_20d, 60: df_60d}
+    """
+    return {h: compute_forward_returns(adj_close, h) for h in horizons}

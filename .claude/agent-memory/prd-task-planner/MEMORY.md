@@ -38,9 +38,18 @@
 ## Streamlit UI Plan (2026-02-28)
 - User chose: Streamlit, Plotly charts, background jobs with streaming, full parameter editor, plugin architecture, local-only
 - New dirs: ui/ (Streamlit app), backtests/strategies/ (plugin classes), results/ (saved backtest results)
-- 13 tasks in tasks/ directory
 - Strategy base class with ParameterSpec for dynamic form generation
 - Python 3.9 requires `from __future__ import annotations` for modern type hints
+
+## Feature Discovery Engine Plan (2026-03-02)
+- New subpackage: `research/discovery/` (does NOT modify existing `research/` files)
+- Entry point: `python -m research.discovery.main`
+- Evaluation metric: IC (Spearman rank correlation) not binary classification AUC
+- Feature store: `research/feature_store/` with Parquet + JSON registry for incremental runs
+- 10 tasks in tasks/ directory; key modules: base_signals, operators, generator, evaluator, pruning, catalog, plots, report, store
+- Generates ~200-500 features from parametric base signals + unary (rank/zscore) + binary (ratio/product) operators
+- Outputs: feature_catalog.json (for backtests), 6 dark-theme plots, discovery_report.txt
+- Dependencies added: pyarrow, hmmlearn, streamlit, plotly already in requirements.txt
 
 ## No Tests
 - No test suite exists in the codebase
