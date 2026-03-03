@@ -7,3 +7,5 @@
 .DS_Store
 .streamlit/
 results/
+.claude/settings.local.json
+tasks/
