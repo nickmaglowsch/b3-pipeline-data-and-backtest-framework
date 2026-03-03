@@ -92,11 +92,25 @@ def compute_evaluation_summary(
     ic = ic_series.dropna()
     n = len(ic)
 
+    # Guard: empty IC series
+    if n == 0:
+        return {
+            "mean_ic": 0.0, "ic_std": 0.0, "ic_ir": 0.0, "ic_t_stat": 0.0,
+            "pct_positive_ic": 0.0, "mean_ic_5y": None, "n_dates": 0,
+            "mean_ic_train": None, "ic_ir_train": 0.0,
+            "mean_ic_test": None, "ic_ir_test": 0.0,
+        }
+
     mean_ic = ic.mean()
     ic_std = ic.std()
     ic_ir = mean_ic / ic_std if ic_std > 0 else 0.0
-    ic_t_stat = mean_ic / (ic_std / np.sqrt(n)) if ic_std > 0 and n > 0 else 0.0
+    ic_t_stat = mean_ic / (ic_std / np.sqrt(n)) if ic_std > 0 else 0.0
     pct_positive = (ic > 0).mean()
+
+    # Recency metric: mean IC over last 5 years
+    recency_cutoff = ic.index.max() - pd.DateOffset(years=config.IC_RECENCY_YEARS)
+    recent_ic = ic[ic.index >= recency_cutoff]
+    mean_ic_5y = recent_ic.mean() if len(recent_ic) > 0 else np.nan
 
     # Train/test split
     train = ic[ic.index <= train_cutoff_date]
@@ -104,11 +118,11 @@ def compute_evaluation_summary(
 
     mean_ic_train = train.mean() if len(train) > 0 else np.nan
     ic_std_train = train.std() if len(train) > 0 else np.nan
-    ic_ir_train = mean_ic_train / ic_std_train if ic_std_train and ic_std_train > 0 else 0.0
+    ic_ir_train = mean_ic_train / ic_std_train if pd.notna(ic_std_train) and ic_std_train > 0 else 0.0
 
     mean_ic_test = test.mean() if len(test) > 0 else np.nan
     ic_std_test = test.std() if len(test) > 0 else np.nan
-    ic_ir_test = mean_ic_test / ic_std_test if ic_std_test and ic_std_test > 0 else 0.0
+    ic_ir_test = mean_ic_test / ic_std_test if pd.notna(ic_std_test) and ic_std_test > 0 else 0.0
 
     return {
         "mean_ic": round(float(mean_ic), 6),
@@ -116,6 +130,7 @@ def compute_evaluation_summary(
         "ic_ir": round(float(ic_ir), 4),
         "ic_t_stat": round(float(ic_t_stat), 2),
         "pct_positive_ic": round(float(pct_positive), 4),
+        "mean_ic_5y": round(float(mean_ic_5y), 6) if not np.isnan(mean_ic_5y) else None,
         "n_dates": int(n),
         "mean_ic_train": round(float(mean_ic_train), 6) if not np.isnan(mean_ic_train) else None,
         "ic_ir_train": round(float(ic_ir_train), 4),
@@ -179,18 +194,16 @@ def evaluate_feature(
     universe_mask: pd.DataFrame,
     train_cutoff_date,
     fwd_ranks_precomputed: dict = None,
-) -> dict:
+) -> tuple[dict, list[dict]]:
     """
     Full evaluation of a single feature.
 
-    Returns dict keyed by horizon:
-    {
-        "fwd_5d": {mean_ic, ic_ir, ..., decay, turnover},
-        "fwd_10d": {...},
-        ...
-    }
+    Returns tuple of (evaluation_dict, ic_records_list):
+    - evaluation_dict keyed by horizon: {"fwd_5d": {mean_ic, ic_ir, ..., decay, turnover}, ...}
+    - ic_records_list: list of dicts with keys [feature_id, horizon, date, ic] for primary horizon only
     """
     result = {}
+    ic_records = []
 
     # Compute turnover once (applies to all horizons)
     turnover = compute_turnover(feature_wide, universe_mask)
@@ -211,7 +224,18 @@ def evaluate_feature(
         horizon_key = f"fwd_{horizon}d"
         result[horizon_key] = summary
 
-    return result
+        # Collect IC records for primary horizon only
+        if horizon == config.PRIMARY_HORIZON:
+            ic_clean = ic_series.dropna()
+            for dt, val in ic_clean.items():
+                ic_records.append({
+                    "feature_id": feature_id,
+                    "horizon": horizon_key,
+                    "date": dt,
+                    "ic": float(val),
+                })
+
+    return result, ic_records
 
 
 def evaluate_all_features(
@@ -259,6 +283,7 @@ def evaluate_all_features(
     n_total = len(all_features)
 
     rows = []
+    all_ic_records = []
 
     for idx, feature_id in enumerate(all_features):
         if idx % 50 == 0:
@@ -276,10 +301,11 @@ def evaluate_all_features(
             )
 
             # Evaluate (with pre-ranked forward returns)
-            evaluation = evaluate_feature(
+            evaluation, ic_records = evaluate_feature(
                 feature_id, wide_df, forward_returns, universe_mask,
                 train_cutoff_date, fwd_ranks_precomputed,
             )
+            all_ic_records.extend(ic_records)
 
             # Save evaluation
             store.save_evaluation(feature_id, evaluation)
@@ -303,9 +329,18 @@ def evaluate_all_features(
 
             del wide_df, long_df
 
+            # Persist IC records periodically to avoid data loss on interruption
+            if len(all_ic_records) >= 50000:
+                store.save_ic_timeseries_batch(all_ic_records)
+                all_ic_records = []
+
         except Exception as e:
             print(f"    WARNING: Failed to evaluate {feature_id}: {e}")
             continue
+
+    if all_ic_records:
+        print(f"    Persisting IC time series ({len(all_ic_records)} records)...")
+        store.save_ic_timeseries_batch(all_ic_records)
 
     store.save_registry()
 

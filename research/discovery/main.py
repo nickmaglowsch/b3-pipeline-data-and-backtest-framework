@@ -55,6 +55,9 @@ def main():
     )
     args = parser.parse_args()
 
+    if args.incremental and args.force_recompute:
+        parser.error("--incremental and --force-recompute are mutually exclusive")
+
     # Import modules
     from research.data_loader import load_all_data, print_data_summary
     from research.features import compute_universe_mask
@@ -115,7 +118,8 @@ def main():
     # Step 5: Evaluate Level 0 + Level 1
     print("\nStep 5: Evaluating Level 0 + Level 1 features...")
     t0 = time.time()
-    evaluations_df = evaluate_all_features(store, data, universe_mask)
+    force_eval = not args.incremental
+    evaluations_df = evaluate_all_features(store, data, universe_mask, force=force_eval)
     store.save_registry()
     print(f"  Features with evaluation: {len(evaluations_df)}")
     print(f"  Completed in {time.time() - t0:.1f}s")
@@ -147,18 +151,25 @@ def main():
             ic_col, ascending=False, key=abs
         )
         top_for_binary = level0_sorted.head(config.TOP_N_FOR_BINARY_OPS)["feature_id"].tolist()
+
+        # Top N for ratio_to_mean: stock-level features
+        top_for_ratio_to_mean = stock_level_sorted.head(config.TOP_N_FOR_RATIO_TO_MEAN)["feature_id"].tolist()
     else:
         top_for_delta = []
         top_for_binary = []
+        top_for_ratio_to_mean = []
 
-    print(f"  Top {len(top_for_delta)} for delta, top {len(top_for_binary)} for binary ops")
+    print(f"  Top {len(top_for_delta)} for delta, top {len(top_for_binary)} for binary ops, top {len(top_for_ratio_to_mean)} for ratio_to_mean")
     print(f"  Completed in {time.time() - t0:.1f}s")
 
     # Step 7: Generate Level 2
     print("\nStep 7: Generating Level 2 features...")
     t0 = time.time()
-    if top_for_delta or top_for_binary:
-        n_level2 = generate_level2_features(store, data, universe_mask, top_for_delta, top_for_binary)
+    if top_for_delta or top_for_binary or top_for_ratio_to_mean:
+        n_level2 = generate_level2_features(
+            store, data, universe_mask, top_for_delta, top_for_binary,
+            top_features_for_ratio_to_mean=top_for_ratio_to_mean,
+        )
         print(f"  Level 2 features generated: {n_level2}")
     else:
         print(f"  Skipping Level 2 (no top features selected)")
@@ -171,7 +182,7 @@ def main():
     print("\nStep 8: Evaluating Level 2 features...")
     t0 = time.time()
     if n_level2 > 0:
-        evaluations_df = evaluate_all_features(store, data, universe_mask)
+        evaluations_df = evaluate_all_features(store, data, universe_mask, force=force_eval)
         store.save_registry()
         print(f"  Features with evaluation: {len(evaluations_df)}")
     else:

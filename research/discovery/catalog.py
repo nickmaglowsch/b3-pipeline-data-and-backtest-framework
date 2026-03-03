@@ -49,6 +49,18 @@ def parse_feature_id(feature_id: str) -> dict:
             },
         }
 
+    # Handle ratio_to_mean operators (ratio_to_mean10__...)
+    if first.startswith("ratio_to_mean"):
+        period = first[13:]  # e.g., "10" from "ratio_to_mean10"
+        operand = "__".join(parts[1:])
+        return {
+            "formula_human": f"ratio_to_mean{period}({operand})",
+            "formula_components": {
+                "operator": f"ratio_to_mean{period}",
+                "operand": operand,
+            },
+        }
+
     if first in unary_ops:
         operand = "__".join(parts[1:])
         return {

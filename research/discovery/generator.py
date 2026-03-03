@@ -105,6 +105,7 @@ def generate_level2_features(
     universe_mask: pd.DataFrame,
     top_features_for_delta: list[str],
     top_features_for_binary: list[str],
+    top_features_for_ratio_to_mean: list[str] = None,
 ) -> int:
     """
     Generate Level 2 features:
@@ -170,6 +171,52 @@ def generate_level2_features(
                 continue
 
         del wide_df, long_df
+
+    # Phase 1b: ratio_to_mean operator on top features
+    if top_features_for_ratio_to_mean:
+        from research.discovery.operators import op_ratio_to_mean
+
+        for feature_id in top_features_for_ratio_to_mean:
+            if feature_id not in registry["features"]:
+                continue
+
+            long_df = store.load_feature(feature_id)
+            wide_df = long_df.pivot_table(
+                index="date", columns="ticker", values="value"
+            )
+            category = registry["features"][feature_id].get("category")
+
+            for period in config.RATIO_TO_MEAN_PERIODS:
+                new_id = f"ratio_to_mean{period}__{feature_id}"
+
+                if store.has_feature(new_id):
+                    continue
+
+                try:
+                    result = op_ratio_to_mean(wide_df, period)
+
+                    # Mask and convert to long format
+                    masked = result.where(universe_mask)
+                    long_result = masked.stack().reset_index()
+                    long_result.columns = ["date", "ticker", "value"]
+                    long_result = long_result.dropna(subset=["value"])
+                    long_result["value"] = long_result["value"].astype("float32")
+
+                    # Save to store
+                    metadata = {
+                        "category": category,
+                        "level": 2,
+                        "formula": new_id,
+                        "params": {"period": period},
+                    }
+                    store.save_feature(new_id, long_result, metadata)
+                    n_new += 1
+
+                except Exception as e:
+                    print(f"    WARNING: Failed to generate {new_id}: {e}")
+                    continue
+
+            del wide_df, long_df
 
     # Phase 2: Binary operators on top feature pairs
     for feat_a, feat_b in itertools.combinations(top_features_for_binary, 2):

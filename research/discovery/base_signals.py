@@ -161,6 +161,26 @@ def compute_cdi_cumulative(cdi_daily: pd.Series, window: int) -> pd.Series:
     return cumul
 
 
+def compute_ewm_mean_return(adj_close: pd.DataFrame, span: int) -> pd.DataFrame:
+    """EWM mean of returns (shifted to avoid lookahead)."""
+    daily_ret = adj_close.pct_change(1)
+    return daily_ret.ewm(span=span, min_periods=span).mean().shift(1)
+
+
+def compute_ewm_std_return(adj_close: pd.DataFrame, span: int) -> pd.DataFrame:
+    """EWM std of returns (shifted to avoid lookahead)."""
+    daily_ret = adj_close.pct_change(1)
+    return daily_ret.ewm(span=span, min_periods=span).std().shift(1)
+
+
+def compute_mean_reversion(adj_close: pd.DataFrame, window: int) -> pd.DataFrame:
+    """Mean reversion z-score: (price - rolling_mean) / rolling_std (shifted)."""
+    rolling_mean = adj_close.rolling(window, min_periods=max(3, window // 2)).mean()
+    rolling_std = adj_close.rolling(window, min_periods=max(3, window // 2)).std()
+    z_score = (adj_close - rolling_mean) / rolling_std.replace(0, np.nan)
+    return z_score.shift(1)
+
+
 def generate_all_base_signals(data: dict):
     """
     Generate all base signals via parametric sweep.
@@ -278,3 +298,18 @@ def generate_all_base_signals(data: dict):
         for w in config.CDI_WINDOWS:
             yield (f"CDI_cumulative_{w}d", "market_cdi", {"window": w},
                    compute_cdi_cumulative(cdi_daily, w))
+
+    # 19. EWM mean of returns
+    for s in config.EWM_SPANS:
+        yield (f"EWM_mean_{s}", "volatility", {"span": s},
+               compute_ewm_mean_return(adj_close, s))
+
+    # 20. EWM std of returns
+    for s in config.EWM_SPANS:
+        yield (f"EWM_std_{s}", "volatility", {"span": s},
+               compute_ewm_std_return(adj_close, s))
+
+    # 21. Mean reversion
+    for w in config.MEAN_REVERSION_WINDOWS:
+        yield (f"Mean_reversion_{w}d", "mean_reversion", {"window": w},
+               compute_mean_reversion(adj_close, w))

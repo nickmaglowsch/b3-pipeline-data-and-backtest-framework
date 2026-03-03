@@ -319,6 +319,181 @@ print(build_metrics(port_ret, "My HRP Portfolio", 12))
 | `earnings_proxy_backtest.py` | Volume-confirmed momentum around B3 reporting windows |
 | `sector_rotation_backtest.py` | Sector-level momentum with heuristic ticker classification |
 
+## Feature Discovery Engine
+
+The `research/discovery/` module is an **automatic feature discovery engine** that generates, evaluates, and ranks hundreds of candidate alpha features using Information Coefficient (IC) analysis. It replaces manual feature selection with a systematic pipeline that sweeps across signal categories, applies mathematical operators, and prunes the result set to a compact, uncorrelated feature catalog.
+
+### Quick Start
+
+```bash
+# Full run (generates all features, evaluates, prunes, exports catalog + plots)
+python -m research.discovery.main
+
+# Incremental run (skips already-computed features and evaluations)
+python -m research.discovery.main --incremental
+
+# Force recompute (wipes feature store and starts fresh)
+python -m research.discovery.main --force-recompute
+```
+
+### Pipeline Steps
+
+The discovery pipeline runs 12 steps in sequence:
+
+| Step | What Happens |
+|------|-------------|
+| 1 | **Load data** from SQLite + IBOV + CDI (reuses `research.data_loader`) |
+| 2 | **Initialize feature store** -- checks data hash, invalidates cache if source data changed |
+| 3 | **Compute universe mask** -- filters to liquid stocks (ADTV >= R$1M, price >= R$1, 200+ days) |
+| 4 | **Generate Level 0 + Level 1** features (base signals + rank/zscore transforms) |
+| 5 | **Evaluate** Level 0+1 features (IC computation across 4 forward horizons) |
+| 6 | **Select top features** for Level 2 generation (top-50 for delta/ratio_to_mean, top-20 for binary ops) |
+| 7 | **Generate Level 2** features (delta, ratio_to_mean, ratio, product operators on top features) |
+| 8 | **Evaluate** Level 2 features |
+| 9 | **Prune** -- NaN filter → IC threshold → correlation dedup → cap at 500 |
+| 10 | **Export feature catalog** JSON for backtest consumption |
+| 11 | **Generate plots** and text report |
+| 12 | **Save feature store** registry |
+
+### Three-Level Feature Generation
+
+Features are built in layers, each more selective than the last:
+
+```
+Level 0: Base Signals (~120-150 features)
+  Parametric sweep across 15 signal categories with multiple windows each.
+
+Level 1: Unary Transforms (~240-300 features)
+  Apply rank() and zscore() cross-sectionally to every Level 0 signal.
+
+Level 2: Composite Features (variable count)
+  - delta(20) on top-50 features by |IC_IR|
+  - ratio_to_mean(10/20/60) on top-50 features
+  - ratio(A, B) and product(A, B) on top-20 cross-category pairs
+```
+
+### Base Signal Categories
+
+| Category | Signals | Windows |
+|----------|---------|---------|
+| Momentum | Return, Distance-to-MA | 1, 2, 3, 5, 10, 15, 20, 30, 60, 120, 250 |
+| Volatility | Rolling vol, ATR, Drawdown | 5, 10, 20, 40, 60, 120 |
+| Volume | Z-score, Ratio | 5, 10, 20, 40, 60 |
+| Beta | Rolling beta vs IBOV | 60, 120, 252 |
+| Skewness | Rolling return skewness | 20, 60, 120 |
+| Kurtosis | Rolling return kurtosis | 20, 60, 120 |
+| Max/Min Return | Extreme single-day returns | 20, 60, 120 |
+| Win-rate | Fraction of positive-return days | 20, 60, 120 |
+| Amihud Illiquidity | abs(return) / volume | 20, 60 |
+| Autocorrelation | Return lag-1 autocorrelation | 20, 60 |
+| Mean Reversion | Normalized distance from rolling mean | 5, 10, 20 |
+| EWM Variants | EWM mean/std of returns | spans: 5, 10, 20, 40 |
+| High-Low Range | Normalized (H-L)/C average | 5, 20, 60 |
+| Market (IBOV) | IBOV return and volatility | 10, 20, 40, 63 |
+| Market (CDI) | CDI cumulative and change | 21, 42, 63, 126 |
+
+### IC-Based Evaluation
+
+Every feature is evaluated using **Spearman rank correlation** (Information Coefficient) against forward returns:
+
+```
+IC(t) = spearman_corr(feature_ranks(t), forward_return_ranks(t))
+```
+
+Computed cross-sectionally (across all stocks) for each date, then aggregated:
+
+| Metric | Description |
+|--------|-------------|
+| `mean_ic` | Average IC across all dates |
+| `ic_ir` | IC Information Ratio = mean_ic / ic_std (primary ranking metric) |
+| `ic_t_stat` | Statistical significance of IC |
+| `pct_positive_ic` | Fraction of dates with IC > 0 |
+| `mean_ic_5y` | Mean IC over last 5 years (recency check) |
+| `turnover` | 1 - avg rank autocorrelation (trading cost proxy) |
+| `decay_1d/5d/20d` | IC at lagged feature values (signal persistence) |
+| `train/test split` | Separate IC on first 70% vs last 30% of dates (overfit detection) |
+
+**Forward return horizons**: 5, 10, 20, and 60 trading days.
+
+### Pruning Pipeline
+
+After evaluation, features pass through four filters:
+
+1. **NaN/Variance filter** -- Drop features with > 30% NaN rate or zero variance on > 10% of dates
+2. **IC threshold** -- Drop features where |mean_ic| < 0.005 on the 20-day horizon
+3. **Correlation deduplication** -- If two features have Spearman correlation > 0.90, keep the one with higher |IC_IR|
+4. **Cap enforcement** -- Keep top 500 features by |IC_IR| if more remain
+
+### Feature Store
+
+Computed features and evaluations are persisted for incremental re-runs:
+
+```
+research/feature_store/
+├── registry.json              # Feature metadata + evaluation summaries
+├── features/                  # One Parquet file per feature (long format: date, ticker, value)
+└── evaluations/
+    └── ic_timeseries.parquet  # Consolidated IC time series for all features
+```
+
+The registry tracks a **data hash** of the source data. If the underlying price data changes (e.g., new trading days added), the store is automatically invalidated and all features are recomputed.
+
+### Output Artifacts
+
+After a full run, the pipeline produces:
+
+```
+research/output/
+├── feature_catalog.json               # Ranked feature catalog for backtest consumption
+├── discovery_report.txt               # Text report with top features and category breakdown
+├── discovery_ic_top30.png             # Top 30 features by IC_IR (bar chart)
+├── discovery_ic_timeseries.png        # Rolling 1-year IC for top 10 features (line chart)
+├── discovery_ic_decay.png             # IC decay across top 20 features
+├── discovery_turnover_scatter.png     # IC vs turnover trade-off scatter
+├── discovery_correlation_heatmap.png  # Hierarchical clustering of feature correlations
+└── discovery_train_test_scatter.png   # Train vs test IC (overfit detection)
+```
+
+#### Feature Catalog JSON
+
+The catalog is designed for consumption by the backtest framework:
+
+```json
+{
+  "generated_at": "2026-03-02T...",
+  "evaluation_horizon": "fwd_20d",
+  "features": [
+    {
+      "id": "ratio__Return_60d__Rolling_vol_60d",
+      "rank": 1,
+      "formula_human": "ratio(Return_60d, Rolling_vol_60d)",
+      "category": "composite",
+      "mean_ic": 0.045,
+      "ic_ir": 1.23,
+      "turnover": 0.12
+    }
+  ]
+}
+```
+
+### Module Structure
+
+```
+research/discovery/
+├── __init__.py        # Module definition
+├── config.py          # All configuration constants (windows, thresholds, paths)
+├── base_signals.py    # 15 signal category compute functions + parametric sweep generator
+├── operators.py       # Unary (rank, zscore, delta, ratio_to_mean) + binary (ratio, product) operators
+├── generator.py       # Three-level feature generation pipeline
+├── evaluator.py       # Vectorized IC computation, decay, turnover analysis
+├── store.py           # Parquet + JSON feature store with data hash validation
+├── pruning.py         # NaN filter, IC threshold, correlation dedup, cap enforcement
+├── catalog.py         # JSON catalog export with human-readable formula parsing
+├── report.py          # Text report generation
+├── plots.py           # 6 discovery plots (IC bar, timeseries, decay, scatter, heatmap, train/test)
+└── main.py            # Pipeline orchestrator with CLI argument parsing
+```
+
 ## License
 
 MIT License
