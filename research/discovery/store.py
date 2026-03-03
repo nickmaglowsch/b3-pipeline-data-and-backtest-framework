@@ -234,7 +234,70 @@ class FeatureStore:
             ])
         
         return pd.DataFrame(rows)
-    
+
+    def save_ic_timeseries_batch(self, ic_records: list[dict]) -> None:
+        """
+        Save a batch of IC time series records to consolidated Parquet.
+
+        Args:
+            ic_records: list of dicts with keys: feature_id, horizon, date, ic
+        """
+        if not ic_records:
+            return
+
+        # Convert to DataFrame
+        new_df = pd.DataFrame(ic_records)
+        ic_path = self.evaluations_dir / config.IC_TIMESERIES_FILE
+
+        # If file exists, read, concatenate, deduplicate
+        if ic_path.exists():
+            existing_df = pd.read_parquet(ic_path, engine="pyarrow")
+            combined_df = pd.concat([existing_df, new_df], ignore_index=True)
+        else:
+            combined_df = new_df
+
+        # Deduplicate on (feature_id, horizon, date), keep last
+        combined_df = combined_df.drop_duplicates(
+            subset=["feature_id", "horizon", "date"], keep="last"
+        )
+
+        # Ensure correct dtypes
+        combined_df["ic"] = combined_df["ic"].astype("float32")
+        combined_df["date"] = pd.to_datetime(combined_df["date"])
+
+        # Write to Parquet
+        combined_df.to_parquet(ic_path, engine="pyarrow", index=False)
+
+    def load_ic_timeseries(
+        self, feature_ids: list[str] = None, horizon: str = None
+    ) -> pd.DataFrame:
+        """
+        Load IC time series from consolidated Parquet.
+
+        Args:
+            feature_ids: optional list of feature IDs to filter
+            horizon: optional horizon string (e.g., "fwd_20d") to filter
+
+        Returns:
+            DataFrame with columns [feature_id, horizon, date, ic]
+        """
+        ic_path = self.evaluations_dir / config.IC_TIMESERIES_FILE
+
+        if not ic_path.exists():
+            return pd.DataFrame(columns=["feature_id", "horizon", "date", "ic"])
+
+        df = pd.read_parquet(ic_path, engine="pyarrow")
+
+        # Filter by feature_ids
+        if feature_ids is not None:
+            df = df[df["feature_id"].isin(feature_ids)]
+
+        # Filter by horizon
+        if horizon is not None:
+            df = df[df["horizon"] == horizon]
+
+        return df
+
     def get_registry(self) -> dict:
         """Return the full registry dict."""
         return self._registry

@@ -46,6 +46,8 @@ FORWARD_HORIZONS = [5, 10, 20, 60]
 PRIMARY_HORIZON = 20
 TRAIN_FRACTION = 0.70
 IC_DECAY_LAGS = [1, 5, 20]
+IC_RECENCY_YEARS = 5
+IC_TIMESERIES_FILE = "ic_timeseries.parquet"
 
 # ── Pruning Config ────────────────────────────────────────────────────
 
@@ -62,6 +64,8 @@ TOP_N_FOR_BINARY_OPS = 20
 DELTA_PERIODS = [20]
 UNARY_OPERATORS = ["rank", "zscore"]
 BINARY_OPERATORS = ["ratio", "product"]
+RATIO_TO_MEAN_PERIODS = [10, 20, 60]
+TOP_N_FOR_RATIO_TO_MEAN = 50
 
 # ── Universe Config (reuse from parent) ─────────────────────────────
 

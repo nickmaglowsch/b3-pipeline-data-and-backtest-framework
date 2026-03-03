@@ -41,15 +41,19 @@
 - Strategy base class with ParameterSpec for dynamic form generation
 - Python 3.9 requires `from __future__ import annotations` for modern type hints
 
-## Feature Discovery Engine Plan (2026-03-02)
-- New subpackage: `research/discovery/` (does NOT modify existing `research/` files)
+## Feature Discovery Engine (2026-03-02) -- IMPLEMENTED with gaps
+- Subpackage: `research/discovery/` (12 files, does NOT modify existing `research/` files)
 - Entry point: `python -m research.discovery.main`
 - Evaluation metric: IC (Spearman rank correlation) not binary classification AUC
 - Feature store: `research/feature_store/` with Parquet + JSON registry for incremental runs
-- 10 tasks in tasks/ directory; key modules: base_signals, operators, generator, evaluator, pruning, catalog, plots, report, store
-- Generates ~200-500 features from parametric base signals + unary (rank/zscore) + binary (ratio/product) operators
-- Outputs: feature_catalog.json (for backtests), 6 dark-theme plots, discovery_report.txt
-- Dependencies added: pyarrow, hmmlearn, streamlit, plotly already in requirements.txt
+- 15 of 17 base signal categories implemented (missing: EWM variants, Mean Reversion)
+- All 7 operators defined but only rank/zscore/delta/ratio/product are wired into pipeline
+- `op_diff` and `op_ratio_to_mean` exist in code but NOT registered in operator dicts
+- IC time series computed but not persisted (only summary stats saved to JSON registry)
+- 4 of 6 plots implemented (missing: IC time series line chart, correlation clustering heatmap)
+- `--incremental` flag parsed but not wired to evaluator's `force` parameter
+- `evaluations_dir` created but never written to (intended for IC time series Parquet)
+- Dependencies: pyarrow, hmmlearn, streamlit, plotly, scipy all in requirements.txt
 
 ## No Tests
 - No test suite exists in the codebase
