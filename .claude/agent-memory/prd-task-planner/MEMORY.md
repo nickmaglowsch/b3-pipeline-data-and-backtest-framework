@@ -3,8 +3,11 @@
 ## Project Architecture
 - **b3_pipeline/**: Data pipeline (downloader, parser, adjustments, storage, config)
 - **backtests/**: 43 strategy backtests, each a standalone `*_backtest.py` script
-- **backtests/core/**: Shared modules (data.py, simulation.py, metrics.py, plotting.py, strategy_returns.py, portfolio_opt.py, param_scanner.py)
+- **backtests/core/**: Shared modules (data.py, simulation.py, metrics.py, plotting.py, strategy_returns.py, portfolio_opt.py, param_scanner.py, shared_data.py, strategy_base.py, strategy_registry.py)
+- **backtests/strategies/**: 11 registered StrategyBase plugins (auto-discovered by registry)
 - **research/**: ML feature importance study (RF+XGB, 19 features, outputs in research/output/)
+- **research/discovery/**: Feature discovery engine (541 generated, 186 after pruning)
+- **ui/**: Streamlit app with pages: pipeline, backtest_runner, dashboard, research, discovery
 - **DB**: `b3_market_data.sqlite` at project root
 - **Data**: 33 COTAHIST ZIPs in `data/raw/` covering 1994-2026
 
@@ -22,6 +25,19 @@
 - Cross-sectional ranking via `.rank(axis=1, pct=True)`
 - CDI downloaded from BCB SGS API series 12; IBOV from Yahoo via yfinance
 - Plotting: dark theme PALETTE in backtests/core/plotting.py; all matplotlib
+- `from __future__ import annotations` required for modern type hints
+
+## Strategy Patterns
+- **Standalone scripts**: `*_backtest.py` with own `main()`, produce PNG tear sheets
+- **Plugins**: extend `StrategyBase` in `backtests/strategies/`, `generate_signals(shared_data, params) -> (ret, tw)`
+- **shared_data dict**: precomputed by `build_shared_data()` with price, return, regime, composite keys
+- **Simulation**: `run_simulation()` supports long AND short (negative weights), tax, slippage
+- **Short example**: `bull_trap_short_backtest.py` uses -0.20/N weights with CDI collateral
+
+## Feature Store
+- Parquet files in `research/feature_store/features/` (long format: date, ticker, value)
+- Key features for mean-reversion: Autocorr_20d/60d, High_low_range_5d/20d/60d, Rolling_vol_*, CDI_cumulative_*, Mean_reversion_5d/10d/20d
+- Top IC_IR features: ratio(HLR_20d/Win_rate_120d) -0.1616, ratio(Autocorr_60d/ATR_14) -0.1479, CDI ratios ~0.1238
 
 ## Dependencies (as of 2026-03-02)
 - requirements.txt: requests, pandas, numpy, matplotlib, scikit-learn, xgboost, yfinance, python-dateutil, scipy, hmmlearn, streamlit>=1.30, plotly>=5.18, pyarrow>=14
@@ -37,23 +53,17 @@
 
 ## Streamlit UI (IMPLEMENTED as of 2026-03-02)
 - Entry: `streamlit run ui/app.py` from project root
-- Pages: 1_pipeline, 2_backtest_runner, 3_dashboard, 4_research
-- Services: job_runner.py (bg thread+queue), backtest_service.py, pipeline_service.py, research_service.py, result_store.py
-- Components: charts.py (Plotly, PALETTE, _apply_dark_theme), log_stream.py (st.fragment), metrics_table.py, parameter_form.py
-- All pages use pattern: _PROJECT_ROOT path insert, set_page_config, try/except ImportError for graceful degradation
-- Dark theme: bg=#0D1117, panel=#161B22, grid=#21262D, text=#E6EDF3, sub=#8B949E
+- Pages: 1_pipeline, 2_backtest_runner, 3_dashboard, 4_research, 5_discovery
+- Services: job_runner.py (bg thread+queue), backtest_service.py, pipeline_service.py, research_service.py, discovery_service.py, result_store.py
+- Components: charts.py, log_stream.py, metrics_table.py, parameter_form.py, discovery_charts.py
 
 ## Feature Discovery Engine (2026-03-02) -- IMPLEMENTED
 - Subpackage: `research/discovery/` (12 files)
 - Entry point: `python -m research.discovery.main` (--incremental, --force-recompute)
 - 541 features generated (registry.json), 186 survive pruning (feature_catalog.json)
 - Feature store: Parquet files in research/feature_store/features/, JSON registry
-- IC time series Parquet NOT persisted (evaluations/ dir empty)
-- 4 of 6 static PNG plots generated (missing: IC time series, correlation heatmap)
 - Catalog JSON structure: features[] with rank, id, category, level, formula_human, metrics per horizon, turnover, decay
-- Current 4_research.py shows OLD ML study, NOT discovery engine
-- EWM and Mean Reversion base signals ARE now implemented (all 17+ categories present)
-- op_ratio_to_mean IS wired into Level 2 generation (not in UNARY_OPS/BINARY_OPS dicts but called directly)
+- EWM and Mean Reversion base signals implemented (all 17+ categories present)
 
 ## No Tests
 - No test suite exists in the codebase

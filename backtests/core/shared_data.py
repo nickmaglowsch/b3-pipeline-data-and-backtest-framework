@@ -12,7 +12,8 @@ import logging
 import numpy as np
 import pandas as pd
 
-from backtests.core.data import load_b3_data, download_benchmark, download_cdi_daily
+from backtests.core.data import load_b3_data, load_b3_hlc_data, download_benchmark, download_cdi_daily
+from backtests.core.mean_rev_helpers import compute_mean_rev_features
 
 logger = logging.getLogger(__name__)
 
@@ -67,7 +68,7 @@ def _detect_and_fix_unrecorded_splits(
             ar = adj_ratio.iloc[i]
             rr = raw_ratio.iloc[i]
 
-            if pd.isna(ar) or pd.isna(rr) or rr == 0:
+            if pd.isna(ar) or pd.isna(rr) or not np.isfinite(ar) or not np.isfinite(rr) or rr == 0:
                 continue
 
             # Both adj and raw must show nearly identical ratio
@@ -130,7 +131,9 @@ def build_shared_data(
     lookback = 12  # default lookback periods
 
     # ── 1. Load raw data ──────────────────────────────────────────────────────
-    adj_close, close_px, fin_vol = load_b3_data(db_path, start, end)
+    adj_close, split_adj_high, split_adj_low, split_adj_close, close_px, fin_vol = (
+        load_b3_hlc_data(db_path, start, end)
+    )
     cdi_daily = download_cdi_daily(start, end)
     ibov_px = download_benchmark("^BVSP", start, end)
 
@@ -201,9 +204,26 @@ def build_shared_data(
     # IBOV vol series (monthly, for AdaptiveLowVol regime)
     ibov_vol_monthly = ibov_vol_m.copy()
 
+    # ── 4. Mean-reversion composite features (daily frequency) ────────────────
+    mr_features = compute_mean_rev_features(
+        adj_close, split_adj_high, split_adj_low, split_adj_close,
+        cdi_daily, ibov_daily_ret, ibov_px,
+    )
+    autocorr_20d = mr_features["autocorr_20d"]
+    autocorr_60d = mr_features["autocorr_60d"]
+    high_low_range_20d = mr_features["high_low_range_20d"]
+    rolling_vol_20d_daily = mr_features["rolling_vol_20d_daily"]
+    rolling_vol_60d_daily = mr_features["rolling_vol_60d_daily"]
+    cdi_cumul_63d = mr_features["cdi_cumul_63d"]
+    ibov_vol_20d_daily = mr_features["ibov_vol_20d_daily"]
+    ibov_ret_20d_daily = mr_features["ibov_ret_20d_daily"]
+
     return {
         # ── price / return data ───────────────────────────────────────────────
         "adj_close": adj_close,
+        "split_adj_high": split_adj_high,
+        "split_adj_low": split_adj_low,
+        "split_adj_close": split_adj_close,
         "close_px": close_px,
         "fin_vol": fin_vol,
         "px": px,
@@ -234,4 +254,13 @@ def build_shared_data(
         "atr_m": atr_m,
         "vol_2m": vol_2m,
         "vol_20d": vol_2m,   # backward-compat alias
+        # ── mean-reversion composite features ────────────────────────────────
+        "autocorr_20d": autocorr_20d,
+        "autocorr_60d": autocorr_60d,
+        "high_low_range_20d": high_low_range_20d,
+        "rolling_vol_20d_daily": rolling_vol_20d_daily,
+        "rolling_vol_60d_daily": rolling_vol_60d_daily,
+        "cdi_cumul_63d": cdi_cumul_63d,
+        "ibov_vol_20d_daily": ibov_vol_20d_daily,
+        "ibov_ret_20d_daily": ibov_ret_20d_daily,
     }
