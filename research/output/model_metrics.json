@@ -1,108 +1,108 @@
 {
   "target_20d": {
     "RandomForest": {
-      "accuracy": 0.488,
-      "roc_auc": 0.474,
-      "precision": 0.477,
-      "recall": 0.5629,
-      "f1": 0.5164,
+      "accuracy": 0.4845,
+      "roc_auc": 0.4756,
+      "precision": 0.487,
+      "recall": 0.6409,
+      "f1": 0.5535,
       "confusion_matrix": [
         [
-          67702,
-          94506
+          13585,
+          27708
         ],
         [
-          66940,
-          86199
+          14740,
+          26307
         ]
       ]
     },
     "XGBoost": {
-      "accuracy": 0.4926,
-      "roc_auc": 0.4873,
-      "precision": 0.4822,
-      "recall": 0.6074,
-      "f1": 0.5376,
+      "accuracy": 0.4866,
+      "roc_auc": 0.4825,
+      "precision": 0.4877,
+      "recall": 0.596,
+      "f1": 0.5365,
       "confusion_matrix": [
         [
-          62320,
-          99888
+          15601,
+          25692
         ],
         [
-          60118,
-          93021
+          16584,
+          24463
         ]
       ]
     }
   },
   "target_60d": {
     "RandomForest": {
-      "accuracy": 0.4722,
-      "roc_auc": 0.4543,
-      "precision": 0.4609,
-      "recall": 0.5793,
-      "f1": 0.5134,
+      "accuracy": 0.4762,
+      "roc_auc": 0.4643,
+      "precision": 0.4828,
+      "recall": 0.6717,
+      "f1": 0.5618,
       "confusion_matrix": [
         [
-          60581,
-          101768
+          11462,
+          29362
         ],
         [
-          63182,
-          87004
+          13401,
+          27413
         ]
       ]
     },
     "XGBoost": {
-      "accuracy": 0.4743,
-      "roc_auc": 0.4821,
-      "precision": 0.4676,
-      "recall": 0.6786,
-      "f1": 0.5537,
+      "accuracy": 0.4902,
+      "roc_auc": 0.4903,
+      "precision": 0.4931,
+      "recall": 0.697,
+      "f1": 0.5775,
       "confusion_matrix": [
         [
-          46323,
-          116026
+          11577,
+          29247
         ],
         [
-          48274,
-          101912
+          12368,
+          28446
         ]
       ]
     }
   },
   "target_20d_median": {
     "RandomForest": {
-      "accuracy": 0.4877,
-      "roc_auc": 0.4735,
-      "precision": 0.477,
-      "recall": 0.5694,
-      "f1": 0.5191,
+      "accuracy": 0.4862,
+      "roc_auc": 0.4765,
+      "precision": 0.488,
+      "recall": 0.6239,
+      "f1": 0.5477,
       "confusion_matrix": [
         [
-          66610,
-          95598
+          14426,
+          26867
         ],
         [
-          65946,
-          87193
+          15436,
+          25611
         ]
       ]
     },
     "XGBoost": {
-      "accuracy": 0.4915,
-      "roc_auc": 0.4816,
-      "precision": 0.4822,
-      "recall": 0.6401,
-      "f1": 0.5501,
+      "accuracy": 0.4852,
+      "roc_auc": 0.4817,
+      "precision": 0.487,
+      "recall": 0.6105,
+      "f1": 0.5418,
       "confusion_matrix": [
         [
-          56949,
-          105259
+          14894,
+          26399
         ],
         [
-          55109,
-          98030
+          15988,
+          25059
         ]
       ]
     }
@@ -112,8 +112,8 @@
     "train_end": "2020-01-06",
     "test_start": "2020-01-07",
     "test_end": "2026-01-21",
-    "total_samples": 813410,
-    "train_samples": 498063,
-    "test_samples": 315347
+    "total_samples": 131928,
+    "train_samples": 49588,
+    "test_samples": 82340
   }
 }

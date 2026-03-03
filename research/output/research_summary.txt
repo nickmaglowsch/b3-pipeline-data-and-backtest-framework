@@ -1,93 +1,93 @@
 ======================================================================
 B3 FEATURE IMPORTANCE DISCOVERY -- RESEARCH SUMMARY
-Generated: 2026-02-28 00:37:33
+Generated: 2026-03-02 16:30:04
 ======================================================================
 
 1. DATASET OVERVIEW
 ----------------------------------------
 Date range: 2005-10-19 to 2026-01-21
-Total observations: 813,410
-Unique tickers: 620
+Total observations: 131,928
+Unique tickers: 167
 Features: 19
-Target (20d >0) class balance: 0.510
+Target (20d >0) class balance: 0.512
 
 2. MODEL PERFORMANCE
 ----------------------------------------
 
   Target: target_20d
     RandomForest:
-      Accuracy:  0.4880
-      ROC AUC:   0.4740
-      Precision: 0.4770
-      Recall:    0.5629
-      F1:        0.5164
+      Accuracy:  0.4845
+      ROC AUC:   0.4756
+      Precision: 0.4870
+      Recall:    0.6409
+      F1:        0.5535
     XGBoost:
-      Accuracy:  0.4926
-      ROC AUC:   0.4873
-      Precision: 0.4822
-      Recall:    0.6074
-      F1:        0.5376
+      Accuracy:  0.4866
+      ROC AUC:   0.4825
+      Precision: 0.4877
+      Recall:    0.5960
+      F1:        0.5365
 
   Target: target_60d
     RandomForest:
-      Accuracy:  0.4722
-      ROC AUC:   0.4543
-      Precision: 0.4609
-      Recall:    0.5793
-      F1:        0.5134
+      Accuracy:  0.4762
+      ROC AUC:   0.4643
+      Precision: 0.4828
+      Recall:    0.6717
+      F1:        0.5618
     XGBoost:
-      Accuracy:  0.4743
-      ROC AUC:   0.4821
-      Precision: 0.4676
-      Recall:    0.6786
-      F1:        0.5537
+      Accuracy:  0.4902
+      ROC AUC:   0.4903
+      Precision: 0.4931
+      Recall:    0.6970
+      F1:        0.5775
 
   Target: target_20d_median
     RandomForest:
-      Accuracy:  0.4877
-      ROC AUC:   0.4735
-      Precision: 0.4770
-      Recall:    0.5694
-      F1:        0.5191
+      Accuracy:  0.4862
+      ROC AUC:   0.4765
+      Precision: 0.4880
+      Recall:    0.6239
+      F1:        0.5477
     XGBoost:
-      Accuracy:  0.4915
-      ROC AUC:   0.4816
-      Precision: 0.4822
-      Recall:    0.6401
-      F1:        0.5501
+      Accuracy:  0.4852
+      ROC AUC:   0.4817
+      Precision: 0.4870
+      Recall:    0.6105
+      F1:        0.5418
 
 3. TOP FEATURES (Primary Target: 20-Day Forward Return > 0)
 ----------------------------------------
 
   RandomForest -- Top 10:
-     1. CDI_3m_change              builtin=0.1967  perm=-0.0142
-     2. Ibovespa_vol_20d           builtin=0.1231  perm=0.0012
-     3. Ibovespa_return_20d        builtin=0.0785  perm=0.0021
-     4. Rolling_vol_60d            builtin=0.0563  perm=-0.0005
-     5. Distance_to_MA200          builtin=0.0562  perm=-0.0004
-     6. Rank_volume                builtin=0.0525  perm=0.0012
-     7. Rank_volatility_20d        builtin=0.0492  perm=0.0010
-     8. Rolling_vol_20d            builtin=0.0449  perm=0.0015
-     9. ATR_14                     builtin=0.0437  perm=0.0051
-    10. Rank_momentum_60d          builtin=0.0431  perm=-0.0019
+     1. CDI_3m_change              builtin=0.1368  perm=-0.0188
+     2. Ibovespa_vol_20d           builtin=0.0816  perm=-0.0030
+     3. Rolling_vol_60d            builtin=0.0716  perm=-0.0079
+     4. Distance_to_MA200          builtin=0.0703  perm=-0.0016
+     5. Rank_volume                builtin=0.0585  perm=-0.0020
+     6. Ibovespa_return_20d        builtin=0.0561  perm=-0.0021
+     7. Return_60d                 builtin=0.0544  perm=-0.0013
+     8. Rank_volatility_20d        builtin=0.0544  perm=0.0012
+     9. Rank_momentum_60d          builtin=0.0541  perm=-0.0004
+    10. Rolling_vol_20d            builtin=0.0530  perm=0.0021
 
   XGBoost -- Top 10:
-     1. CDI_3m_change              builtin=0.1342  perm=-0.0090
-     2. Ibovespa_return_20d        builtin=0.1104  perm=-0.0006
-     3. Ibovespa_vol_20d           builtin=0.1013  perm=0.0009
-     4. Distance_to_MA200          builtin=0.0540  perm=0.0009
-     5. ATR_14                     builtin=0.0504  perm=0.0053
-     6. Rolling_vol_60d            builtin=0.0502  perm=0.0040
-     7. Rank_volatility_20d        builtin=0.0499  perm=0.0010
-     8. Rank_volume                builtin=0.0485  perm=0.0015
-     9. Distance_to_MA50           builtin=0.0480  perm=0.0000
-    10. Return_60d                 builtin=0.0474  perm=0.0060
+     1. CDI_3m_change              builtin=0.1077  perm=-0.0176
+     2. Ibovespa_vol_20d           builtin=0.0813  perm=0.0013
+     3. Rolling_vol_60d            builtin=0.0627  perm=0.0017
+     4. Ibovespa_return_20d        builtin=0.0625  perm=0.0006
+     5. Distance_to_MA200          builtin=0.0614  perm=0.0020
+     6. Rank_momentum_60d          builtin=0.0579  perm=0.0005
+     7. Return_60d                 builtin=0.0577  perm=0.0009
+     8. Rank_volatility_20d        builtin=0.0571  perm=0.0017
+     9. Rolling_vol_20d            builtin=0.0531  perm=0.0041
+    10. Rank_volume                builtin=0.0516  perm=0.0008
 
 4. RF vs XGB OVERLAP (Primary Target)
 ----------------------------------------
-  RF top 10:  ['ATR_14', 'CDI_3m_change', 'Distance_to_MA200', 'Ibovespa_return_20d', 'Ibovespa_vol_20d', 'Rank_momentum_60d', 'Rank_volatility_20d', 'Rank_volume', 'Rolling_vol_20d', 'Rolling_vol_60d']
-  XGB top 10: ['ATR_14', 'CDI_3m_change', 'Distance_to_MA200', 'Distance_to_MA50', 'Ibovespa_return_20d', 'Ibovespa_vol_20d', 'Rank_volatility_20d', 'Rank_volume', 'Return_60d', 'Rolling_vol_60d']
-  Overlap (8 features): ['ATR_14', 'CDI_3m_change', 'Distance_to_MA200', 'Ibovespa_return_20d', 'Ibovespa_vol_20d', 'Rank_volatility_20d', 'Rank_volume', 'Rolling_vol_60d']
+  RF top 10:  ['CDI_3m_change', 'Distance_to_MA200', 'Ibovespa_return_20d', 'Ibovespa_vol_20d', 'Rank_momentum_60d', 'Rank_volatility_20d', 'Rank_volume', 'Return_60d', 'Rolling_vol_20d', 'Rolling_vol_60d']
+  XGB top 10: ['CDI_3m_change', 'Distance_to_MA200', 'Ibovespa_return_20d', 'Ibovespa_vol_20d', 'Rank_momentum_60d', 'Rank_volatility_20d', 'Rank_volume', 'Return_60d', 'Rolling_vol_20d', 'Rolling_vol_60d']
+  Overlap (10 features): ['CDI_3m_change', 'Distance_to_MA200', 'Ibovespa_return_20d', 'Ibovespa_vol_20d', 'Rank_momentum_60d', 'Rank_volatility_20d', 'Rank_volume', 'Return_60d', 'Rolling_vol_20d', 'Rolling_vol_60d']
 
 5. FEATURE STABILITY ACROSS TARGETS
 ----------------------------------------
@@ -95,32 +95,33 @@ Target (20d >0) class balance: 0.510
   RandomForest -- stable top-10 across all 3 targets (9):
     - CDI_3m_change
     - Distance_to_MA200
-    - Ibovespa_return_20d
     - Ibovespa_vol_20d
     - Rank_momentum_60d
     - Rank_volatility_20d
     - Rank_volume
+    - Return_60d
     - Rolling_vol_20d
     - Rolling_vol_60d
 
-  XGBoost -- stable top-10 across all 3 targets (8):
+  XGBoost -- stable top-10 across all 3 targets (9):
     - CDI_3m_change
     - Distance_to_MA200
-    - Ibovespa_return_20d
     - Ibovespa_vol_20d
+    - Rank_momentum_60d
     - Rank_volatility_20d
     - Rank_volume
     - Return_60d
+    - Rolling_vol_20d
     - Rolling_vol_60d
 
 6. KEY FINDINGS
 ----------------------------------------
 
-  a) Average ROC AUC on primary target: 0.4807
+  a) Average ROC AUC on primary target: 0.4790
      -> Weak/no predictive signal (AUC near 0.50)
 
   b) Overlapping top features by category:
-     Momentum/trend: 1
+     Momentum/trend: 3
      Volatility:     3
      Volume:         1
      Regime/macro:   3

@@ -48,3 +48,16 @@
 - `result_store.py` has module-level `RESULTS_DIR.mkdir()` side effect
 - `log_stream.py` uses blocking while-loop; consider `st.fragment` for partial reruns
 - Streamlit version: 1.50.0. `st.status` state values: "running", "complete", "error"
+
+## Feature Discovery Engine Review Notes (Mar 2026)
+- Module: `research/discovery/` (12 files), modification to `research/targets.py`
+- Feature store: `research/feature_store/` with registry.json + features/*.parquet
+- CRITICAL BUG: `evaluate_all_features()` skips already-evaluated features WITHOUT adding their data to the returned DataFrame -- breaks incremental re-runs
+- Pruning summary bug: `after_nan_filter` and `after_ic_filter` both set to same value (post-IC count)
+- Missing base signals: Mean Reversion (config exists, no code) and EWM variants (config exists, no code)
+- Dead code: `op_diff`, `op_ratio_to_mean`, `compute_forward_returns_wide()`
+- Missing plots: IC time series, correlation heatmap; IC decay plot doesn't show actual decay bars
+- Evaluations stored only in JSON registry, not as Parquet IC time series (PRD 4.4 requirement)
+- `--incremental` flag parsed but `args.incremental` never referenced
+- `compute_turnover()` uses fillna(0) on ranks -- introduces bias from stable NaN patterns
+- Config module-level `mkdir()` side effects (same pattern as `result_store.py` in UI)
