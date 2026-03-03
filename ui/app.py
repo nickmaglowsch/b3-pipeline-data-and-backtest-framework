@@ -43,6 +43,7 @@ Welcome to the B3 data pipeline management UI. Use the sidebar to navigate:
 - **Backtest Runner**: Configure and run backtest strategies with custom parameters
 - **Dashboard**: Browse and compare backtest results
 - **Research**: View ML feature importance research results
+- **Discovery**: Feature discovery engine -- IC evaluation, pruning, and alpha research
 """)
 
 st.divider()
@@ -79,6 +80,7 @@ Use the pages above to navigate between modules:
 2. **Backtest Runner** -- Run strategies
 3. **Dashboard** -- Browse results
 4. **Research** -- ML insights
+5. **Discovery** -- Feature discovery
 """)
 
 st.sidebar.divider()

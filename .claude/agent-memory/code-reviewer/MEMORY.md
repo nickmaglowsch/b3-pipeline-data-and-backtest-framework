@@ -64,3 +64,13 @@
 - REMAINING: `op_diff` and `compute_forward_returns_wide()` are dead code
 - REMAINING: Config module-level `mkdir()` side effects (same pattern as `result_store.py` in UI)
 - REMAINING: IC decay plot still doesn't show actual decay bars (shows IC_IR bar instead)
+
+## Discovery UI Review Notes (Mar 2026)
+- Files: `ui/services/discovery_service.py`, `ui/components/discovery_charts.py`, `ui/pages/5_discovery.py`, modified `ui/app.py`
+- Catalog JSON keys: {generated_at, pipeline_version, evaluation_date_range, primary_horizon, total_generated, total_after_pruning, features, category_summary}
+- Each feature has BOTH `feature["decay"]` (feature-level) and `feature["metrics"][horizon]["decay"]` (per-horizon)
+- `pct_positive_ic` stored as fraction (0.55 = 55%), multiplied by 100 in table display
+- BUG: `plot_pruning_funnel` regex for "After Correlation Dedup" fails -- `[:\s]` can't match "Dedup" word
+- `_catalog_mtime` underscore prefix means Streamlit ignores it for cache key (only TTL invalidates)
+- `load_feature_data` silently swallows exceptions via bare `except Exception: return None`
+- Redundant `import os as _os` mid-file in 5_discovery.py (line 60) when `os` already imported at line 8
