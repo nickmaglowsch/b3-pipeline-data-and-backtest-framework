@@ -256,6 +256,23 @@ def run_fundamentals_pipeline(
                 fre_paths.append(path)
         logger.info(f"FRE files available: {len(fre_paths)}")
 
+        # Step 5b: Populate cvm_companies from CVM files (CNPJ + CVM code + company name).
+        # This must run before reading the ticker map so the B3 pipeline can link tickers.
+        logger.info("")
+        logger.info("Step 5b/10: Indexing companies from CVM files...")
+        all_zip_paths = dfp_paths + itr_paths + fre_paths
+        seen_cnpjs: set = set()
+        for zip_path in all_zip_paths:
+            try:
+                companies = cvm_parser.extract_company_index(zip_path)
+                new_companies = [(c, v, n) for c, v, n in companies if c not in seen_cnpjs]
+                if new_companies:
+                    cvm_storage.bulk_upsert_companies_index(conn, new_companies)
+                    seen_cnpjs.update(c for c, _, _ in new_companies)
+            except Exception as e:
+                logger.warning(f"Failed to index companies from {zip_path}: {e}")
+        logger.info(f"Company index: {len(seen_cnpjs):,} unique CNPJs in cvm_companies")
+
         # Load CNPJ → ticker map (built from cvm_companies table populated by B3 pipeline)
         cnpj_ticker_map = cvm_storage.get_cvm_company_map(conn)
         logger.info(f"CNPJ → ticker map: {len(cnpj_ticker_map):,} companies")
@@ -322,6 +339,10 @@ def run_fundamentals_pipeline(
 
         logger.info("Propagating FRE shares_outstanding into DFP/ITR rows...")
         _propagate_fre_shares(conn)
+
+        logger.info("Propagating tickers from cvm_companies into fundamentals_pit...")
+        ticker_rows = cvm_storage.populate_tickers_from_cvm_companies(conn)
+        logger.info(f"Ticker propagation updated {ticker_rows:,} fundamentals_pit rows")
 
         # Step 9
         if not skip_ratios:

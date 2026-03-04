@@ -85,7 +85,14 @@ B3_CORP_ACTIONS_HEADERS = {
 SPLIT_DETECTION_THRESHOLD_HIGH = 1.8
 SPLIT_DETECTION_THRESHOLD_LOW = 0.55
 
-RATE_LIMIT_DELAY = 0.1
+# Delay (seconds) each worker thread sleeps between its own sequential HTTP requests.
+# With MAX_WORKERS concurrent workers the aggregate request rate ceiling is
+# approximately MAX_WORKERS / RATE_LIMIT_DELAY requests/second.
+RATE_LIMIT_DELAY = 0.05
+
+# Maximum number of concurrent worker threads for the corporate actions fetch step.
+# Increase cautiously -- the B3 API has no published rate limit.
+MAX_WORKERS = 10
 
 EVENT_TYPE_CASH_DIVIDEND = "CASH_DIVIDEND"
 EVENT_TYPE_JCP = "JCP"

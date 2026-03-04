@@ -43,6 +43,78 @@ def upsert_cvm_company(
     logger.debug(f"Upserted cvm_company: cnpj={cnpj} ticker={ticker}")
 
 
+def bulk_upsert_companies_index(conn: sqlite3.Connection, companies: list) -> int:
+    """Upsert company rows from CVM file data (cnpj + cvm_code + company_name).
+
+    Does NOT overwrite an existing ticker — only fills in missing company
+    metadata. Call this from the CVM pipeline before reading the ticker map.
+
+    companies: list of (cnpj, cvm_code, company_name) tuples.
+    Returns number of rows inserted/updated.
+    """
+    sql = """
+        INSERT INTO cvm_companies (cnpj, cvm_code, company_name, updated_at)
+        VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(cnpj) DO UPDATE SET
+            cvm_code    = COALESCE(cvm_companies.cvm_code, excluded.cvm_code),
+            company_name = COALESCE(cvm_companies.company_name, excluded.company_name),
+            updated_at  = CURRENT_TIMESTAMP
+    """
+    conn.executemany(sql, companies)
+    conn.commit()
+    return len(companies)
+
+
+def update_ticker_by_cvm_code(
+    conn: sqlite3.Connection, cvm_code: str, ticker: str, b3_trading_name: str = None
+) -> bool:
+    """Update ticker (and b3_trading_name) for all cvm_companies rows matching cvm_code.
+
+    Called from the B3 corporate-actions pipeline after fetching company data.
+    Returns True if at least one row was updated.
+    """
+    # B3 API returns codeCVM as a bare integer; CVM CSVs store 6-digit zero-padded strings.
+    if cvm_code.isdigit():
+        cvm_code = cvm_code.zfill(6)
+    result = conn.execute(
+        """
+        UPDATE cvm_companies
+        SET ticker = ?, b3_trading_name = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE cvm_code = ?
+        """,
+        (ticker, b3_trading_name, cvm_code),
+    )
+    conn.commit()
+    return result.rowcount > 0
+
+
+def populate_tickers_from_cvm_companies(conn: sqlite3.Connection) -> int:
+    """Set fundamentals_pit.ticker from cvm_companies by joining on cnpj.
+
+    Run this at the end of the CVM pipeline (after B3 pipeline has populated
+    cvm_companies.ticker) so valuation ratios can be computed.
+    Returns number of rows updated.
+    """
+    result = conn.execute(
+        """
+        UPDATE fundamentals_pit
+        SET ticker = (
+            SELECT ticker FROM cvm_companies
+            WHERE cvm_companies.cnpj = fundamentals_pit.cnpj
+              AND cvm_companies.ticker IS NOT NULL
+        )
+        WHERE fundamentals_pit.ticker IS NULL
+          AND EXISTS (
+              SELECT 1 FROM cvm_companies
+              WHERE cvm_companies.cnpj = fundamentals_pit.cnpj
+                AND cvm_companies.ticker IS NOT NULL
+          )
+        """
+    )
+    conn.commit()
+    return result.rowcount
+
+
 def upsert_cvm_filing(
     conn: sqlite3.Connection,
     filing_id: str,
