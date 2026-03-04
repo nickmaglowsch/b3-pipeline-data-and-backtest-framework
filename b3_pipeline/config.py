@@ -32,6 +32,14 @@ CURRENT_YEAR = get_current_year()  # Keep backward compat; prefer get_current_ye
 
 EQUITY_BDI_CODES = {"02"}
 
+# ── CVM open data portal ──────────────────────────────────────────────────────
+CVM_DFP_BASE_URL = "https://dados.cvm.gov.br/dados/CIA_ABERTA/DOC/DFP/DADOS/"
+CVM_ITR_BASE_URL = "https://dados.cvm.gov.br/dados/CIA_ABERTA/DOC/ITR/DADOS/"
+CVM_FRE_BASE_URL = "https://dados.cvm.gov.br/dados/CIA_ABERTA/DOC/FRE/DADOS/"
+CVM_DATA_DIR = PROJECT_ROOT / "data" / "cvm"
+CVM_DATA_DIR.mkdir(parents=True, exist_ok=True)
+CVM_START_YEAR = 2010
+
 # NOTE: This layout dictionary is for reference only and may not exactly match
 # the field positions used in parser.py (which hardcodes the correct offsets).
 # Do not use this dict for programmatic parsing.

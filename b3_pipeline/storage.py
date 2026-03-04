@@ -96,6 +96,69 @@ INDEX_PRICES_DATE = "CREATE INDEX IF NOT EXISTS idx_prices_date ON prices(date);
 INDEX_PRICES_TICKER = "CREATE INDEX IF NOT EXISTS idx_prices_ticker ON prices(ticker);"
 INDEX_PRICES_ISIN = "CREATE INDEX IF NOT EXISTS idx_prices_isin ON prices(isin_code);"
 
+# ── CVM Fundamentals Tables ────────────────────────────────────────────────────
+
+SCHEMA_CVM_COMPANIES = """
+CREATE TABLE IF NOT EXISTS cvm_companies (
+    cnpj TEXT NOT NULL PRIMARY KEY,
+    ticker TEXT,
+    company_name TEXT,
+    cvm_code TEXT,
+    b3_trading_name TEXT,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+"""
+
+SCHEMA_CVM_FILINGS = """
+CREATE TABLE IF NOT EXISTS cvm_filings (
+    filing_id TEXT NOT NULL PRIMARY KEY,
+    cnpj TEXT NOT NULL,
+    doc_type TEXT NOT NULL,
+    period_end DATE NOT NULL,
+    filing_date DATE NOT NULL,
+    filing_version INTEGER NOT NULL DEFAULT 1,
+    fiscal_year INTEGER,
+    quarter INTEGER,
+    source_file TEXT
+);
+"""
+
+SCHEMA_FUNDAMENTALS_PIT = """
+CREATE TABLE IF NOT EXISTS fundamentals_pit (
+    filing_id TEXT NOT NULL PRIMARY KEY,
+    cnpj TEXT NOT NULL,
+    ticker TEXT,
+    period_end DATE NOT NULL,
+    filing_date DATE NOT NULL,
+    filing_version INTEGER NOT NULL DEFAULT 1,
+    doc_type TEXT NOT NULL,
+    fiscal_year INTEGER,
+    quarter INTEGER,
+    revenue REAL,
+    net_income REAL,
+    ebitda REAL,
+    total_assets REAL,
+    equity REAL,
+    net_debt REAL,
+    shares_outstanding REAL,
+    pe_ratio REAL,
+    pb_ratio REAL,
+    ev_ebitda REAL,
+    FOREIGN KEY (filing_id) REFERENCES cvm_filings(filing_id)
+);
+"""
+
+# Note: all financial values are stored in thousands of BRL as reported by CVM.
+# Do NOT multiply by 1000 when storing or reading.
+
+INDEX_CVM_COMPANIES_TICKER = "CREATE INDEX IF NOT EXISTS idx_cvm_companies_ticker ON cvm_companies(ticker);"
+INDEX_CVM_FILINGS_CNPJ = "CREATE INDEX IF NOT EXISTS idx_cvm_filings_cnpj ON cvm_filings(cnpj);"
+INDEX_CVM_FILINGS_PERIOD = "CREATE INDEX IF NOT EXISTS idx_cvm_filings_period ON cvm_filings(period_end);"
+INDEX_FUNDAMENTALS_PIT_CNPJ = "CREATE INDEX IF NOT EXISTS idx_fundamentals_pit_cnpj ON fundamentals_pit(cnpj);"
+INDEX_FUNDAMENTALS_PIT_TICKER = "CREATE INDEX IF NOT EXISTS idx_fundamentals_pit_ticker ON fundamentals_pit(ticker);"
+INDEX_FUNDAMENTALS_PIT_FILING_DATE = "CREATE INDEX IF NOT EXISTS idx_fundamentals_pit_filing_date ON fundamentals_pit(filing_date);"
+INDEX_FUNDAMENTALS_PIT_PERIOD = "CREATE INDEX IF NOT EXISTS idx_fundamentals_pit_period ON fundamentals_pit(period_end);"
+
 
 def get_connection(db_path: Optional[Path] = None) -> sqlite3.Connection:
     """Get a SQLite database connection."""
@@ -115,6 +178,11 @@ def init_db(conn: sqlite3.Connection, rebuild: bool = False) -> None:
 
     if rebuild:
         logger.info("Dropping existing tables...")
+        # Drop CVM fundamentals tables first (before existing tables)
+        cursor.execute("DROP TABLE IF EXISTS fundamentals_pit")
+        cursor.execute("DROP TABLE IF EXISTS cvm_filings")
+        cursor.execute("DROP TABLE IF EXISTS cvm_companies")
+        # Drop original tables
         cursor.execute("DROP TABLE IF EXISTS prices")
         cursor.execute("DROP TABLE IF EXISTS corporate_actions")
         cursor.execute("DROP TABLE IF EXISTS stock_actions")
@@ -132,6 +200,17 @@ def init_db(conn: sqlite3.Connection, rebuild: bool = False) -> None:
     cursor.execute(INDEX_PRICES_DATE)
     cursor.execute(INDEX_PRICES_TICKER)
     cursor.execute(INDEX_PRICES_ISIN)
+    # CVM fundamentals tables (added after existing tables — do not reorder above)
+    cursor.execute(SCHEMA_CVM_COMPANIES)
+    cursor.execute(SCHEMA_CVM_FILINGS)
+    cursor.execute(SCHEMA_FUNDAMENTALS_PIT)
+    cursor.execute(INDEX_CVM_COMPANIES_TICKER)
+    cursor.execute(INDEX_CVM_FILINGS_CNPJ)
+    cursor.execute(INDEX_CVM_FILINGS_PERIOD)
+    cursor.execute(INDEX_FUNDAMENTALS_PIT_CNPJ)
+    cursor.execute(INDEX_FUNDAMENTALS_PIT_TICKER)
+    cursor.execute(INDEX_FUNDAMENTALS_PIT_FILING_DATE)
+    cursor.execute(INDEX_FUNDAMENTALS_PIT_PERIOD)
 
     # Migrate existing databases: add new columns if they don't exist
     _migrate_schema(conn)
@@ -152,6 +231,15 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         cursor.execute(
             "ALTER TABLE prices ADD COLUMN quotation_factor INTEGER DEFAULT 1"
         )
+
+    # CVM fundamentals tables are created by CREATE TABLE IF NOT EXISTS above.
+    # No explicit migration needed — they are created fresh on first run.
+    # Future migrations for these tables should be added here as ALTER TABLE statements.
+    # Example placeholder for future migrations:
+    # cursor.execute("PRAGMA table_info(fundamentals_pit)")
+    # pit_cols = {row[1] for row in cursor.fetchall()}
+    # if "new_column" not in pit_cols:
+    #     cursor.execute("ALTER TABLE fundamentals_pit ADD COLUMN new_column REAL")
 
 
 def _prepare_date(val) -> Optional[str]:
@@ -569,6 +657,25 @@ def get_summary_stats(conn: sqlite3.Connection) -> dict:
     cursor.execute("SELECT COUNT(*) FROM fetch_failures WHERE resolved = 0")
     unresolved_failures = cursor.fetchone()[0]
 
+    # CVM fundamentals counts (tables may not exist in very old DBs — default to 0)
+    try:
+        cursor.execute("SELECT COUNT(*) FROM cvm_companies")
+        total_cvm_companies = cursor.fetchone()[0]
+    except Exception:
+        total_cvm_companies = 0
+
+    try:
+        cursor.execute("SELECT COUNT(*) FROM cvm_filings")
+        total_cvm_filings = cursor.fetchone()[0]
+    except Exception:
+        total_cvm_filings = 0
+
+    try:
+        cursor.execute("SELECT COUNT(*) FROM fundamentals_pit")
+        total_fundamentals_pit = cursor.fetchone()[0]
+    except Exception:
+        total_fundamentals_pit = 0
+
     return {
         "total_prices": total_prices,
         "total_tickers": total_tickers,
@@ -579,4 +686,7 @@ def get_summary_stats(conn: sqlite3.Connection) -> dict:
         "total_stock_actions": total_stock_actions,
         "total_skipped_events": total_skipped,
         "unresolved_fetch_failures": unresolved_failures,
+        "total_cvm_companies": total_cvm_companies,
+        "total_cvm_filings": total_cvm_filings,
+        "total_fundamentals_pit": total_fundamentals_pit,
     }

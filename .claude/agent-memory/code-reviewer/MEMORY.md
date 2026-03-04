@@ -84,3 +84,17 @@
 - `_catalog_mtime` underscore prefix means Streamlit ignores it for cache key (only TTL invalidates)
 - `load_feature_data` silently swallows exceptions via bare `except Exception: return None`
 - Redundant `import os as _os` mid-file in 5_discovery.py (line 60) when `os` already imported at line 8
+
+## CVM Fundamentals Pipeline Review Notes (Mar 2026)
+- New files: cvm_storage.py, cvm_downloader.py, cvm_parser.py, cvm_main.py + tests
+- Modified: storage.py, config.py, b3_corporate_actions.py, data.py, shared_data.py, backtest_service.py
+- New UI: ui/pages/6_fundamentals.py, ui/services/fundamentals_service.py
+- New strategy: backtests/strategies/value_quality.py (needs_fundamentals=True)
+- **IMPORTANT**: Valuation ratio units mismatch -- price*shares is BRL, net_income is thousands BRL. PE off by 1000x
+- **IMPORTANT**: `load_fundamentals_pit` PIT lookahead bias -- `drop_duplicates` on (ticker, period_end) before ffill keeps latest version even for dates before it was filed
+- `app.py` sidebar navigation text not updated to include "6. Fundamentals"
+- `cvm_storage.py:106-109` repeated df.copy() in loop -- should copy once before loop
+- `cvm_parser.py:65` import inside function body (datetime) -- should be module-level
+- `cvm_main.py:76-98` N+1 query pattern for price lookup in ratio materialization
+- Per-row commit in upsert_cvm_filing and upsert_cvm_company -- slow for bulk operations
+- 31 new tests across 5 files, all 60 tests passing. TDD compliance: excellent

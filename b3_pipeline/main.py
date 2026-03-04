@@ -36,6 +36,7 @@ logger = logging.getLogger(__name__)
 def run_pipeline(
     rebuild: bool = False,
     year: Optional[int] = None,
+    start_year: Optional[int] = None,
     skip_corporate_actions: bool = False,
     detect_nonstandard_splits: bool = False,
 ) -> None:
@@ -88,6 +89,12 @@ def run_pipeline(
                 logger.error(f"Year {year} not available on B3")
                 return
             years_to_process = [year]
+        elif start_year:
+            years_to_process = [y for y in available_years if y >= start_year]
+            if not years_to_process:
+                logger.error(f"No available years >= {start_year}")
+                return
+            logger.info(f"Processing {len(years_to_process)} years from {start_year}")
         else:
             years_to_process = available_years
 
@@ -215,6 +222,43 @@ def run_pipeline(
         conn.close()
 
 
+def _run_update_cnpj_map() -> None:
+    """
+    Fetch CNPJ from the B3 API for every ticker root in the prices table
+    and upsert into cvm_companies. Runs in ~1-2 minutes vs the full pipeline.
+    """
+    import sqlite3
+    logger.info("Updating CNPJ → ticker map from B3 API...")
+    with sqlite3.connect(config.DB_PATH) as conn:
+        storage.init_db(conn)
+        tickers = storage.get_all_tickers(conn)
+        if not tickers:
+            logger.warning("No tickers found in the database. Run the full pipeline first.")
+            return
+        ticker_roots = sorted(set(t[:4] for t in tickers if len(t) >= 4))
+        logger.info(f"Fetching CNPJ for {len(ticker_roots)} company codes...")
+        updated = 0
+        for i, root in enumerate(ticker_roots, 1):
+            if i % 50 == 0 or i == len(ticker_roots):
+                logger.info(f"  {i}/{len(ticker_roots)} ({root})")
+            company_data = b3_corporate_actions.fetch_company_data(root, conn=conn)
+            if company_data is None:
+                continue
+            cnpj = b3_corporate_actions.extract_cnpj_from_company_data(company_data)
+            if cnpj:
+                from . import cvm_storage as _cvm_storage
+                _cvm_storage.upsert_cvm_company(
+                    conn,
+                    cnpj=cnpj,
+                    ticker=root,
+                    company_name=company_data.get("companyName", ""),
+                    cvm_code=str(company_data.get("codeCVM", "") or ""),
+                    b3_trading_name=company_data.get("tradingName", ""),
+                )
+                updated += 1
+        logger.info(f"Done. Upserted {updated} CNPJ mappings into cvm_companies.")
+
+
 def retry_failed_companies() -> None:
     """
     Re-fetch corporate actions for companies that previously failed.
@@ -310,6 +354,13 @@ Examples:
     )
 
     arg_parser.add_argument(
+        "--start-year",
+        type=int,
+        default=None,
+        help="Process all years from this year onwards (e.g. --start-year 2010)",
+    )
+
+    arg_parser.add_argument(
         "--skip-corporate-actions",
         action="store_true",
         help="Skip fetching corporate actions (use existing data)",
@@ -328,6 +379,12 @@ Examples:
     )
 
     arg_parser.add_argument(
+        "--update-cnpj-map",
+        action="store_true",
+        help="Fetch CNPJ from B3 API for all known tickers and populate cvm_companies. Fast alternative to running the full pipeline.",
+    )
+
+    arg_parser.add_argument(
         "--verbose",
         "-v",
         action="store_true",
@@ -339,12 +396,15 @@ Examples:
     if args.verbose:
         logging.getLogger().setLevel(logging.DEBUG)
 
-    if args.retry_failures:
+    if args.update_cnpj_map:
+        _run_update_cnpj_map()
+    elif args.retry_failures:
         retry_failed_companies()
     else:
         run_pipeline(
             rebuild=args.rebuild,
             year=args.year,
+            start_year=args.start_year,
             skip_corporate_actions=args.skip_corporate_actions,
             detect_nonstandard_splits=args.detect_nonstandard_splits,
         )
