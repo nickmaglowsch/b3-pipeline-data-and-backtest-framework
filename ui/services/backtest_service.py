@@ -18,14 +18,20 @@ DB_PATH = PROJECT_ROOT / "b3_market_data.sqlite"
 
 
 @st.cache_data(ttl=3600)
-def _get_shared_data_cached(db_path: str, start: str, end: str, freq: str) -> dict:
+def _get_shared_data_cached(
+    db_path: str,
+    start: str,
+    end: str,
+    freq: str,
+    include_fundamentals: bool = False,
+) -> dict:
     """
     Cache the shared data dict in Streamlit's data cache.
     Uses cache_data (not cache_resource) to ensure callers get independent copies.
-    Key: (db_path, start, end, freq).
+    Key: (db_path, start, end, freq, include_fundamentals).
     """
     from backtests.core.shared_data import build_shared_data
-    return build_shared_data(db_path, start, end, freq)
+    return build_shared_data(db_path, start, end, freq, include_fundamentals=include_fundamentals)
 
 
 def run_backtest(strategy_name: str, params: dict) -> dict:
@@ -58,16 +64,20 @@ def run_backtest(strategy_name: str, params: dict) -> dict:
     if end == "today":
         end = datetime.today().strftime("%Y-%m-%d")
 
+    # Detect whether strategy needs CVM fundamentals data
+    needs_funds = getattr(strategy, "needs_fundamentals", False)
+
     print(f"[backtest_service] Starting: {strategy_name}")
     print(f"[backtest_service] Params: start={start}, end={end}, freq={freq}")
+    print(f"[backtest_service] include_fundamentals={needs_funds}")
 
     # Load shared data (cached in Streamlit resource cache)
     try:
-        shared = _get_shared_data_cached(str(DB_PATH), start, end, freq)
+        shared = _get_shared_data_cached(str(DB_PATH), start, end, freq, include_fundamentals=needs_funds)
     except Exception as e:
         print(f"[backtest_service] Cache miss or error, rebuilding: {e}")
         from backtests.core.shared_data import build_shared_data
-        shared = build_shared_data(str(DB_PATH), start, end, freq)
+        shared = build_shared_data(str(DB_PATH), start, end, freq, include_fundamentals=needs_funds)
 
     print(f"[backtest_service] Generating signals for {strategy_name}...")
     ret_matrix, target_weights = strategy.generate_signals(shared, params)

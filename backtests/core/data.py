@@ -189,3 +189,133 @@ def download_cdi_daily(start: str, end: str) -> pd.Series:
     result.name = "CDI"
 
     return result
+
+
+# ── Fundamentals (point-in-time) data loading ─────────────────────────────────
+
+_FUNDAMENTALS_METRICS = [
+    "revenue",
+    "net_income",
+    "ebitda",
+    "total_assets",
+    "equity",
+    "net_debt",
+    "shares_outstanding",
+    "pe_ratio",
+    "pb_ratio",
+    "ev_ebitda",
+]
+
+
+def _get_rebalance_dates(db_path: str, start: str, end: str, freq: str) -> pd.DatetimeIndex:
+    """Build the rebalance date grid by sampling the prices table."""
+    with sqlite3.connect(db_path) as conn:
+        dates_df = pd.read_sql_query(
+            "SELECT DISTINCT date FROM prices WHERE date >= ? AND date <= ? ORDER BY date",
+            conn,
+            params=[start, end],
+        )
+    if dates_df.empty:
+        return pd.date_range(start=start, end=end, freq=freq)
+    daily_idx = pd.to_datetime(dates_df["date"])
+    return pd.date_range(start=daily_idx.min(), end=daily_idx.max(), freq=freq)
+
+
+def load_fundamentals_pit(
+    db_path: str,
+    metric: str,
+    start: str,
+    end: str,
+    freq: str = "ME",
+) -> pd.DataFrame:
+    """
+    Load point-in-time fundamentals for a single metric.
+
+    For each (rebalance_date, ticker), returns the metric value from the most
+    recently filed version of the most recently filed period whose filing_date
+    <= rebalance_date.
+
+    Args:
+        db_path:  Path to the B3 SQLite database file.
+        metric:   Column name in fundamentals_pit (e.g. 'pe_ratio', 'revenue').
+        start:    Start date string.
+        end:      End date string.
+        freq:     Rebalance calendar frequency (default 'ME' = month-end).
+
+    Returns:
+        Wide DataFrame: DatetimeIndex (rebalance dates) × ticker columns.
+        Values are forward-filled from the last filing_date on or before each date.
+    """
+    if metric not in _FUNDAMENTALS_METRICS:
+        raise ValueError(f"Unknown metric {metric!r}. Choose from: {_FUNDAMENTALS_METRICS}")
+
+    sql = f"""
+        SELECT
+            f.ticker,
+            f.filing_date,
+            f.period_end,
+            f.filing_version,
+            f.{metric}
+        FROM fundamentals_pit f
+        WHERE f.ticker IS NOT NULL
+          AND f.filing_date >= :start
+          AND f.filing_date <= :end
+          AND f.{metric} IS NOT NULL
+        ORDER BY f.ticker, f.filing_date, f.filing_version
+    """
+
+    with sqlite3.connect(db_path) as conn:
+        df = pd.read_sql_query(sql, conn, params={"start": start, "end": end})
+
+    if df.empty:
+        rebal_dates = _get_rebalance_dates(db_path, start, end, freq)
+        return pd.DataFrame(index=rebal_dates, dtype=float)
+
+    # Sort so that within a given filing_date, the highest version wins.
+    # Do NOT deduplicate across all time — each version must retain its own
+    # filing_date so that forward-fill preserves strict point-in-time semantics:
+    # a restatement only becomes visible after its own filing_date.
+    df = df.sort_values(["ticker", "filing_date", "filing_version"])
+
+    # Pivot: index = filing_date, columns = ticker.
+    # aggfunc="last" picks the highest version when multiple versions share
+    # the same filing_date (rare, but possible).
+    wide = df.pivot_table(
+        index="filing_date",
+        columns="ticker",
+        values=metric,
+        aggfunc="last",
+    )
+    wide.index = pd.to_datetime(wide.index)
+    wide.columns.name = None
+
+    # Reindex to the rebalance calendar and forward-fill
+    rebal_dates = _get_rebalance_dates(db_path, start, end, freq)
+    wide = wide.reindex(rebal_dates).ffill()
+
+    return wide
+
+
+def load_all_fundamentals(
+    db_path: str,
+    start: str,
+    end: str,
+    freq: str = "ME",
+) -> dict:
+    """
+    Load all 10 fundamentals metrics and return them as a dict of wide DataFrames.
+
+    Returns:
+        dict with keys matching _FUNDAMENTALS_METRICS:
+        {"revenue": df, "net_income": df, ..., "ev_ebitda": df}
+        Each df has DatetimeIndex (rebalance dates) and ticker columns.
+    """
+    result = {}
+    for metric in _FUNDAMENTALS_METRICS:
+        try:
+            result[metric] = load_fundamentals_pit(db_path, metric, start, end, freq=freq)
+        except Exception as e:
+            import warnings
+            warnings.warn(f"Failed to load fundamentals metric '{metric}': {e}")
+            result[metric] = pd.DataFrame()
+    return result

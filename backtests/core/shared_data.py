@@ -12,7 +12,10 @@ import logging
 import numpy as np
 import pandas as pd
 
-from backtests.core.data import load_b3_data, load_b3_hlc_data, download_benchmark, download_cdi_daily
+from backtests.core.data import (
+    load_b3_data, load_b3_hlc_data, download_benchmark, download_cdi_daily,
+    load_all_fundamentals,
+)
 from backtests.core.mean_rev_helpers import compute_mean_rev_features
 
 logger = logging.getLogger(__name__)
@@ -115,6 +118,7 @@ def build_shared_data(
     start: str,
     end: str,
     freq: str = "ME",
+    include_fundamentals: bool = False,
 ) -> dict:
     """
     Load and precompute all shared DataFrames needed by strategy plugins.
@@ -219,7 +223,7 @@ def build_shared_data(
     ibov_vol_20d_daily = mr_features["ibov_vol_20d_daily"]
     ibov_ret_20d_daily = mr_features["ibov_ret_20d_daily"]
 
-    return {
+    shared = {
         # ── price / return data ───────────────────────────────────────────────
         "adj_close": adj_close,
         "split_adj_high": split_adj_high,
@@ -266,3 +270,16 @@ def build_shared_data(
         "ibov_vol_20d_daily": ibov_vol_20d_daily,
         "ibov_ret_20d_daily": ibov_ret_20d_daily,
     }
+
+    # ── Optional: CVM fundamentals (PIT-aligned to rebalance calendar) ────────
+    # When include_fundamentals=True, loads all 10 metric DataFrames from
+    # fundamentals_pit and adds them with "f_" prefix. Default is False to
+    # avoid performance regression for strategies that don't need fundamentals.
+    if include_fundamentals:
+        logger.info("Loading CVM fundamentals data (include_fundamentals=True)...")
+        fundamentals = load_all_fundamentals(db_path, start, end, freq=freq)
+        for metric, df_fund in fundamentals.items():
+            shared["f_" + metric] = df_fund
+        logger.info(f"Added {len(fundamentals)} fundamentals DataFrames with 'f_' prefix")
+
+    return shared

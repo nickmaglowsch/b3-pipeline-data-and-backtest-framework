@@ -44,6 +44,7 @@ Welcome to the B3 data pipeline management UI. Use the sidebar to navigate:
 - **Dashboard**: Browse and compare backtest results
 - **Research**: View ML feature importance research results
 - **Discovery**: Feature discovery engine -- IC evaluation, pruning, and alpha research
+- **Fundamentals**: CVM fundamentals pipeline -- download DFP/ITR data, view coverage stats
 """)
 
 st.divider()
@@ -81,6 +82,7 @@ Use the pages above to navigate between modules:
 3. **Dashboard** -- Browse results
 4. **Research** -- ML insights
 5. **Discovery** -- Feature discovery
+6. **Fundamentals** -- CVM fundamentals pipeline
 """)
 
 st.sidebar.divider()

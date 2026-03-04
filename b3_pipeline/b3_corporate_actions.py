@@ -8,6 +8,7 @@ listedCompaniesProxy backend, making B3 the single authoritative source.
 import base64
 import json
 import logging
+import re
 import time
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
@@ -18,6 +19,26 @@ import requests
 from . import config
 
 logger = logging.getLogger(__name__)
+
+
+def _clean_cnpj(raw: str) -> Optional[str]:
+    """Strip CNPJ formatting (dots, slashes, dashes) and return 14-digit string or None."""
+    if not raw:
+        return None
+    digits = re.sub(r"\D", "", str(raw))
+    return digits if len(digits) == 14 else None
+
+
+def extract_cnpj_from_company_data(company_data: dict) -> Optional[str]:
+    """Safely extract and clean the CNPJ from a B3 company API response dict."""
+    raw = company_data.get("cnpj", None)
+    return _clean_cnpj(raw)
+
+
+def build_cnpj_ticker_map(conn) -> dict:
+    """Query cvm_companies and return {cnpj_14digits: ticker_root} mapping."""
+    from . import cvm_storage as _cvm_storage
+    return _cvm_storage.get_cvm_company_map(conn)
 
 
 def _encode_payload(payload: dict) -> str:
@@ -507,6 +528,22 @@ def fetch_all_corporate_actions(
         company_data = fetch_company_data(name, conn=conn)
         if company_data is None:
             continue
+
+        # NEW: persist CNPJ mapping to cvm_companies
+        cnpj = extract_cnpj_from_company_data(company_data)
+        if cnpj and conn is not None:
+            from . import cvm_storage as _cvm_storage
+            try:
+                _cvm_storage.upsert_cvm_company(
+                    conn,
+                    cnpj=cnpj,
+                    ticker=name,  # 4-char ticker root
+                    company_name=company_data.get("companyName", ""),
+                    cvm_code=str(company_data.get("codeCVM", "") or ""),
+                    b3_trading_name=company_data.get("tradingName", ""),
+                )
+            except Exception as e:
+                logger.debug(f"Failed to upsert cvm_company for {name}: {e}")
 
         # Extract full trading name needed for the cash dividends endpoint
         full_trading_name = company_data.get("tradingName", "").strip()

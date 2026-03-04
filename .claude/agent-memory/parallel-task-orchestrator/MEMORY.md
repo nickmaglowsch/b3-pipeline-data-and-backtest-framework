@@ -62,6 +62,23 @@
 - Strategy discovery: get_registry().list_all() returns all 13 strategies on first call
 - backtest_service uses @st.cache_resource to cache shared_data (heavy, ~200MB)
 
+### CVM Fundamentals Module -- created 2026-03-03
+- b3_pipeline/storage.py: added SCHEMA_CVM_COMPANIES, SCHEMA_CVM_FILINGS, SCHEMA_FUNDAMENTALS_PIT + indexes
+- b3_pipeline/cvm_storage.py: upsert_cvm_company(), upsert_cvm_filing(), upsert_fundamentals_pit(), get_cvm_company_map()
+- b3_pipeline/config.py: CVM_DFP_BASE_URL, CVM_ITR_BASE_URL, CVM_FRE_BASE_URL, CVM_DATA_DIR, CVM_START_YEAR=2010
+- b3_pipeline/b3_corporate_actions.py: extract_cnpj_from_company_data(), build_cnpj_ticker_map() added
+- b3_pipeline/cvm_downloader.py: download_dfp_file(), download_itr_file(), download_fre_file(), download_all_cvm_files()
+- b3_pipeline/cvm_parser.py: parse_dfp_zip(), parse_itr_zip(), parse_fre_zip() with in-memory ZIP support for testing
+- b3_pipeline/cvm_main.py: run_fundamentals_pipeline(), materialize_valuation_ratios() — entry point: python -m b3_pipeline.cvm_main
+- backtests/core/data.py: load_fundamentals_pit(), load_all_fundamentals() added
+- backtests/core/shared_data.py: build_shared_data() now accepts include_fundamentals=False (backward compat)
+- backtests/strategies/value_quality.py: ValueQualityStrategy with needs_fundamentals=True
+- ui/services/fundamentals_service.py + ui/pages/6_fundamentals.py: Streamlit page follows 1_pipeline.py pattern
+- ui/services/backtest_service.py: detects needs_fundamentals on strategy, passes include_fundamentals flag
+- Tests: 36 new tests in tests/test_cvm_*.py and tests/test_fundamentals_pit.py; all 60 tests pass
+- Key TDD pattern: tests written FIRST, implementation second; in-memory SQLite fixtures for DB tests
+- CVM ZIP test pattern: use io.BytesIO() + zipfile.ZipFile for in-memory synthetic ZIPs (no real files needed)
+
 ### MeanRevComposite Strategy -- created 2026-03-02
 - backtests/core/mean_rev_helpers.py: 3 helpers -- compute_regime_filter(), compute_alpha_score(), compute_signal_stability()
 - backtests/strategies/mean_reversion.py: SimpleMeanReversionStrategy (old) + MeanReversionCompositeStrategy (new, name="MeanRevComposite")

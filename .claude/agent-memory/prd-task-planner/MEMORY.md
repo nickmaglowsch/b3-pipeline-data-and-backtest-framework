@@ -65,5 +65,21 @@
 - Catalog JSON structure: features[] with rank, id, category, level, formula_human, metrics per horizon, turnover, decay
 - EWM and Mean Reversion base signals implemented (all 17+ categories present)
 
-## No Tests
-- No test suite exists in the codebase
+## Tests (pytest introduced 2026-03-03)
+- pytest>=7.0 added to requirements.txt as part of fundamentals feature
+- Test directory: `tests/` at project root, with `tests/__init__.py`
+- Convention: `tests/test_<module_name>.py`
+- Run command: `python -m pytest tests/ -v` from project root
+
+## Fundamentals Pipeline (IN PROGRESS as of 2026-03-03)
+- New tables in `b3_market_data.sqlite`: `cvm_companies`, `cvm_filings`, `fundamentals_pit`
+- New modules: `b3_pipeline/cvm_downloader.py`, `cvm_parser.py`, `cvm_storage.py`, `cvm_main.py`
+- CNPJ mapping: B3 API `GetListedSupplementCompany` response contains CNPJ field (verify field name at impl time)
+- CVM data directory: `data/cvm/` (created by `config.CVM_DATA_DIR`)
+- CVM data starts 2010; backtests using fundamentals should start 2012+
+- CVM CSV encoding: latin-1, semicolon-separated; `ORDEM_EXERC == 'ÚLTIMO'` filter for current period
+- Account codes: 3.01=revenue, 3.05=EBIT(EBITDA proxy), 3.11=net_income, 1=total_assets, 2.03=equity
+- Fundamentals in shared_data: `include_fundamentals=True` param; keys prefixed `f_` (e.g. `f_pe_ratio`)
+- Strategy plugin `ValueQuality` in `backtests/strategies/value_quality.py` uses `needs_fundamentals = True`
+- UI: `ui/pages/6_fundamentals.py` + `ui/services/fundamentals_service.py`
+- CVM URL constants in config.py: `CVM_DFP_BASE_URL`, `CVM_ITR_BASE_URL`, `CVM_FRE_BASE_URL`
