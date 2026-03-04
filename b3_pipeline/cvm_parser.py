@@ -86,6 +86,38 @@ def _infer_quarter(period_end: str) -> Optional[int]:
     return None
 
 
+def extract_company_index(zip_path) -> list:
+    """Extract unique (cnpj, cvm_code, company_name) tuples from a CVM ZIP file.
+
+    Reads the first available CSV in the ZIP — all CVM files share the same
+    CNPJ_CIA / CD_CVM / DENOM_CIA columns, so one CSV is enough.
+
+    Returns a list of (cnpj_14digits, cvm_code_str, company_name) tuples.
+    """
+    result = {}
+    try:
+        with zipfile.ZipFile(zip_path) as zf:
+            csv_names = [n for n in zf.namelist() if n.lower().endswith(".csv")]
+            if not csv_names:
+                return []
+            with zf.open(csv_names[0]) as f:
+                df = pd.read_csv(
+                    f, sep=";", encoding="latin-1", dtype=str,
+                    usecols=["CNPJ_CIA", "CD_CVM", "DENOM_CIA"],
+                    low_memory=False,
+                )
+            for _, row in df.drop_duplicates(subset=["CNPJ_CIA"]).iterrows():
+                cnpj = _clean_cnpj(str(row.get("CNPJ_CIA", "") or ""))
+                if cnpj:
+                    result[cnpj] = (
+                        str(row.get("CD_CVM", "") or "").strip(),
+                        str(row.get("DENOM_CIA", "") or "").strip(),
+                    )
+    except Exception as e:
+        logger.warning(f"Failed to extract company index from {zip_path}: {e}")
+    return [(cnpj, cvm_code, name) for cnpj, (cvm_code, name) in result.items()]
+
+
 def _load_csv_from_zip(zf: zipfile.ZipFile, name_pattern: str) -> Optional[pd.DataFrame]:
     """Find a CSV matching the pattern (case-insensitive) inside the ZIP and load it."""
     matches = [

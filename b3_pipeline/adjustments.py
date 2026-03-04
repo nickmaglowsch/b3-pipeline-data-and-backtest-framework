@@ -128,10 +128,9 @@ def compute_split_adjustment_factors(
     Compute backward cumulative split adjustment factors based on ISIN codes.
 
     For each ISIN:
-    1. Sort splits by date descending
-    2. For each trading date, cumulative_factor = product of all split_factors
-       for splits on or after that date
-    3. Apply to open, high, low, close
+    1. Sort splits by date ascending, build suffix-product array
+    2. Use np.searchsorted to assign each price row its factor in O(n log m)
+    3. Apply to open, high, low, close via vectorized column writes
 
     Args:
         prices: DataFrame with raw price data
@@ -153,61 +152,49 @@ def compute_split_adjustment_factors(
 
     logger.info(f"Applying {len(splits)} split adjustments...")
 
+    # Pre-normalize date column once for all ISINs
+    result["_date_ts"] = pd.to_datetime(result["date"], errors="coerce")
+
     isins_with_splits = splits["isin_code"].unique()
 
     for isin_code in isins_with_splits:
         isin_mask = result["isin_code"] == isin_code
-        isin_prices = result[isin_mask].copy()
+        isin_prices = result[isin_mask]
 
         if isin_prices.empty:
             continue
 
         isin_splits = splits[splits["isin_code"] == isin_code].copy()
-        isin_splits = isin_splits.sort_values("ex_date", ascending=False)
+        isin_splits = isin_splits.dropna(subset=["ex_date"])
+        isin_splits = isin_splits.sort_values("ex_date", ascending=True)
 
-        cumulative_factor = 1.0
-        split_idx = 0
-        n_splits = len(isin_splits)
+        if isin_splits.empty:
+            continue
 
-        isin_prices = isin_prices.sort_values("date", ascending=False)
+        split_dates = pd.to_datetime(isin_splits["ex_date"].values, errors="coerce").astype("datetime64[ns]")
+        split_factors = isin_splits["split_factor"].values.astype(float)
+        n_splits = len(split_factors)
 
-        for idx in isin_prices.index:
-            row_date = _normalize_date(result.loc[idx, "date"])
-            if row_date is None:
-                continue
+        # Build suffix-product array: suffix[i] = product of split_factors[i:]
+        # suffix[n_splits] = 1.0 (no splits remaining)
+        suffix = np.ones(n_splits + 1)
+        for i in range(n_splits - 1, -1, -1):
+            raw = split_factors[i] * suffix[i + 1]
+            suffix[i] = max(_MIN_CUMULATIVE_FACTOR, min(_MAX_CUMULATIVE_FACTOR, raw))
 
-            while split_idx < n_splits:
-                split_row = isin_splits.iloc[split_idx]
-                split_date = _normalize_date(split_row["ex_date"])
-                if split_date is None:
-                    split_idx += 1
-                    continue
+        # For each price date, find first split index where split_date >= price_date
+        # np.searchsorted(split_dates, price_date, side='left') gives that index
+        price_dates = isin_prices["_date_ts"].values.astype("datetime64[ns]")
+        indices = np.searchsorted(split_dates, price_dates, side="left")
+        factors = suffix[indices]
 
-                if split_date >= row_date:
-                    cumulative_factor *= split_row["split_factor"]
-                    split_idx += 1
-                else:
-                    break
+        # Four vectorized column writes per ISIN (not per row)
+        result.loc[isin_mask, "split_adj_open"] = isin_prices["open"].values.astype(float) * factors
+        result.loc[isin_mask, "split_adj_high"] = isin_prices["high"].values.astype(float) * factors
+        result.loc[isin_mask, "split_adj_low"] = isin_prices["low"].values.astype(float) * factors
+        result.loc[isin_mask, "split_adj_close"] = isin_prices["close"].values.astype(float) * factors
 
-            # Cap cumulative factor to prevent extreme adjustments
-            cumulative_factor = max(
-                _MIN_CUMULATIVE_FACTOR,
-                min(_MAX_CUMULATIVE_FACTOR, cumulative_factor),
-            )
-
-            result.loc[idx, "split_adj_open"] = (
-                result.loc[idx, "open"] * cumulative_factor
-            )
-            result.loc[idx, "split_adj_high"] = (
-                result.loc[idx, "high"] * cumulative_factor
-            )
-            result.loc[idx, "split_adj_low"] = (
-                result.loc[idx, "low"] * cumulative_factor
-            )
-            result.loc[idx, "split_adj_close"] = (
-                result.loc[idx, "close"] * cumulative_factor
-            )
-
+    result = result.drop(columns=["_date_ts"])
     logger.info("Split adjustments applied")
     return result
 
@@ -259,9 +246,10 @@ def compute_dividend_adjustment_factors(
         f"Applying dividend/JCP adjustments ({len(dividend_actions)} events)..."
     )
 
-    result["date_normalized"] = result["date"].apply(_normalize_date)
-    dividend_actions["event_date_normalized"] = dividend_actions["event_date"].apply(
-        _normalize_date
+    # Pre-normalize dates once for all ISINs
+    result["_date_ts"] = pd.to_datetime(result["date"], errors="coerce")
+    dividend_actions["_event_date_ts"] = pd.to_datetime(
+        dividend_actions["event_date"], errors="coerce"
     )
 
     isins_with_dividends = dividend_actions["isin_code"].unique()
@@ -277,33 +265,37 @@ def compute_dividend_adjustment_factors(
         if isin_prices.empty:
             continue
 
-        isin_prices = isin_prices.sort_values("date_normalized")
+        isin_prices = isin_prices.sort_values("_date_ts")
 
         isin_dividends = dividend_actions[
             dividend_actions["isin_code"] == isin_code
         ].copy()
-        isin_dividends = isin_dividends.dropna(subset=["event_date_normalized"])
+        isin_dividends = isin_dividends.dropna(subset=["_event_date_ts"])
 
         if isin_dividends.empty:
             continue
 
+        # Sorted ascending price arrays for searchsorted — force datetime64[ns]
+        price_dates = isin_prices["_date_ts"].values.astype("datetime64[ns]")
+        price_closes = isin_prices["close"].values.astype(float)
+
         div_factors = []
         for _, div_row in isin_dividends.iterrows():
-            ex_date = div_row["event_date_normalized"]
+            ex_date = div_row["_event_date_ts"]
             div_amount = div_row["value"]
 
             if div_amount is None or div_amount <= 0:
                 continue
 
-            prev_mask = isin_prices["date_normalized"] < ex_date
-            prev_data = isin_prices[prev_mask]
-
-            if prev_data.empty:
+            # Find last price before ex_date via searchsorted (avoids boolean mask)
+            ex_date_np = np.datetime64(pd.Timestamp(ex_date), "ns")
+            pos = int(np.searchsorted(price_dates, ex_date_np, side="left")) - 1
+            if pos < 0:
                 continue
 
             # IMPORTANT: We must use the RAW close price to calculate the yield factor,
             # because B3 dividend amounts are raw historical amounts (not split-adjusted).
-            prev_close = prev_data.iloc[-1]["close"]
+            prev_close = price_closes[pos]
 
             if prev_close <= 0:
                 continue
@@ -319,32 +311,27 @@ def compute_dividend_adjustment_factors(
         div_factors_df = pd.DataFrame(div_factors)
         div_factors_df = div_factors_df.sort_values("ex_date", ascending=True)
 
-        isin_prices = isin_prices.sort_values(
-            "date_normalized", ascending=True
-        )
-
-        div_factors_df["cumulative_factor"] = div_factors_df["factor"][::-1].cumprod()[
-            ::-1
-        ]
-        div_factors_df = div_factors_df.sort_values("ex_date", ascending=True)
-
         last_cumulative = 1.0
         adj_close_values = isin_prices["split_adj_close"].values.copy()
-        dates = isin_prices["date_normalized"].values
+        dates = isin_prices["_date_ts"].values.astype("datetime64[ns]")
+
+        # Use numpy arrays for the backward sweep (avoids iloc per step)
+        div_dates_arr = pd.to_datetime(div_factors_df["ex_date"]).values.astype("datetime64[ns]")
+        div_individual_factors = div_factors_df["factor"].values
 
         div_idx = len(div_factors_df) - 1
         for j in range(len(dates) - 1, -1, -1):
             row_date = dates[j]
 
-            while div_idx >= 0 and div_factors_df.iloc[div_idx]["ex_date"] > row_date:
-                last_cumulative *= div_factors_df.iloc[div_idx]["factor"]
+            while div_idx >= 0 and div_dates_arr[div_idx] > row_date:
+                last_cumulative *= div_individual_factors[div_idx]
                 div_idx -= 1
 
             adj_close_values[j] = adj_close_values[j] * last_cumulative
 
         result.loc[isin_prices.index, "adj_close"] = adj_close_values
 
-    result = result.drop(columns=["date_normalized"])
+    result = result.drop(columns=["_date_ts"])
     logger.info("Dividend/JCP adjustments applied")
     return result
 

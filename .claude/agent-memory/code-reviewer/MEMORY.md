@@ -38,7 +38,8 @@
 - `COMMON_SPLIT_RATIOS` in config.py is dead code -- `detect_splits_from_prices` uses its own local `_common_ratios` list
 - `retry_failed_companies()` in main.py only processes stockDividends, not cashDividends
 - parser.py close_price reads line[108:121] which config.py says is preco_medio (average), not preco_ultimo_negocio (close at 121:134) -- pre-existing, needs investigation
-- `fetch_company_data` failure tracking only covers RequestException, not JSON/parse errors
+- `fetch_company_data` failure tracking now covers RequestException, JSONDecodeError, and AttributeError/TypeError (fixed in refactor)
+- CNPJ upsert in `_fetch_one_company` always runs (no longer gated on `conn is not None`) -- intentional behavior change from concurrency refactor
 
 ## Streamlit UI Review Notes (Feb 2026)
 - `@st.cache_resource` for shared data dict is fragile -- strategies must `.copy()` before mutation

@@ -9,7 +9,9 @@ import base64
 import json
 import logging
 import re
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
@@ -497,10 +499,89 @@ def parse_stock_dividends(
     return corp_df, stock_df, skipped_df
 
 
+def _fetch_one_company(
+    name: str,
+    ticker_to_isin: dict,
+) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """
+    Fetch and parse all corporate action data for one company code.
+
+    Opens its own SQLite connection for side-effect writes (failure tracking,
+    CNPJ upsert) and closes it before returning. Safe to call from a thread.
+
+    Returns:
+        (corp_df, stock_df, skipped_df) — may all be empty DataFrames on failure.
+    """
+    from . import storage as _storage
+    from . import cvm_storage as _cvm_storage
+
+    _empty_corp = pd.DataFrame(columns=["isin_code", "event_date", "event_type", "value", "factor", "source"])
+    _empty_stock = pd.DataFrame(columns=["isin_code", "ex_date", "action_type", "factor", "source"])
+    _empty_skipped = pd.DataFrame(columns=["isin_code", "event_date", "label", "factor", "source", "reason"])
+
+    thread_conn = _storage.get_connection()
+    try:
+        company_data = fetch_company_data(name, conn=thread_conn)
+        if company_data is None:
+            return _empty_corp, _empty_stock, _empty_skipped
+
+        # Persist ticker mapping via codeCVM (B3 API does not return cnpj directly).
+        # cvm_companies rows are pre-populated by the CVM pipeline (cnpj + cvm_code);
+        # here we just update the ticker column by matching on cvm_code.
+        cvm_code = str(company_data.get("codeCVM", "") or "").strip()
+        if cvm_code:
+            try:
+                _cvm_storage.update_ticker_by_cvm_code(
+                    thread_conn,
+                    cvm_code=cvm_code,
+                    ticker=name,
+                    b3_trading_name=company_data.get("tradingName", ""),
+                )
+            except Exception as e:
+                logger.debug(f"Failed to update ticker for {name} (codeCVM={cvm_code}): {e}")
+
+        full_trading_name = company_data.get("tradingName", "").strip()
+
+        corp_parts = []
+        stock_parts = []
+        skipped_parts = []
+
+        # Stock dividends (splits, bonuses) — already in company_data
+        stock_divs = company_data.get("stockDividends", [])
+        if stock_divs:
+            corp_from_stock, stock_df, skipped_df = parse_stock_dividends(stock_divs)
+            if not corp_from_stock.empty:
+                corp_parts.append(corp_from_stock)
+            if not stock_df.empty:
+                stock_parts.append(stock_df)
+            if not skipped_df.empty:
+                skipped_parts.append(skipped_df)
+
+        time.sleep(config.RATE_LIMIT_DELAY)
+
+        # Cash dividends — separate paginated endpoint
+        if full_trading_name:
+            cash_divs = fetch_cash_dividends_paginated(full_trading_name)
+            if cash_divs:
+                corp_df = parse_cash_dividends(cash_divs, name, ticker_to_isin)
+                if not corp_df.empty:
+                    corp_parts.append(corp_df)
+            time.sleep(config.RATE_LIMIT_DELAY)
+
+        final_corp = pd.concat(corp_parts, ignore_index=True) if corp_parts else _empty_corp
+        final_stock = pd.concat(stock_parts, ignore_index=True) if stock_parts else _empty_stock
+        final_skipped = pd.concat(skipped_parts, ignore_index=True) if skipped_parts else _empty_skipped
+
+        return final_corp, final_stock, final_skipped
+
+    finally:
+        thread_conn.close()
+
+
 def fetch_all_corporate_actions(
     trading_names: List[str],
     ticker_to_isin: dict,
-    conn=None,
+    conn=None,  # kept for backward compat; workers open per-thread connections
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """
     Fetch all corporate actions for multiple trading names.
@@ -508,69 +589,46 @@ def fetch_all_corporate_actions(
     Args:
         trading_names: List of 4-character ticker roots (e.g., 'PETR')
         ticker_to_isin: Dictionary mapping tickers to ISINs
-        conn: Optional SQLite connection for failure tracking (Phase 4)
+        conn: Optional SQLite connection for failure tracking (Phase 4).
+              No longer used internally — workers open their own per-thread connections.
 
     Returns:
         Tuple of (corporate_actions_df, stock_actions_df, skipped_events_df)
     """
-    from . import storage as _storage
-
-    all_corp_actions = []
-    all_stock_actions = []
-    all_skipped_events = []
+    all_corp_actions: List[pd.DataFrame] = []
+    all_stock_actions: List[pd.DataFrame] = []
+    all_skipped_events: List[pd.DataFrame] = []
     total = len(trading_names)
+    completed = 0
+    counter_lock = threading.Lock()
 
-    for i, name in enumerate(trading_names, 1):
-        if i % 10 == 0 or i == total:
-            logger.info(f"Fetching corporate actions: {i}/{total} ({name})")
+    with ThreadPoolExecutor(max_workers=config.MAX_WORKERS) as executor:
+        future_to_name = {
+            executor.submit(_fetch_one_company, name, ticker_to_isin): name
+            for name in trading_names
+        }
 
-        # 1. Fetch company data using 4-letter root as issuingCompany
-        company_data = fetch_company_data(name, conn=conn)
-        if company_data is None:
-            continue
+        for future in as_completed(future_to_name):
+            name = future_to_name[future]
+            with counter_lock:
+                completed += 1
+                current = completed
 
-        # NEW: persist CNPJ mapping to cvm_companies
-        cnpj = extract_cnpj_from_company_data(company_data)
-        if cnpj and conn is not None:
-            from . import cvm_storage as _cvm_storage
+            if current % 10 == 0 or current == total:
+                logger.info(f"Fetching corporate actions: {current}/{total} ({name})")
+
             try:
-                _cvm_storage.upsert_cvm_company(
-                    conn,
-                    cnpj=cnpj,
-                    ticker=name,  # 4-char ticker root
-                    company_name=company_data.get("companyName", ""),
-                    cvm_code=str(company_data.get("codeCVM", "") or ""),
-                    b3_trading_name=company_data.get("tradingName", ""),
-                )
-            except Exception as e:
-                logger.debug(f"Failed to upsert cvm_company for {name}: {e}")
+                corp_df, stock_df, skipped_df = future.result()
+            except Exception as exc:
+                logger.warning(f"Worker failed for {name}: {exc}")
+                continue
 
-        # Extract full trading name needed for the cash dividends endpoint
-        full_trading_name = company_data.get("tradingName", "").strip()
-
-        # 2. Fetch stock actions (splits, bonuses) from supplement endpoint
-        stock_divs = company_data.get("stockDividends", [])
-
-        if stock_divs:
-            corp_from_stock, stock_df, skipped_df = parse_stock_dividends(stock_divs)
-            if not corp_from_stock.empty:
-                all_corp_actions.append(corp_from_stock)
+            if not corp_df.empty:
+                all_corp_actions.append(corp_df)
             if not stock_df.empty:
                 all_stock_actions.append(stock_df)
             if not skipped_df.empty:
                 all_skipped_events.append(skipped_df)
-
-        time.sleep(config.RATE_LIMIT_DELAY)
-
-        # 3. Fetch cash dividends from paginated endpoint using full trading name
-        if full_trading_name:
-            cash_divs = fetch_cash_dividends_paginated(full_trading_name)
-            if cash_divs:
-                corp_df = parse_cash_dividends(cash_divs, name, ticker_to_isin)
-                if not corp_df.empty:
-                    all_corp_actions.append(corp_df)
-
-        time.sleep(config.RATE_LIMIT_DELAY)
 
     valid_corp = [
         df for df in all_corp_actions if not df.empty and not df.isna().all().all()
