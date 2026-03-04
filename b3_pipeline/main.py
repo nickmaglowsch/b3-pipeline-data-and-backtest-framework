@@ -226,8 +226,11 @@ def _run_update_cnpj_map() -> None:
     """
     Fetch CNPJ from the B3 API for every ticker root in the prices table
     and upsert into cvm_companies. Runs in ~1-2 minutes vs the full pipeline.
+
+    Delegates to cvm_main._fetch_ticker_mappings() so the logic is not duplicated.
     """
     import sqlite3
+    from . import cvm_main as _cvm_main
     logger.info("Updating CNPJ → ticker map from B3 API...")
     with sqlite3.connect(config.DB_PATH) as conn:
         storage.init_db(conn)
@@ -235,27 +238,7 @@ def _run_update_cnpj_map() -> None:
         if not tickers:
             logger.warning("No tickers found in the database. Run the full pipeline first.")
             return
-        ticker_roots = sorted(set(t[:4] for t in tickers if len(t) >= 4))
-        logger.info(f"Fetching CNPJ for {len(ticker_roots)} company codes...")
-        updated = 0
-        for i, root in enumerate(ticker_roots, 1):
-            if i % 50 == 0 or i == len(ticker_roots):
-                logger.info(f"  {i}/{len(ticker_roots)} ({root})")
-            company_data = b3_corporate_actions.fetch_company_data(root, conn=conn)
-            if company_data is None:
-                continue
-            cnpj = b3_corporate_actions.extract_cnpj_from_company_data(company_data)
-            if cnpj:
-                from . import cvm_storage as _cvm_storage
-                _cvm_storage.upsert_cvm_company(
-                    conn,
-                    cnpj=cnpj,
-                    ticker=root,
-                    company_name=company_data.get("companyName", ""),
-                    cvm_code=str(company_data.get("codeCVM", "") or ""),
-                    b3_trading_name=company_data.get("tradingName", ""),
-                )
-                updated += 1
+        updated = _cvm_main._fetch_ticker_mappings(conn)
         logger.info(f"Done. Upserted {updated} CNPJ mappings into cvm_companies.")
 
 
