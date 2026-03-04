@@ -33,6 +33,18 @@
 - Detected splits have source='DETECTED' (not 'B3')
 - Fatcot transitions are skipped (normalized prices should be continuous)
 
+## Patching sqlite3.connect inside function-local imports
+When a function does `import sqlite3` inside its body (not at module level),
+patch `sqlite3.connect` directly, not `b3_pipeline.main.sqlite3.connect`.
+  Correct: `patch("sqlite3.connect", ...)`
+  Wrong:   `patch("b3_pipeline.main.sqlite3.connect", ...)`  # ModuleNotFoundError
+
+## CVM pipeline ticker-fetch step (added 2026-03-04)
+- `_fetch_ticker_mappings(conn)` in `cvm_main.py` -- fetches B3 API per ticker root, upserts cvm_companies
+- `run_fundamentals_pipeline()` now has `skip_ticker_fetch=False` param; step 5c calls `_fetch_ticker_mappings`
+- `--skip-ticker-fetch` CLI flag added to `cvm_main.py main()`
+- `main.py _run_update_cnpj_map()` now delegates to `cvm_main._fetch_ticker_mappings(conn)`
+
 ## Non-Split Labels (stored in skipped_events, never applied as splits)
 - RESG TOTAL RV: total share redemption / delisting (reason: delisting_event)
 - CIS RED CAP: spin-off with capital reduction (reason: needs_manual_review)

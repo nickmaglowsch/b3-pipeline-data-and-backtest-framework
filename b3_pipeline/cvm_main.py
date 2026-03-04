@@ -23,7 +23,7 @@ from typing import Optional
 
 import pandas as pd
 
-from . import config, cvm_downloader, cvm_parser, cvm_storage, storage
+from . import b3_corporate_actions, config, cvm_downloader, cvm_parser, cvm_storage, storage
 
 logging.basicConfig(
     level=logging.INFO,
@@ -177,6 +177,47 @@ def _propagate_fre_shares(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+# ── Ticker mapping helper ───────────────────────────────────────────────────────
+
+def _fetch_ticker_mappings(conn: sqlite3.Connection) -> int:
+    """Fetch ticker -> CNPJ mappings from the B3 API and update cvm_companies.
+
+    For every unique 4-char ticker root found in the prices table, calls the
+    B3 company API to retrieve the CNPJ, then upserts a cvm_companies row so
+    that cvm_companies.ticker is populated for downstream ratio computation.
+
+    Returns the number of companies successfully upserted.
+    """
+    tickers = storage.get_all_tickers(conn)
+    if not tickers:
+        logger.info("No tickers in prices table -- skipping B3 ticker fetch")
+        return 0
+
+    ticker_roots = sorted(set(t[:4] for t in tickers if len(t) >= 4))
+    logger.info(f"Fetching CNPJ for {len(ticker_roots)} company codes from B3 API...")
+    updated = 0
+    for i, root in enumerate(ticker_roots, 1):
+        if i % 50 == 0 or i == len(ticker_roots):
+            logger.info(f"  {i}/{len(ticker_roots)} ({root})")
+        company_data = b3_corporate_actions.fetch_company_data(root, conn=conn)
+        if company_data is None:
+            continue
+        cnpj = b3_corporate_actions.extract_cnpj_from_company_data(company_data)
+        if not cnpj:
+            continue
+        cvm_storage.upsert_cvm_company(
+            conn,
+            cnpj=cnpj,
+            ticker=root,
+            company_name=company_data.get("companyName", ""),
+            cvm_code=str(company_data.get("codeCVM", "") or ""),
+            b3_trading_name=company_data.get("tradingName", ""),
+        )
+        updated += 1
+    logger.info(f"B3 ticker fetch complete: {updated} companies upserted")
+    return updated
+
+
 # ── Main orchestration ─────────────────────────────────────────────────────────
 
 def run_fundamentals_pipeline(
@@ -185,6 +226,7 @@ def run_fundamentals_pipeline(
     rebuild: bool = False,
     force_download: bool = False,
     skip_ratios: bool = False,
+    skip_ticker_fetch: bool = False,
 ) -> None:
     """
     Execute the complete CVM fundamentals data pipeline.
@@ -195,6 +237,8 @@ def run_fundamentals_pipeline(
      3. Download DFP ZIPs
      4. Download ITR ZIPs
      5. Download FRE ZIPs
+     5b. Index companies from CVM files (CNPJ + CVM code)
+     5c. Fetch ticker mappings from B3 API (unless skip_ticker_fetch)
      6. Parse and upsert DFP filings
      7. Parse and upsert ITR filings
      8. Parse and upsert FRE filings + propagate shares_outstanding
@@ -208,6 +252,7 @@ def run_fundamentals_pipeline(
     logger.info(f"Started at: {start_time}")
     logger.info(f"Rebuild mode: {rebuild}")
     logger.info(f"Skip ratios: {skip_ratios}")
+    logger.info(f"Skip ticker fetch: {skip_ticker_fetch}")
 
     conn = storage.get_connection()
 
@@ -273,7 +318,18 @@ def run_fundamentals_pipeline(
                 logger.warning(f"Failed to index companies from {zip_path}: {e}")
         logger.info(f"Company index: {len(seen_cnpjs):,} unique CNPJs in cvm_companies")
 
-        # Load CNPJ → ticker map (built from cvm_companies table populated by B3 pipeline)
+        # Step 5c: Fetch ticker mappings from B3 API so cvm_companies.ticker is
+        # populated before we build the cnpj_ticker_map used during parsing.
+        if not skip_ticker_fetch:
+            logger.info("")
+            logger.info("Step 5c/10: Fetching ticker mappings from B3 API...")
+            ticker_count = _fetch_ticker_mappings(conn)
+            logger.info(f"Ticker mappings: {ticker_count:,} companies updated")
+        else:
+            logger.info("Step 5c/10: Skipping ticker fetch (--skip-ticker-fetch)")
+
+        # Load CNPJ → ticker map (built from cvm_companies table populated above
+        # or by a prior B3 pipeline run).
         cnpj_ticker_map = cvm_storage.get_cvm_company_map(conn)
         logger.info(f"CNPJ → ticker map: {len(cnpj_ticker_map):,} companies")
 
@@ -409,6 +465,10 @@ Examples:
         help="Skip valuation ratio computation (P/E, P/B, EV/EBITDA)",
     )
     arg_parser.add_argument(
+        "--skip-ticker-fetch", action="store_true",
+        help="Skip fetching ticker mappings from B3 API (use when tickers are already populated)",
+    )
+    arg_parser.add_argument(
         "--verbose", "-v", action="store_true",
         help="Enable debug logging",
     )
@@ -423,6 +483,7 @@ Examples:
         rebuild=args.rebuild,
         force_download=args.force_download,
         skip_ratios=args.skip_ratios,
+        skip_ticker_fetch=args.skip_ticker_fetch,
     )
 
 
