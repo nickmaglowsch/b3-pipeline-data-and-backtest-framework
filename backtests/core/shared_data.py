@@ -198,6 +198,7 @@ def build_shared_data(
     vol_5m = ret.rolling(5).std()
     daily_ret_abs = adj_close.pct_change().abs()
     atr_proxy = daily_ret_abs.ewm(span=14, min_periods=14).mean()
+    atr_20d_daily = atr_proxy  # daily ATR series (pre-resample) for ratio-to-mean60 signals
     atr_m = atr_proxy.resample(freq).last()
     vol_2m = ret.rolling(2).std()
 
@@ -252,6 +253,7 @@ def build_shared_data(
         "vol_5m": vol_5m,
         "vol_60d": vol_5m,   # backward-compat alias
         "atr_m": atr_m,
+        "atr_20d_daily": atr_20d_daily,
         "vol_2m": vol_2m,
         "vol_20d": vol_2m,   # backward-compat alias
         # ── mean-reversion composite features ────────────────────────────────

@@ -134,12 +134,12 @@ def compute_alpha_score(
     freq: str = "ME",
 ) -> tuple[pd.DataFrame, dict[str, pd.DataFrame]]:
     """
-    Layer 2: Composite alpha score from three sub-signals.
+    Layer 2: Composite alpha score from sub-signals A–D (and optional E).
 
     Returns:
         alpha_score: DataFrame (month-end x ticker) with composite score [0,1] range
-        sub_signals: dict of {"sub_A": DataFrame, "sub_B": DataFrame, "sub_C": DataFrame}
-                     Monthly DataFrames for Layer 4 IC monitoring.
+        sub_signals: dict with keys sub_A..sub_D for IC monitoring,
+                     plus optional "atr_ratio_m" (raw ratio, for the ATR gate).
     """
     adj_close = shared_data["adj_close"]
     high_low_range_20d = shared_data["high_low_range_20d"]
@@ -149,9 +149,10 @@ def compute_alpha_score(
     autocorr_60d = shared_data["autocorr_60d"]
     cdi_cumul_63d = shared_data["cdi_cumul_63d"]
 
-    w_vol = params.get("w_vol", 0.333)
-    w_macro = params.get("w_macro", 0.333)
-    w_autocorr = params.get("w_autocorr", 0.333)
+    w_vol = params.get("w_vol", 0.25)
+    w_macro = params.get("w_macro", 0.25)
+    w_autocorr = params.get("w_autocorr", 0.25)
+    w_vol_ratio = params.get("w_vol_ratio", 0.25)
 
     # ── Sub-signal A: Volatility Reversal ──────────────────────────────────
     hlr_m = high_low_range_20d.resample(freq).last()
@@ -178,10 +179,33 @@ def compute_alpha_score(
     rank_ac20 = (-ac20_m).rank(axis=1, pct=True)
     sub_C = (rank_ac60 + rank_ac20) / 2.0
 
-    # ── Composite ──────────────────────────────────────────────────────────
-    alpha = w_vol * sub_A + w_macro * sub_B + w_autocorr * sub_C
+    # ── Sub-signal D: High-Low Range ratio to own 60d mean ─────────────────
+    # Stocks whose current vol is elevated above their own norm get a LOW score
+    # (likely trending, not mean-reverting). Negative IC → flip sign before ranking.
+    hl_60d_mean = high_low_range_20d.rolling(60, min_periods=30).mean()
+    hl_vol_ratio = high_low_range_20d / hl_60d_mean.replace(0, np.nan)
+    hl_vol_ratio_m = hl_vol_ratio.resample(freq).last()
+    sub_D = (-hl_vol_ratio_m).rank(axis=1, pct=True)  # low ratio → high rank → mean-rev candidate
 
-    sub_signals = {"sub_A": sub_A, "sub_B": sub_B, "sub_C": sub_C}
+    # ── Composite ──────────────────────────────────────────────────────────
+    alpha = w_vol * sub_A + w_macro * sub_B + w_autocorr * sub_C + w_vol_ratio * sub_D
+
+    sub_signals: dict[str, pd.DataFrame] = {
+        "sub_A": sub_A,
+        "sub_B": sub_B,
+        "sub_C": sub_C,
+        "sub_D": sub_D,
+    }
+
+    # ── Sub-signal E (optional): ATR ratio to own 60d mean ─────────────────
+    # Not added to composite alpha; stored as raw ratio for the ATR gate in generate_signals.
+    atr_20d_daily = shared_data.get("atr_20d_daily")
+    if atr_20d_daily is not None:
+        atr_60d_mean = atr_20d_daily.rolling(60, min_periods=30).mean()
+        atr_ratio = atr_20d_daily / atr_60d_mean.replace(0, np.nan)
+        atr_ratio_m = atr_ratio.resample(freq).last()
+        sub_signals["atr_ratio_m"] = atr_ratio_m  # raw ratio for gate, not for IC guard
+
     return alpha, sub_signals
 
 
@@ -238,10 +262,16 @@ def compute_signal_stability(
     trailing_months = params.get("ic_trailing_months", 12)
     flip_threshold = params.get("ic_flip_consecutive", 2)
 
-    signal_names = ["sub_A", "sub_B", "sub_C"]
-    expected_sign = {"sub_A": 1.0, "sub_B": 1.0, "sub_C": 1.0}  # all positive after flipping
+    # Derive signal_names from base_weights keys that are actual sub-signals in sub_signals.
+    # This makes the guard automatically handle any new sub-signals (sub_D, sub_E, etc.)
+    signal_names = [s for s in base_weights if s in sub_signals]
+    expected_sign = {s: 1.0 for s in signal_names}  # all signals are positive-IC after sign flip
 
-    dates = sub_signals["sub_A"].index
+    if not signal_names:
+        # No valid signals — return empty DataFrame
+        return pd.DataFrame()
+
+    dates = sub_signals[signal_names[0]].index
     n_months = len(dates)
 
     # Initialize output with base weights

@@ -119,12 +119,14 @@ class MeanReversionCompositeStrategy(StrategyBase):
             COMMON_TAX_RATE, COMMON_SLIPPAGE, COMMON_MIN_ADTV, COMMON_REBALANCE_FREQ,
             ParameterSpec("min_price", "Min Price (BRL)", "float", 1.0,
                           min_value=0.0, max_value=10.0, step=0.5),
-            ParameterSpec("w_vol", "Weight: Volatility Reversal", "float", 0.333,
+            ParameterSpec("w_vol", "Weight: Volatility Reversal", "float", 0.25,
                           description="Sub-signal A weight", min_value=0.0, max_value=1.0, step=0.01),
-            ParameterSpec("w_macro", "Weight: Macro Momentum", "float", 0.333,
+            ParameterSpec("w_macro", "Weight: Macro Momentum", "float", 0.25,
                           description="Sub-signal B weight", min_value=0.0, max_value=1.0, step=0.01),
-            ParameterSpec("w_autocorr", "Weight: Autocorrelation", "float", 0.333,
+            ParameterSpec("w_autocorr", "Weight: Autocorrelation", "float", 0.25,
                           description="Sub-signal C weight", min_value=0.0, max_value=1.0, step=0.01),
+            ParameterSpec("w_vol_ratio", "Weight: Vol/Mean60 Ratio", "float", 0.25,
+                          description="Sub-signal D weight", min_value=0.0, max_value=1.0, step=0.01),
             ParameterSpec("long_pct", "Long Percentile", "float", 0.20,
                           description="Top percentile of alpha score for long leg",
                           min_value=0.05, max_value=0.50, step=0.05),
@@ -154,6 +156,14 @@ class MeanReversionCompositeStrategy(StrategyBase):
                           choices=["No", "Yes"]),
             ParameterSpec("ibov_drawdown_threshold", "IBOV Drawdown Threshold", "float", -0.10,
                           min_value=-0.30, max_value=0.0, step=0.01),
+            ParameterSpec("enable_win_rate_filter", "Win Rate Filter", "choice", "Yes",
+                          choices=["Yes", "No"]),
+            ParameterSpec("win_rate_threshold", "Win Rate Ratio Threshold", "float", 1.5,
+                          description="Exclude stocks trending above this win rate ratio",
+                          min_value=1.0, max_value=2.5, step=0.1),
+            ParameterSpec("atr_ratio_gate", "ATR Ratio Gate", "float", 2.0,
+                          description="Exclude stocks with ATR > N x their 60d mean",
+                          min_value=1.2, max_value=3.0, step=0.1),
         ]
 
     def generate_signals(self, shared_data: dict, params: dict):
@@ -197,15 +207,33 @@ class MeanReversionCompositeStrategy(StrategyBase):
         if enable_guard:
             fwd_ret = ret.shift(-1)
             base_weights = {
-                "sub_A": params.get("w_vol", 0.333),
-                "sub_B": params.get("w_macro", 0.333),
-                "sub_C": params.get("w_autocorr", 0.333),
+                "sub_A": params.get("w_vol", 0.25),
+                "sub_B": params.get("w_macro", 0.25),
+                "sub_C": params.get("w_autocorr", 0.25),
+                "sub_D": params.get("w_vol_ratio", 0.25),
             }
             stability_weights = compute_signal_stability(
                 sub_signals, fwd_ret, base_weights, params
             )
         else:
             stability_weights = None
+
+        # Pre-compute win rate ratio (daily → monthly, aligned to ret columns)
+        enable_win_rate_filter = params.get("enable_win_rate_filter", "Yes") == "Yes"
+        if enable_win_rate_filter:
+            daily_ret_d = shared_data["adj_close"].pct_change()
+            win_rate_20d = (daily_ret_d > 0).rolling(20, min_periods=10).mean()
+            win_rate_ratio_d = win_rate_20d / (win_rate_20d.rolling(60, min_periods=30).mean() + 1e-8)
+            win_rate_ratio_m = (
+                win_rate_ratio_d
+                .resample(freq).last()
+                .reindex(columns=ret.columns)
+            )
+        else:
+            win_rate_ratio_m = None
+
+        # ATR ratio gate (from sub_signals if sub_E was computed)
+        atr_ratio_m = sub_signals.get("atr_ratio_m")
 
         # Vol-parity weights (resample to monthly)
         rolling_vol_20d_m = rolling_vol_20d_daily.resample(freq).last()
@@ -236,17 +264,15 @@ class MeanReversionCompositeStrategy(StrategyBase):
 
             # Layer 2+4: Get alpha score for this month
             if stability_weights is not None and date in stability_weights.index:
-                w_A = stability_weights.loc[date, "w_sub_A"]
-                w_B = stability_weights.loc[date, "w_sub_B"]
-                w_C = stability_weights.loc[date, "w_sub_C"]
                 alpha_idx = i - 1
                 if alpha_idx < 0 or alpha_idx >= len(sub_signals["sub_A"]):
                     tw.iloc[i, tw.columns.get_loc("CDI_ASSET")] = 1.0
                     continue
-                alpha_row = (
-                    w_A * sub_signals["sub_A"].iloc[alpha_idx]
-                    + w_B * sub_signals["sub_B"].iloc[alpha_idx]
-                    + w_C * sub_signals["sub_C"].iloc[alpha_idx]
+                # Build alpha_row dynamically over all monitored sub-signals
+                alpha_row = sum(
+                    stability_weights.loc[date, f"w_{s}"] * sub_signals[s].iloc[alpha_idx]
+                    for s in ["sub_A", "sub_B", "sub_C", "sub_D"]
+                    if s in sub_signals and f"w_{s}" in stability_weights.columns
                 )
             else:
                 alpha_idx = i - 1
@@ -266,6 +292,24 @@ class MeanReversionCompositeStrategy(StrategyBase):
             adtv_rank = adtv_r.rank(pct=True)
             mask = (adtv_r >= min_adtv) & (raw_r >= min_price) & (adtv_rank >= 0.20)
             valid = alpha_row[mask].dropna()
+
+            if len(valid) < 5:
+                tw.iloc[i, tw.columns.get_loc("CDI_ASSET")] = 1.0
+                continue
+
+            # Win rate filter: exclude stocks trending strongly upward
+            # (high recent win rate vs own history → momentum, not mean-reversion)
+            if win_rate_ratio_m is not None and date in win_rate_ratio_m.index:
+                wr_threshold = params.get("win_rate_threshold", 1.5)
+                wr_row = win_rate_ratio_m.loc[date].reindex(valid.index).fillna(1.0)
+                valid = valid[wr_row < wr_threshold]
+
+            # ATR ratio gate: exclude stocks with volatility expanding far above own norm
+            # (structural vol expansion period — mean-reversion unlikely)
+            if atr_ratio_m is not None and date in atr_ratio_m.index:
+                atr_gate_threshold = params.get("atr_ratio_gate", 2.0)
+                atr_row = atr_ratio_m.loc[date].reindex(valid.index).fillna(1.0)
+                valid = valid[atr_row < atr_gate_threshold]
 
             if len(valid) < 5:
                 tw.iloc[i, tw.columns.get_loc("CDI_ASSET")] = 1.0
