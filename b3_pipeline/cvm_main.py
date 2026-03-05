@@ -76,21 +76,40 @@ def materialize_valuation_ratios(conn: sqlite3.Connection) -> int:
     for _, row in df.iterrows():
         ticker_root = str(row["ticker"])
         filing_date = str(row["filing_date"])
+        cnpj = str(row["cnpj"])
 
-        # Find close price on or before filing_date for the common share (suffix 3/4/5/6)
+        # Primary path: ISIN-based join via company_isin_map (Fix 3)
+        # Use the primary share class (is_primary=1) for the company.
         cursor.execute(
             """
-            SELECT close FROM prices
-            WHERE ticker LIKE ?
-              AND date <= ?
-              AND LENGTH(ticker) = 5
-              AND SUBSTR(ticker, 5, 1) IN ('3', '4', '5', '6')
-            ORDER BY date DESC
+            SELECT p.close FROM prices p
+            JOIN company_isin_map m ON p.isin_code = m.isin_code
+            WHERE m.cnpj = ?
+              AND m.is_primary = 1
+              AND p.date <= ?
+            ORDER BY p.date DESC
             LIMIT 1
             """,
-            (f"{ticker_root}%", filing_date),
+            (cnpj, filing_date),
         )
         price_row = cursor.fetchone()
+
+        # Fallback path: LIKE-based match when company_isin_map has no data for this CNPJ
+        if price_row is None:
+            cursor.execute(
+                """
+                SELECT close FROM prices
+                WHERE ticker LIKE ?
+                  AND date <= ?
+                  AND LENGTH(ticker) = 5
+                  AND SUBSTR(ticker, 5, 1) IN ('3', '4', '5', '6')
+                ORDER BY date DESC
+                LIMIT 1
+                """,
+                (f"{ticker_root}%", filing_date),
+            )
+            price_row = cursor.fetchone()
+
         if price_row is None:
             continue
         price = price_row[0]
@@ -108,8 +127,9 @@ def materialize_valuation_ratios(conn: sqlite3.Connection) -> int:
         THOUSANDS = 1_000.0
 
         # Annualization factor
-        if row["doc_type"] == "ITR" and row["quarter"] is not None:
-            q = int(row["quarter"])
+        quarter_val = row["quarter"]
+        if row["doc_type"] == "ITR" and quarter_val is not None and quarter_val == quarter_val:
+            q = int(quarter_val)
             ann_factor = 12.0 / (q * 3) if q > 0 else 1.0
         else:
             ann_factor = 1.0
@@ -180,13 +200,22 @@ def _propagate_fre_shares(conn: sqlite3.Connection) -> None:
 # ── Ticker mapping helper ───────────────────────────────────────────────────────
 
 def _fetch_ticker_mappings(conn: sqlite3.Connection) -> int:
-    """Fetch ticker -> CNPJ mappings from the B3 API and update cvm_companies.
+    """Fetch ticker -> cvm_code mappings from the B3 API and update cvm_companies.
 
-    For every unique 4-char ticker root found in the prices table, calls the
-    B3 company API to retrieve the CNPJ, then upserts a cvm_companies row so
-    that cvm_companies.ticker is populated for downstream ratio computation.
+    Primary path: fetches the full B3 company list via GetInitialCompanies
+    (one paginated call for ~3,329 companies) and matches each company to an
+    existing cvm_companies row using codeCVM. This is much faster than the
+    previous per-company approach and correctly uses codeCVM for matching since
+    GetListedSupplementCompany never returns a CNPJ.
 
-    Returns the number of companies successfully upserted.
+    Fallback path: for ticker roots NOT found in the bulk list, falls back to
+    the per-company GetListedSupplementCompany call and still uses codeCVM to
+    match the cvm_companies row (NOT cnpj, which is always None on that endpoint).
+
+    Fix 4: Warns if match rate is suspiciously low (< 10%) so silent failures
+    are immediately visible.
+
+    Returns the number of cvm_companies rows that had their ticker updated.
     """
     tickers = storage.get_all_tickers(conn)
     if not tickers:
@@ -194,27 +223,90 @@ def _fetch_ticker_mappings(conn: sqlite3.Connection) -> int:
         return 0
 
     ticker_roots = sorted(set(t[:4] for t in tickers if len(t) >= 4))
-    logger.info(f"Fetching CNPJ for {len(ticker_roots)} company codes from B3 API...")
+    logger.info(
+        f"Fetching ticker mappings for {len(ticker_roots)} company roots from B3 API..."
+    )
+
     updated = 0
-    for i, root in enumerate(ticker_roots, 1):
-        if i % 50 == 0 or i == len(ticker_roots):
-            logger.info(f"  {i}/{len(ticker_roots)} ({root})")
-        company_data = b3_corporate_actions.fetch_company_data(root, conn=conn)
-        if company_data is None:
+
+    # ── Primary path: GetInitialCompanies bulk fetch ───────────────────────────
+    # Build a lookup from issuingCompany (4-char root) -> company record
+    logger.info("Fetching full B3 company list via GetInitialCompanies...")
+    bulk_companies = b3_corporate_actions.fetch_all_b3_listed_companies()
+
+    bulk_by_root: dict = {}
+    for rec in bulk_companies:
+        issuing = str(rec.get("issuingCompany", "") or "").strip().upper()
+        if issuing:
+            bulk_by_root[issuing] = rec
+
+    covered_roots: set = set()
+
+    for root in ticker_roots:
+        rec = bulk_by_root.get(root.upper())
+        if rec is None:
             continue
-        cnpj = b3_corporate_actions.extract_cnpj_from_company_data(company_data)
-        if not cnpj:
+        cvm_code = str(rec.get("codeCVM", "") or "").strip()
+        if not cvm_code:
             continue
-        cvm_storage.upsert_cvm_company(
+        matched = cvm_storage.update_ticker_by_cvm_code(
             conn,
-            cnpj=cnpj,
+            cvm_code=cvm_code,
             ticker=root,
-            company_name=company_data.get("companyName", ""),
-            cvm_code=str(company_data.get("codeCVM", "") or ""),
-            b3_trading_name=company_data.get("tradingName", ""),
+            b3_trading_name=rec.get("tradingName", ""),
         )
-        updated += 1
-    logger.info(f"B3 ticker fetch complete: {updated} companies upserted")
+        if matched:
+            updated += 1
+        else:
+            logger.debug(
+                f"No cvm_companies row for codeCVM={cvm_code} ({root}) from bulk list"
+            )
+        covered_roots.add(root)
+
+    # ── Fallback path: per-company GetListedSupplementCompany ─────────────────
+    fallback_roots = [r for r in ticker_roots if r not in covered_roots]
+    if fallback_roots:
+        logger.info(
+            f"Falling back to per-company API for {len(fallback_roots)} roots "
+            f"not found in bulk list..."
+        )
+        for i, root in enumerate(fallback_roots, 1):
+            if i % 50 == 0 or i == len(fallback_roots):
+                logger.info(f"  Fallback {i}/{len(fallback_roots)} ({root})")
+            company_data = b3_corporate_actions.fetch_company_data(root, conn=conn)
+            if company_data is None:
+                continue
+            cvm_code = str(company_data.get("codeCVM", "") or "").strip()
+            if not cvm_code:
+                continue
+            matched = cvm_storage.update_ticker_by_cvm_code(
+                conn,
+                cvm_code=cvm_code,
+                ticker=root,
+                b3_trading_name=company_data.get("tradingName", ""),
+            )
+            if matched:
+                updated += 1
+            else:
+                logger.debug(
+                    f"No cvm_companies row for codeCVM={cvm_code} ({root}) from fallback"
+                )
+
+    # ── Fix 4: Match rate warning ──────────────────────────────────────────────
+    match_rate = updated / len(ticker_roots) if ticker_roots else 0
+    if updated == 0:
+        logger.warning(
+            f"No tickers were mapped! match rate = 0/{len(ticker_roots)}. "
+            f"Check B3 API responses and cvm_companies population."
+        )
+    elif match_rate < 0.1:
+        logger.warning(
+            f"Ticker mapping match rate is very low ({match_rate:.1%}). "
+            f"Only {updated}/{len(ticker_roots)} roots matched cvm_companies. "
+            f"Check whether B3 API response format has changed."
+        )
+
+    logger.info(f"B3 ticker fetch complete: {updated}/{len(ticker_roots)} companies updated")
     return updated
 
 
@@ -399,6 +491,10 @@ def run_fundamentals_pipeline(
         logger.info("Propagating tickers from cvm_companies into fundamentals_pit...")
         ticker_rows = cvm_storage.populate_tickers_from_cvm_companies(conn)
         logger.info(f"Ticker propagation updated {ticker_rows:,} fundamentals_pit rows")
+
+        logger.info("Populating company_isin_map for precise ISIN-based price lookup...")
+        isin_map_rows = cvm_storage.populate_company_isin_map(conn)
+        logger.info(f"company_isin_map: {isin_map_rows:,} rows inserted/replaced")
 
         # Step 9
         if not skip_ratios:

@@ -696,6 +696,62 @@ def fetch_all_corporate_actions(
     return final_corp, final_stock, final_skipped
 
 
+def fetch_all_b3_listed_companies(page_size: int = 100) -> List[dict]:
+    """Fetch all companies from B3's GetInitialCompanies endpoint.
+
+    Returns a list of dicts with keys including: codeCVM, issuingCompany,
+    companyName, tradingName, cnpj, market.
+
+    This endpoint covers ~3,329 companies (active and delisted) and returns
+    the CNPJ that the GetListedSupplementCompany endpoint does NOT return.
+    Pagination is handled automatically.
+
+    Returns:
+        List of company dicts, or empty list on any error.
+    """
+    all_results: List[dict] = []
+    page_number = 1
+    total_pages = 1
+
+    while page_number <= total_pages:
+        payload = {
+            "language": "pt-br",
+            "pageNumber": page_number,
+            "pageSize": page_size,
+        }
+        encoded = _encode_payload(payload)
+        url = config.B3_COMPANY_LIST_URL.format(payload=encoded)
+
+        try:
+            resp = requests.get(url, headers=config.B3_CORP_ACTIONS_HEADERS, timeout=30)
+            resp.raise_for_status()
+            data = resp.json()
+
+            page_info = data.get("page", {})
+            total_pages = page_info.get("totalPages", 1)
+            results = data.get("results", [])
+            all_results.extend(results)
+
+            logger.debug(
+                f"GetInitialCompanies page {page_number}/{total_pages}: "
+                f"{len(results)} records"
+            )
+            page_number += 1
+
+            if page_number <= total_pages:
+                time.sleep(config.RATE_LIMIT_DELAY)
+
+        except requests.RequestException as e:
+            logger.warning(f"Failed to fetch B3 company list page {page_number}: {e}")
+            break
+        except (json.JSONDecodeError, ValueError, KeyError) as e:
+            logger.warning(f"Failed to parse B3 company list page {page_number}: {e}")
+            break
+
+    logger.info(f"GetInitialCompanies: fetched {len(all_results)} companies total")
+    return all_results
+
+
 def build_trading_name_to_code_map(tickers: List[str]) -> Dict[str, str]:
     """
     Build a mapping from ticker roots to trading names.
