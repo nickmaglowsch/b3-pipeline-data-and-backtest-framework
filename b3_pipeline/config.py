@@ -13,6 +13,10 @@ DAILY_COTAHIST_URL = (
 )
 B3_CASH_DIVIDENDS_URL = "https://sistemaswebb3-listados.b3.com.br/listedCompaniesProxy/CompanyCall/GetListedCashDividends/{payload}"
 B3_STOCK_CORP_ACTIONS_URL = "https://sistemaswebb3-listados.b3.com.br/listedCompaniesProxy/CompanyCall/GetListedSupplementCompany/{payload}"
+B3_COMPANY_LIST_URL = (
+    "https://sistemaswebb3-listados.b3.com.br/listedCompaniesProxy/"
+    "CompanyCall/GetInitialCompanies/{payload}"
+)
 
 PROJECT_ROOT = Path(__file__).parent.parent
 DATA_DIR = PROJECT_ROOT / "data" / "raw"

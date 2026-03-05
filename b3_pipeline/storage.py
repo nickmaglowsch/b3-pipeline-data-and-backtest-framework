@@ -151,6 +151,24 @@ CREATE TABLE IF NOT EXISTS fundamentals_pit (
 # Note: all financial values are stored in thousands of BRL as reported by CVM.
 # Do NOT multiply by 1000 when storing or reading.
 
+SCHEMA_COMPANY_ISIN_MAP = """
+CREATE TABLE IF NOT EXISTS company_isin_map (
+    cnpj TEXT NOT NULL,
+    isin_code TEXT NOT NULL,
+    ticker TEXT NOT NULL,
+    share_class TEXT,
+    is_primary INTEGER DEFAULT 0,
+    first_seen DATE,
+    last_seen DATE,
+    PRIMARY KEY (cnpj, isin_code)
+);
+"""
+
+INDEX_COMPANY_ISIN_MAP_CNPJ = "CREATE INDEX IF NOT EXISTS idx_company_isin_map_cnpj ON company_isin_map(cnpj);"
+INDEX_COMPANY_ISIN_MAP_ISIN = "CREATE INDEX IF NOT EXISTS idx_company_isin_map_isin ON company_isin_map(isin_code);"
+INDEX_COMPANY_ISIN_MAP_TICKER = "CREATE INDEX IF NOT EXISTS idx_company_isin_map_ticker ON company_isin_map(ticker);"
+INDEX_COMPANY_ISIN_MAP_PRIMARY = "CREATE INDEX IF NOT EXISTS idx_company_isin_map_primary ON company_isin_map(cnpj, is_primary);"
+
 INDEX_CVM_COMPANIES_TICKER = "CREATE INDEX IF NOT EXISTS idx_cvm_companies_ticker ON cvm_companies(ticker);"
 INDEX_CVM_FILINGS_CNPJ = "CREATE INDEX IF NOT EXISTS idx_cvm_filings_cnpj ON cvm_filings(cnpj);"
 INDEX_CVM_FILINGS_PERIOD = "CREATE INDEX IF NOT EXISTS idx_cvm_filings_period ON cvm_filings(period_end);"
@@ -181,6 +199,7 @@ def init_db(conn: sqlite3.Connection, rebuild: bool = False) -> None:
         # Drop CVM fundamentals tables first (before existing tables)
         cursor.execute("DROP TABLE IF EXISTS fundamentals_pit")
         cursor.execute("DROP TABLE IF EXISTS cvm_filings")
+        cursor.execute("DROP TABLE IF EXISTS company_isin_map")
         cursor.execute("DROP TABLE IF EXISTS cvm_companies")
         # Drop original tables
         cursor.execute("DROP TABLE IF EXISTS prices")
@@ -204,6 +223,7 @@ def init_db(conn: sqlite3.Connection, rebuild: bool = False) -> None:
     cursor.execute(SCHEMA_CVM_COMPANIES)
     cursor.execute(SCHEMA_CVM_FILINGS)
     cursor.execute(SCHEMA_FUNDAMENTALS_PIT)
+    cursor.execute(SCHEMA_COMPANY_ISIN_MAP)
     cursor.execute(INDEX_CVM_COMPANIES_TICKER)
     cursor.execute(INDEX_CVM_FILINGS_CNPJ)
     cursor.execute(INDEX_CVM_FILINGS_PERIOD)
@@ -211,6 +231,10 @@ def init_db(conn: sqlite3.Connection, rebuild: bool = False) -> None:
     cursor.execute(INDEX_FUNDAMENTALS_PIT_TICKER)
     cursor.execute(INDEX_FUNDAMENTALS_PIT_FILING_DATE)
     cursor.execute(INDEX_FUNDAMENTALS_PIT_PERIOD)
+    cursor.execute(INDEX_COMPANY_ISIN_MAP_CNPJ)
+    cursor.execute(INDEX_COMPANY_ISIN_MAP_ISIN)
+    cursor.execute(INDEX_COMPANY_ISIN_MAP_TICKER)
+    cursor.execute(INDEX_COMPANY_ISIN_MAP_PRIMARY)
 
     # Migrate existing databases: add new columns if they don't exist
     _migrate_schema(conn)
@@ -235,11 +259,13 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
     # CVM fundamentals tables are created by CREATE TABLE IF NOT EXISTS above.
     # No explicit migration needed — they are created fresh on first run.
     # Future migrations for these tables should be added here as ALTER TABLE statements.
-    # Example placeholder for future migrations:
-    # cursor.execute("PRAGMA table_info(fundamentals_pit)")
-    # pit_cols = {row[1] for row in cursor.fetchall()}
-    # if "new_column" not in pit_cols:
-    #     cursor.execute("ALTER TABLE fundamentals_pit ADD COLUMN new_column REAL")
+
+    # company_isin_map: created via SCHEMA_COMPANY_ISIN_MAP above (CREATE TABLE IF NOT EXISTS).
+    # Ensure indexes exist for existing DBs that were created before this table was added.
+    cursor.execute(INDEX_COMPANY_ISIN_MAP_CNPJ)
+    cursor.execute(INDEX_COMPANY_ISIN_MAP_ISIN)
+    cursor.execute(INDEX_COMPANY_ISIN_MAP_TICKER)
+    cursor.execute(INDEX_COMPANY_ISIN_MAP_PRIMARY)
 
 
 def _prepare_date(val) -> Optional[str]:

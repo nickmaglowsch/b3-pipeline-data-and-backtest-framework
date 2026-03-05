@@ -43,7 +43,10 @@ def test_fetch_ticker_mappings_is_importable():
 def test_fetch_ticker_mappings_populates_ticker(mem_conn):
     """
     Given a prices table with a ticker and a cvm_companies row with matching
-    CNPJ but no ticker, _fetch_ticker_mappings should set ticker via B3 API.
+    cvm_code but no ticker, _fetch_ticker_mappings should set ticker via B3 API.
+
+    The new implementation uses codeCVM (not CNPJ) to match cvm_companies rows.
+    The bulk list is empty in this test so the fallback per-company path is used.
     """
     from b3_pipeline import cvm_main
 
@@ -53,7 +56,7 @@ def test_fetch_ticker_mappings_populates_ticker(mem_conn):
     )
     mem_conn.commit()
 
-    # Seed cvm_companies with matching CNPJ but no ticker
+    # Seed cvm_companies with matching cvm_code but no ticker
     cvm_storage.upsert_cvm_company(
         mem_conn,
         cnpj="33000167000101",
@@ -63,20 +66,22 @@ def test_fetch_ticker_mappings_populates_ticker(mem_conn):
         b3_trading_name=None,
     )
 
-    # Mock B3 API: fetch_company_data returns company dict, extract_cnpj returns CNPJ
+    # Mock B3 API: fetch_company_data returns company dict with codeCVM
+    # Note: cnpj is None here (as it is in reality for this endpoint)
     fake_company = {
         "companyName": "PETROBRAS",
-        "cnpj": "33.000.167/0001-01",
+        "cnpj": None,
         "codeCVM": "9512",
         "tradingName": "PETROBRAS",
     }
 
-    with patch("b3_pipeline.cvm_main.b3_corporate_actions.fetch_company_data", return_value=fake_company) as mock_fetch, \
-         patch("b3_pipeline.cvm_main.b3_corporate_actions.extract_cnpj_from_company_data", return_value="33000167000101") as mock_cnpj:
+    # Bulk list is empty so the fallback per-company API call is made
+    with patch("b3_pipeline.cvm_main.b3_corporate_actions.fetch_all_b3_listed_companies", return_value=[]), \
+         patch("b3_pipeline.cvm_main.b3_corporate_actions.fetch_company_data", return_value=fake_company):
 
         result = cvm_main._fetch_ticker_mappings(mem_conn)
 
-    # Should have updated 1 company
+    # Should have updated 1 company via codeCVM matching
     assert result == 1, f"Expected 1 company updated, got {result}"
 
     # ticker in cvm_companies should now be set to 'PETR' (4-char root)
@@ -88,18 +93,24 @@ def test_fetch_ticker_mappings_populates_ticker(mem_conn):
 
 
 def test_fetch_ticker_mappings_returns_zero_when_no_tickers(mem_conn):
-    """When prices table is empty, _fetch_ticker_mappings should return 0 and not crash."""
+    """When prices table is empty, _fetch_ticker_mappings should return 0 and not crash.
+
+    Neither the bulk list nor the per-company API should be called because
+    the function returns early when there are no tickers.
+    """
     from b3_pipeline import cvm_main
 
-    with patch("b3_pipeline.cvm_main.b3_corporate_actions.fetch_company_data") as mock_fetch:
+    with patch("b3_pipeline.cvm_main.b3_corporate_actions.fetch_all_b3_listed_companies") as mock_bulk, \
+         patch("b3_pipeline.cvm_main.b3_corporate_actions.fetch_company_data") as mock_fetch:
         result = cvm_main._fetch_ticker_mappings(mem_conn)
 
     assert result == 0, f"Expected 0 when no tickers, got {result}"
+    mock_bulk.assert_not_called()
     mock_fetch.assert_not_called()
 
 
 def test_fetch_ticker_mappings_skips_none_company_data(mem_conn):
-    """When fetch_company_data returns None, the ticker root should be silently skipped."""
+    """When fetch_company_data (fallback path) returns None, the ticker root is skipped."""
     from b3_pipeline import cvm_main
 
     mem_conn.execute(
@@ -107,14 +118,16 @@ def test_fetch_ticker_mappings_skips_none_company_data(mem_conn):
     )
     mem_conn.commit()
 
-    with patch("b3_pipeline.cvm_main.b3_corporate_actions.fetch_company_data", return_value=None):
+    # Bulk list is empty so fallback is triggered; fallback returns None
+    with patch("b3_pipeline.cvm_main.b3_corporate_actions.fetch_all_b3_listed_companies", return_value=[]), \
+         patch("b3_pipeline.cvm_main.b3_corporate_actions.fetch_company_data", return_value=None):
         result = cvm_main._fetch_ticker_mappings(mem_conn)
 
     assert result == 0, f"Expected 0 when API returns None, got {result}"
 
 
-def test_fetch_ticker_mappings_skips_none_cnpj(mem_conn):
-    """When extract_cnpj returns None, the company should be skipped (no upsert)."""
+def test_fetch_ticker_mappings_skips_missing_cvm_code(mem_conn):
+    """When fetch_company_data returns a dict with no codeCVM, the company is skipped."""
     from b3_pipeline import cvm_main
 
     mem_conn.execute(
@@ -122,17 +135,23 @@ def test_fetch_ticker_mappings_skips_none_cnpj(mem_conn):
     )
     mem_conn.commit()
 
-    fake_company = {"companyName": "Vale", "cnpj": "", "codeCVM": "", "tradingName": "VALE"}
+    # codeCVM is empty string -- should be skipped (no update_ticker_by_cvm_code call)
+    fake_company = {"companyName": "Vale", "cnpj": None, "codeCVM": "", "tradingName": "VALE"}
 
-    with patch("b3_pipeline.cvm_main.b3_corporate_actions.fetch_company_data", return_value=fake_company), \
-         patch("b3_pipeline.cvm_main.b3_corporate_actions.extract_cnpj_from_company_data", return_value=None):
+    with patch("b3_pipeline.cvm_main.b3_corporate_actions.fetch_all_b3_listed_companies", return_value=[]), \
+         patch("b3_pipeline.cvm_main.b3_corporate_actions.fetch_company_data", return_value=fake_company):
         result = cvm_main._fetch_ticker_mappings(mem_conn)
 
-    assert result == 0, f"Expected 0 when CNPJ is None, got {result}"
+    assert result == 0, f"Expected 0 when codeCVM is empty, got {result}"
 
 
 def test_fetch_ticker_mappings_deduplicates_ticker_roots(mem_conn):
-    """Multiple tickers with same 4-char root should only generate one API call."""
+    """Multiple tickers with same 4-char root should only generate one API call.
+
+    In the new implementation the primary path uses the bulk GetInitialCompanies
+    call. When the bulk list is empty, the fallback makes one per-company call
+    for the single deduplicated root 'PETR'.
+    """
     from b3_pipeline import cvm_main
 
     for ticker, isin in [("PETR3", "BRPETRACNPR6"), ("PETR4", "BRPETRACNPR7")]:
@@ -144,18 +163,19 @@ def test_fetch_ticker_mappings_deduplicates_ticker_roots(mem_conn):
 
     fake_company = {
         "companyName": "Petrobras",
-        "cnpj": "33.000.167/0001-01",
+        "cnpj": None,  # B3 GetListedSupplementCompany never returns CNPJ
         "codeCVM": "9512",
         "tradingName": "PETROBRAS",
     }
 
-    with patch("b3_pipeline.cvm_main.b3_corporate_actions.fetch_company_data", return_value=fake_company) as mock_fetch, \
-         patch("b3_pipeline.cvm_main.b3_corporate_actions.extract_cnpj_from_company_data", return_value="33000167000101"):
+    # Bulk list is empty so the fallback per-company path is triggered
+    with patch("b3_pipeline.cvm_main.b3_corporate_actions.fetch_all_b3_listed_companies", return_value=[]), \
+         patch("b3_pipeline.cvm_main.b3_corporate_actions.fetch_company_data", return_value=fake_company) as mock_fetch:
         cvm_main._fetch_ticker_mappings(mem_conn)
 
-    # PETR3 and PETR4 both have root 'PETR' -- only one call expected
+    # PETR3 and PETR4 both have root 'PETR' -- only one fallback call expected
     assert mock_fetch.call_count == 1, (
-        f"Expected 1 API call for deduplicated roots, got {mock_fetch.call_count}"
+        f"Expected 1 fallback API call for deduplicated root 'PETR', got {mock_fetch.call_count}"
     )
 
 

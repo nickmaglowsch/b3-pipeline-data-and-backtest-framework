@@ -208,6 +208,54 @@ def get_fundamentals_stats(conn: sqlite3.Connection) -> dict:
     }
 
 
+def populate_company_isin_map(conn: sqlite3.Connection) -> int:
+    """Populate (or refresh) company_isin_map by joining cvm_companies with prices.
+
+    Links each (cnpj, isin_code) pair to the ticker and share_class derived from
+    the ticker suffix. Sets is_primary=1 for the ON share class (suffix '3').
+
+    Safe to call multiple times -- uses INSERT OR REPLACE to handle updates.
+    Returns the number of rows inserted or replaced.
+    """
+    sql = """
+        INSERT OR REPLACE INTO company_isin_map
+            (cnpj, isin_code, ticker, share_class, is_primary, first_seen, last_seen)
+        SELECT
+            c.cnpj,
+            p.isin_code,
+            p.ticker,
+            CASE
+                WHEN LENGTH(p.ticker) >= 6
+                     AND CAST(SUBSTR(p.ticker, LENGTH(p.ticker) - 1, 2) AS TEXT) = '11'
+                    THEN 'UNT'
+                WHEN SUBSTR(p.ticker, LENGTH(p.ticker), 1) = '3' THEN 'ON'
+                WHEN SUBSTR(p.ticker, LENGTH(p.ticker), 1) = '4' THEN 'PN'
+                WHEN SUBSTR(p.ticker, LENGTH(p.ticker), 1) = '5' THEN 'PNA'
+                WHEN SUBSTR(p.ticker, LENGTH(p.ticker), 1) = '6' THEN 'PNB'
+                ELSE 'OTHER'
+            END AS share_class,
+            CASE
+                WHEN LENGTH(p.ticker) >= 6
+                     AND CAST(SUBSTR(p.ticker, LENGTH(p.ticker) - 1, 2) AS TEXT) = '11'
+                    THEN 0
+                WHEN SUBSTR(p.ticker, LENGTH(p.ticker), 1) = '3' THEN 1
+                ELSE 0
+            END AS is_primary,
+            MIN(p.date) AS first_seen,
+            MAX(p.date) AS last_seen
+        FROM cvm_companies c
+        JOIN prices p ON SUBSTR(p.ticker, 1, 4) = c.ticker
+        WHERE c.ticker IS NOT NULL
+          AND p.isin_code != 'UNKNOWN'
+        GROUP BY c.cnpj, p.isin_code, p.ticker
+    """
+    result = conn.execute(sql)
+    conn.commit()
+    count = result.rowcount
+    logger.info(f"Populated company_isin_map: {count} rows inserted/replaced")
+    return count
+
+
 def get_cvm_company_map(conn: sqlite3.Connection) -> dict:
     """Return {cnpj: ticker} for all mapped companies."""
     cursor = conn.cursor()
