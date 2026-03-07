@@ -8,13 +8,84 @@ import yfinance as yf
 from datetime import datetime
 
 
+def load_active_tickers(db_path: str, as_of_date: str) -> set:
+    """
+    Return the set of ticker roots that were active (not yet delisted)
+    as of as_of_date, according to cvm_companies.
+
+    A ticker root is active if:
+      - Its delisting_date IS NULL (still listed), OR
+      - Its delisting_date >= as_of_date
+
+    Returns a set of 4-character ticker roots (e.g. 'PETR', 'VALE').
+    Tickers not in cvm_companies are NOT returned here; the caller's
+    conservative filter handles those separately.
+
+    Graceful degradation: returns empty set if cvm_companies lacks
+    delisting_date column (un-migrated DB) — no exception is raised.
+    """
+    sql = """
+        SELECT DISTINCT ticker FROM cvm_companies
+        WHERE ticker IS NOT NULL
+          AND (delisting_date IS NULL OR delisting_date >= ?)
+    """
+    try:
+        with sqlite3.connect(db_path) as conn:
+            df = pd.read_sql_query(sql, conn, params=[as_of_date])
+        return set(df["ticker"].dropna().tolist())
+    except Exception:
+        return set()
+
+
+def _get_all_known_roots(db_path: str) -> set:
+    """Return all ticker roots present in cvm_companies (with or without delisting_date)."""
+    sql = "SELECT DISTINCT ticker FROM cvm_companies WHERE ticker IS NOT NULL"
+    try:
+        with sqlite3.connect(db_path) as conn:
+            df = pd.read_sql_query(sql, conn)
+        return set(df["ticker"].dropna().tolist())
+    except Exception:
+        return set()
+
+
+def _apply_delisted_filter(
+    db_path: str, start: str, *dataframes: pd.DataFrame
+) -> tuple:
+    """Apply the survivorship bias filter to a set of wide DataFrames.
+
+    Drops columns (tickers) where:
+    - The ticker's 4-char root is in cvm_companies (i.e., it's a known company), AND
+    - The root's delisting_date is before `start` (i.e., it delisted before the backtest start)
+
+    Tickers whose roots are NOT in cvm_companies at all are kept (conservative).
+    """
+    active_roots = load_active_tickers(db_path, start)
+    all_known_roots = _get_all_known_roots(db_path)
+
+    result = []
+    for df in dataframes:
+        if df is None or df.empty:
+            result.append(df)
+            continue
+        keep = [
+            t for t in df.columns
+            if t[:4] in active_roots or t[:4] not in all_known_roots
+        ]
+        result.append(df[keep])
+    return tuple(result)
+
+
 def load_b3_data(
-    db_path: str, start: str, end: str
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    db_path: str, start: str, end: str, filter_delisted: bool = False
+) -> tuple:
     """
     Load data from the local B3 SQLite database.
     Filters for valid standard lot tickers (ending in 3, 4, 5, 6, 11).
     Calculates daily financial volume correctly.
+
+    Args:
+        filter_delisted: If True, drop tickers that were delisted before `start`.
+                         Default False — no change to existing behavior.
 
     Returns:
         tuple: (adj_close, close_px, fin_vol)
@@ -57,6 +128,11 @@ def load_b3_data(
     adj_close = adj_close.ffill()
     close_px = close_px.ffill()
 
+    if filter_delisted:
+        adj_close, close_px, fin_vol = _apply_delisted_filter(
+            db_path, start, adj_close, close_px, fin_vol
+        )
+
     print(f"✅  Loaded {adj_close.shape[1]} unique standard tickers.")
     return adj_close, close_px, fin_vol
 
@@ -86,14 +162,18 @@ def download_benchmark(ticker: str, start: str, end: str) -> pd.Series:
 
 
 def load_b3_hlc_data(
-    db_path: str, start: str, end: str
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    db_path: str, start: str, end: str, filter_delisted: bool = False
+) -> tuple:
     """
     Load split-adjusted HLC + adj_close + raw close + financial volume for ATR computation.
 
     Uses split_adj_* (split-only adjustment) for ATR to avoid false True Range
     spikes from ex-dividend gaps. Returns adj_close separately for the returns
     matrix (simulation needs dividend-adjusted returns).
+
+    Args:
+        filter_delisted: If True, drop tickers that were delisted before `start`.
+                         Default False — no change to existing behavior.
 
     Returns:
         tuple: (adj_close, split_adj_high, split_adj_low, split_adj_close, close_px, fin_vol)
@@ -133,6 +213,12 @@ def load_b3_hlc_data(
     split_low = split_low.ffill()
     split_close = split_close.ffill()
     close_px = close_px.ffill()
+
+    if filter_delisted:
+        adj_close, split_high, split_low, split_close, close_px, fin_vol = _apply_delisted_filter(
+            db_path, start,
+            adj_close, split_high, split_low, split_close, close_px, fin_vol
+        )
 
     print(f"✅  Loaded HLC for {adj_close.shape[1]} unique standard tickers.")
     return adj_close, split_high, split_low, split_close, close_px, fin_vol
@@ -206,6 +292,9 @@ _FUNDAMENTALS_METRICS = [
     "ev_ebitda",
 ]
 
+# All metrics available in fundamentals_monthly (raw financials + ratio columns)
+_FUNDAMENTALS_MONTHLY_METRICS = set(_FUNDAMENTALS_METRICS)
+
 
 def _get_rebalance_dates(db_path: str, start: str, end: str, freq: str) -> pd.DatetimeIndex:
     """Build the rebalance date grid by sampling the prices table."""
@@ -258,14 +347,13 @@ def load_fundamentals_pit(
             f.{metric}
         FROM fundamentals_pit f
         WHERE f.ticker IS NOT NULL
-          AND f.filing_date >= :start
           AND f.filing_date <= :end
           AND f.{metric} IS NOT NULL
         ORDER BY f.ticker, f.filing_date, f.filing_version
     """
 
     with sqlite3.connect(db_path) as conn:
-        df = pd.read_sql_query(sql, conn, params={"start": start, "end": end})
+        df = pd.read_sql_query(sql, conn, params={"end": end})
 
     if df.empty:
         rebal_dates = _get_rebalance_dates(db_path, start, end, freq)
@@ -289,9 +377,17 @@ def load_fundamentals_pit(
     wide.index = pd.to_datetime(wide.index)
     wide.columns.name = None
 
-    # Reindex to the rebalance calendar and forward-fill
+    # Reindex to the rebalance calendar and forward-fill.
+    # To allow pre-period filings to seed the forward-fill, we first reindex
+    # to the union of the filing dates and the rebalance calendar, then ffill,
+    # then slice to only the rebalance calendar dates within [start, end].
     rebal_dates = _get_rebalance_dates(db_path, start, end, freq)
-    wide = wide.reindex(rebal_dates).ffill()
+    extended_index = wide.index.union(rebal_dates).sort_values()
+    wide = wide.reindex(extended_index).ffill()
+
+    # Slice to only the rebalance calendar dates within the requested window
+    wide = wide.reindex(rebal_dates)
+    wide = wide.loc[wide.index >= pd.Timestamp(start)]
 
     return wide
 
@@ -318,4 +414,165 @@ def load_all_fundamentals(
             import warnings
             warnings.warn(f"Failed to load fundamentals metric '{metric}': {e}")
             result[metric] = pd.DataFrame()
+    return result
+
+
+# ── fundamentals_monthly snapshot reader ──────────────────────────────────────
+
+def load_fundamentals_monthly(
+    db_path: str,
+    metric: str,
+    start: str,
+    end: str,
+) -> pd.DataFrame:
+    """
+    Load a single metric from the pre-materialized fundamentals_monthly snapshot.
+
+    Args:
+        db_path:  Path to the B3 SQLite database file.
+        metric:   Column name in fundamentals_monthly (raw metrics or ratio columns).
+        start:    Start date string (inclusive).
+        end:      End date string (inclusive).
+
+    Returns:
+        Wide DataFrame: DatetimeIndex (month_end) × ticker columns.
+        No forward-fill — the snapshot is already forward-filled.
+
+    Raises:
+        ValueError: If metric is not in the allowed set.
+    """
+    if metric not in _FUNDAMENTALS_MONTHLY_METRICS:
+        raise ValueError(
+            f"Unknown metric {metric!r}. Choose from: {sorted(_FUNDAMENTALS_MONTHLY_METRICS)}"
+        )
+
+    # metric is validated above — safe to interpolate in column name
+    sql = f"""
+        SELECT month_end, ticker, {metric}
+        FROM fundamentals_monthly
+        WHERE month_end >= ?
+          AND month_end <= ?
+          AND {metric} IS NOT NULL
+        ORDER BY month_end, ticker
+    """
+
+    with sqlite3.connect(db_path) as conn:
+        df = pd.read_sql_query(sql, conn, params=[start, end])
+
+    if df.empty:
+        return pd.DataFrame(dtype=float)
+
+    df["month_end"] = pd.to_datetime(df["month_end"])
+    wide = df.pivot_table(index="month_end", columns="ticker", values=metric, aggfunc="last")
+    wide.index = pd.to_datetime(wide.index)
+    wide.columns.name = None
+    return wide
+
+
+def load_all_fundamentals_monthly(
+    db_path: str,
+    start: str,
+    end: str,
+) -> dict:
+    """
+    Load all metrics from fundamentals_monthly and return them as a dict of wide DataFrames.
+
+    Returns:
+        dict with keys matching _FUNDAMENTALS_MONTHLY_METRICS:
+        {"revenue": df, ..., "pe_ratio": df, "pb_ratio": df, "ev_ebitda": df}
+        Each df has DatetimeIndex (month_end dates) and ticker columns.
+    """
+    result = {}
+    for metric in _FUNDAMENTALS_MONTHLY_METRICS:
+        try:
+            result[metric] = load_fundamentals_monthly(db_path, metric, start, end)
+        except Exception as e:
+            import warnings
+            warnings.warn(f"Failed to load monthly metric '{metric}': {e}")
+            result[metric] = pd.DataFrame()
+    return result
+
+
+# ── Dynamic ratio helpers (pure pandas, no DB access) ─────────────────────────
+
+def compute_pe_ratio_dynamic(
+    shares: pd.DataFrame,
+    net_income: pd.DataFrame,
+    prices: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    Compute P/E ratio from wide DataFrames aligned on the same DatetimeIndex.
+
+    Args:
+        shares:     Wide DataFrame: rebalance_date × ticker, shares_outstanding (units).
+        net_income: Wide DataFrame: rebalance_date × ticker, net_income in thousands BRL.
+        prices:     Wide DataFrame: rebalance_date × ticker, close price (BRL).
+
+    Returns:
+        Wide DataFrame with same shape: pe_ratio = (prices × shares) / (net_income × 1000).
+        Entries where net_income × 1000 <= 0 or shares <= 0 or prices <= 0 are NaN.
+    """
+    market_cap = prices * shares
+    net_income_brl = net_income * 1_000.0
+    result = market_cap / net_income_brl
+    # Mask invalid denominators/numerators
+    result = result.where(net_income_brl > 0)
+    result = result.where(shares > 0)
+    result = result.where(prices > 0)
+    return result
+
+
+def compute_pb_ratio_dynamic(
+    shares: pd.DataFrame,
+    equity: pd.DataFrame,
+    prices: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    Compute P/B ratio from wide DataFrames aligned on the same DatetimeIndex.
+
+    Args:
+        shares: Wide DataFrame: shares_outstanding (units).
+        equity: Wide DataFrame: equity in thousands BRL.
+        prices: Wide DataFrame: close price (BRL).
+
+    Returns:
+        Wide DataFrame: pb_ratio = (prices × shares) / (equity × 1000).
+        Entries where equity × 1000 <= 0 or shares <= 0 or prices <= 0 are NaN.
+    """
+    market_cap = prices * shares
+    equity_brl = equity * 1_000.0
+    result = market_cap / equity_brl
+    result = result.where(equity_brl > 0)
+    result = result.where(shares > 0)
+    result = result.where(prices > 0)
+    return result
+
+
+def compute_ev_ebitda_dynamic(
+    shares: pd.DataFrame,
+    ebitda: pd.DataFrame,
+    net_debt: pd.DataFrame,
+    prices: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    Compute EV/EBITDA from wide DataFrames aligned on the same DatetimeIndex.
+
+    Args:
+        shares:   Wide DataFrame: shares_outstanding (units).
+        ebitda:   Wide DataFrame: EBITDA in thousands BRL.
+        net_debt: Wide DataFrame: net debt in thousands BRL.
+        prices:   Wide DataFrame: close price (BRL).
+
+    Returns:
+        Wide DataFrame: ev_ebitda = (prices × shares + net_debt × 1000) / (ebitda × 1000).
+        Entries where ebitda × 1000 <= 0 or shares <= 0 or prices <= 0 are NaN.
+    """
+    market_cap = prices * shares
+    ebitda_brl = ebitda * 1_000.0
+    net_debt_brl = net_debt * 1_000.0
+    ev = market_cap + net_debt_brl
+    result = ev / ebitda_brl
+    result = result.where(ebitda_brl > 0)
+    result = result.where(shares > 0)
+    result = result.where(prices > 0)
     return result

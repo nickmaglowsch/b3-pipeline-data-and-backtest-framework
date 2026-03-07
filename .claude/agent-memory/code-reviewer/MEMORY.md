@@ -91,11 +91,29 @@
 - Modified: storage.py, config.py, b3_corporate_actions.py, data.py, shared_data.py, backtest_service.py
 - New UI: ui/pages/6_fundamentals.py, ui/services/fundamentals_service.py
 - New strategy: backtests/strategies/value_quality.py (needs_fundamentals=True)
-- **IMPORTANT**: Valuation ratio units mismatch -- price*shares is BRL, net_income is thousands BRL. PE off by 1000x
-- **IMPORTANT**: `load_fundamentals_pit` PIT lookahead bias -- `drop_duplicates` on (ticker, period_end) before ffill keeps latest version even for dates before it was filed
-- `app.py` sidebar navigation text not updated to include "6. Fundamentals"
-- `cvm_storage.py:106-109` repeated df.copy() in loop -- should copy once before loop
+- **FIXED**: Valuation ratio units mismatch -- now multiplies by THOUSANDS=1_000.0 in cvm_main.py
+- **FIXED**: `load_fundamentals_pit` PIT bug -- `filing_date >= :start` removed; pre-period filings seed ffill
+- **FIXED**: N+1 price lookup replaced by ADTV ticker map + batch window query
+- `cvm_storage.py:300-303` repeated df.copy() in loop -- should copy once before loop (STILL PRESENT)
 - `cvm_parser.py:65` import inside function body (datetime) -- should be module-level
-- `cvm_main.py:76-98` N+1 query pattern for price lookup in ratio materialization
 - Per-row commit in upsert_cvm_filing and upsert_cvm_company -- slow for bulk operations
-- 31 new tests across 5 files, all 60 tests passing. TDD compliance: excellent
+- `materialize_fundamentals_monthly()` uses O(N*M) Python loop instead of vectorized pandas
+- `_get_val()` helper defined inside nested loop in cvm_main.py:351
+- `quarter_val == quarter_val` NaN check idiom -- obscure, should use pd.notna()
+- New tables: fundamentals_monthly, company_isin_map
+- New strategy: LowPE (backtests/strategies/low_pe.py)
+- 198 tests passing (was 153). TDD compliance: excellent
+
+## Historical Extension Review Notes (Mar 2026)
+- New files: cad_downloader.py, cad_parser.py, ipe_downloader.py, ipe_parser.py, low_pe.py
+- Modified: cvm_main.py, cvm_storage.py, storage.py, data.py, shared_data.py, config.py
+- New tests: 12 test files, 86 new tests
+- IPE is a document index (NOT financial data) -- fundamentals_df always empty
+- Path B for shares: IPE has no capital data, shares_outstanding stays NULL for pre-2010
+- `_clean_cnpj()` and `_parse_date()` duplicated in cad_parser.py and ipe_parser.py
+- cvm_main.py unconditionally imports cad/ipe modules even without --include-historical
+- `_get_val()` still defined inside nested loop (cvm_main.py:351) -- previously flagged
+- `materialize_fundamentals_monthly()` still uses O(N*M) Python loop
+- Bare `except Exception: pass` in IPE filing upsert loop (cvm_main.py:834)
+- `backtests/core/data.py` missing `from __future__ import annotations`
+- `upsert_fundamentals_monthly` inconsistent df.copy() -- sometimes mutates input

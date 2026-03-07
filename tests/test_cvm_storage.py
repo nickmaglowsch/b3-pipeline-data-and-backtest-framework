@@ -215,3 +215,148 @@ def test_get_cvm_company_map_returns_dict(mem_conn):
     assert result == {"12345": "PETR", "67890": "VALE"}, (
         f"Unexpected map: {result}"
     )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Task 03: CAD storage — listing_date / delisting_date schema migration
+# ──────────────────────────────────────────────────────────────────────────────
+
+def test_migrate_schema_adds_listing_date_columns():
+    """init_db() should add listing_date and delisting_date to cvm_companies."""
+    conn = sqlite3.connect(":memory:")
+    conn.execute("PRAGMA foreign_keys = OFF")
+    # Create cvm_companies WITHOUT the new columns (simulate old DB)
+    conn.execute("""
+        CREATE TABLE cvm_companies (
+            cnpj TEXT NOT NULL PRIMARY KEY,
+            ticker TEXT,
+            company_name TEXT,
+            cvm_code TEXT,
+            b3_trading_name TEXT,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    conn.commit()
+    # Running init_db should migrate the schema
+    storage.init_db(conn)
+    cursor = conn.cursor()
+    cursor.execute("PRAGMA table_info(cvm_companies)")
+    cols = {row[1] for row in cursor.fetchall()}
+    assert "listing_date" in cols, "listing_date column should exist after migration"
+    assert "delisting_date" in cols, "delisting_date column should exist after migration"
+    conn.close()
+
+
+def test_upsert_cad_company_dates_inserts_new_row(mem_conn):
+    """upsert_cad_company_dates() inserts a new row with listing/delisting dates."""
+    df = pd.DataFrame([{
+        "cnpj": "12345678000100",
+        "cvm_code": "001",
+        "company_name": "Test Corp",
+        "listing_date": "2000-01-15",
+        "delisting_date": None,
+    }])
+    count = cvm_storage.upsert_cad_company_dates(mem_conn, df)
+    assert count == 1
+    cursor = mem_conn.cursor()
+    cursor.execute("SELECT listing_date, delisting_date FROM cvm_companies WHERE cnpj = ?",
+                   ("12345678000100",))
+    row = cursor.fetchone()
+    assert row is not None
+    assert row[0] == "2000-01-15"
+    assert row[1] is None
+
+
+def test_upsert_cad_company_dates_does_not_overwrite_ticker(mem_conn):
+    """upsert_cad_company_dates() must NOT overwrite an existing ticker."""
+    # Insert company with ticker via the regular upsert
+    cvm_storage.upsert_cvm_company(
+        mem_conn, cnpj="12345678000100", ticker="PETR",
+        company_name="Petrobras", cvm_code="9512", b3_trading_name="PETROBRAS"
+    )
+    # Now upsert CAD dates for same CNPJ
+    df = pd.DataFrame([{
+        "cnpj": "12345678000100",
+        "cvm_code": "9512",
+        "company_name": "Petrobras",
+        "listing_date": "1994-04-08",
+        "delisting_date": None,
+    }])
+    cvm_storage.upsert_cad_company_dates(mem_conn, df)
+    cursor = mem_conn.cursor()
+    cursor.execute("SELECT ticker FROM cvm_companies WHERE cnpj = ?", ("12345678000100",))
+    assert cursor.fetchone()[0] == "PETR", "Ticker should be preserved"
+
+
+def test_upsert_cad_company_dates_preserves_existing_listing_date(mem_conn):
+    """listing_date uses COALESCE — first known date wins."""
+    df1 = pd.DataFrame([{
+        "cnpj": "12345678000100",
+        "cvm_code": "001",
+        "company_name": "A Corp",
+        "listing_date": "2005-01-01",
+        "delisting_date": None,
+    }])
+    cvm_storage.upsert_cad_company_dates(mem_conn, df1)
+
+    df2 = pd.DataFrame([{
+        "cnpj": "12345678000100",
+        "cvm_code": "001",
+        "company_name": "A Corp",
+        "listing_date": "2010-01-01",  # later date — should NOT win
+        "delisting_date": None,
+    }])
+    cvm_storage.upsert_cad_company_dates(mem_conn, df2)
+
+    cursor = mem_conn.cursor()
+    cursor.execute("SELECT listing_date FROM cvm_companies WHERE cnpj = ?", ("12345678000100",))
+    assert cursor.fetchone()[0] == "2005-01-01", "First listing_date should be preserved"
+
+
+def test_upsert_cad_company_dates_overwrites_delisting_date(mem_conn):
+    """delisting_date is always overwritten (cancellations can be updated)."""
+    df1 = pd.DataFrame([{
+        "cnpj": "12345678000100",
+        "cvm_code": "001",
+        "company_name": "A Corp",
+        "listing_date": "2000-01-01",
+        "delisting_date": "2015-06-30",
+    }])
+    cvm_storage.upsert_cad_company_dates(mem_conn, df1)
+
+    df2 = pd.DataFrame([{
+        "cnpj": "12345678000100",
+        "cvm_code": "001",
+        "company_name": "A Corp",
+        "listing_date": "2000-01-01",
+        "delisting_date": "2016-03-15",  # updated date
+    }])
+    cvm_storage.upsert_cad_company_dates(mem_conn, df2)
+
+    cursor = mem_conn.cursor()
+    cursor.execute("SELECT delisting_date FROM cvm_companies WHERE cnpj = ?", ("12345678000100",))
+    assert cursor.fetchone()[0] == "2016-03-15", "delisting_date should be updated"
+
+
+def test_get_fundamentals_stats_includes_listing_counts(mem_conn):
+    """get_fundamentals_stats() returns companies_with_listing_date count."""
+    df = pd.DataFrame([
+        {
+            "cnpj": "11111111000100",
+            "cvm_code": "001",
+            "company_name": "Alpha",
+            "listing_date": "2000-01-01",
+            "delisting_date": None,
+        },
+        {
+            "cnpj": "22222222000100",
+            "cvm_code": "002",
+            "company_name": "Beta",
+            "listing_date": None,
+            "delisting_date": None,
+        },
+    ])
+    cvm_storage.upsert_cad_company_dates(mem_conn, df)
+    stats = cvm_storage.get_fundamentals_stats(mem_conn)
+    assert stats["companies_with_listing_date"] == 1
+    assert "companies_with_delisting_date" in stats
