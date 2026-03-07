@@ -71,10 +71,10 @@
 - Convention: `tests/test_<module_name>.py`
 - Run command: `python -m pytest tests/ -v` from project root
 
-## Fundamentals Pipeline (IN PROGRESS as of 2026-03-03)
-- New tables in `b3_market_data.sqlite`: `cvm_companies`, `cvm_filings`, `fundamentals_pit`
+## Fundamentals Pipeline (IMPLEMENTED as of 2026-03-03)
+- New tables in `b3_market_data.sqlite`: `cvm_companies`, `cvm_filings`, `fundamentals_pit`, `company_isin_map`
 - New modules: `b3_pipeline/cvm_downloader.py`, `cvm_parser.py`, `cvm_storage.py`, `cvm_main.py`
-- CNPJ mapping: B3 API `GetListedSupplementCompany` response contains CNPJ field (verify field name at impl time)
+- CNPJ → ticker via B3 API `GetInitialCompanies` bulk + `GetListedSupplementCompany` fallback (uses codeCVM, NOT cnpj)
 - CVM data directory: `data/cvm/` (created by `config.CVM_DATA_DIR`)
 - CVM data starts 2010; backtests using fundamentals should start 2012+
 - CVM CSV encoding: latin-1, semicolon-separated; `ORDEM_EXERC == 'ÚLTIMO'` filter for current period
@@ -83,3 +83,18 @@
 - Strategy plugin `ValueQuality` in `backtests/strategies/value_quality.py` uses `needs_fundamentals = True`
 - UI: `ui/pages/6_fundamentals.py` + `ui/services/fundamentals_service.py`
 - CVM URL constants in config.py: `CVM_DFP_BASE_URL`, `CVM_ITR_BASE_URL`, `CVM_FRE_BASE_URL`
+- `company_isin_map` bridges cnpj → isin_code → ticker for accurate price lookup; is_primary=1 for ON (suffix 3)
+- `materialize_valuation_ratios()` in cvm_main.py: strict date<=filing_date backward lookup (known limitation)
+- `load_fundamentals_pit()` in backtests/core/data.py: BUG — filters `filing_date >= start`, misses pre-period filings
+- `_propagate_fre_shares()`: copies shares_outstanding from FRE rows into DFP/ITR rows of same company
+
+## PIT Fundamentals Improvement Tasks (2026-03-04, tasks/)
+- Task 01: Add `fundamentals_monthly` schema (month_end, ticker PK) + upsert helpers
+- Task 02: Fix ratio materialization — ±5 trading-day price window + highest-ADTV ticker (not always ON/suffix-3)
+- Task 03: Fix `filing_date >= start` bug in `load_fundamentals_pit()` — change to `filing_date <= end` only
+- Task 04: Add `materialize_fundamentals_monthly()` pipeline step — monthly P/E uses month-end prices
+- Task 05: Add `load_fundamentals_monthly()` reader + `compute_pe_ratio_dynamic()` helpers in data.py
+- Task 06: Wire monthly keys (`f_*_m`, `f_*_dyn`) into `build_shared_data()` via `load_all_fundamentals_monthly()`
+- Task 07: Add `LowPE` strategy plugin using `f_pe_ratio_dyn` (n_stocks lowest P/E)
+- Key insight: monthly snapshot ratios use CURRENT month-end price × forward-filled financials (not filing-date price)
+- Key insight: `_build_adtv_ticker_map(conn)` helper should be extracted and shared between Tasks 02 and 04

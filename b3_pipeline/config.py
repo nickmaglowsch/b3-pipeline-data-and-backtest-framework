@@ -40,6 +40,9 @@ EQUITY_BDI_CODES = {"02"}
 CVM_DFP_BASE_URL = "https://dados.cvm.gov.br/dados/CIA_ABERTA/DOC/DFP/DADOS/"
 CVM_ITR_BASE_URL = "https://dados.cvm.gov.br/dados/CIA_ABERTA/DOC/ITR/DADOS/"
 CVM_FRE_BASE_URL = "https://dados.cvm.gov.br/dados/CIA_ABERTA/DOC/FRE/DADOS/"
+CVM_IPE_BASE_URL = "https://dados.cvm.gov.br/dados/CIA_ABERTA/DOC/IPE/DADOS/"
+CVM_CAD_BASE_URL = "https://dados.cvm.gov.br/dados/CIA_ABERTA/CAD/DADOS/"
+CVM_CAD_FILENAME = "cad_cia_aberta.csv"
 CVM_DATA_DIR = PROJECT_ROOT / "data" / "cvm"
 CVM_DATA_DIR.mkdir(parents=True, exist_ok=True)
 CVM_START_YEAR = 2010

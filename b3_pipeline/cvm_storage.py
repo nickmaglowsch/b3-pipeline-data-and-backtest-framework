@@ -188,6 +188,40 @@ def upsert_fundamentals_pit(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
     return len(records)
 
 
+def upsert_cad_company_dates(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
+    """Upsert company listing/delisting dates from the CVM CAD dataset.
+
+    Does NOT overwrite existing ticker or b3_trading_name values.
+    listing_date uses COALESCE (first known date is canonical).
+    delisting_date is always overwritten (cancellations can be updated).
+    Returns number of rows processed.
+    """
+    sql = """
+        INSERT INTO cvm_companies (cnpj, cvm_code, company_name, listing_date, delisting_date, updated_at)
+        VALUES (:cnpj, :cvm_code, :company_name, :listing_date, :delisting_date, CURRENT_TIMESTAMP)
+        ON CONFLICT(cnpj) DO UPDATE SET
+            cvm_code       = COALESCE(cvm_companies.cvm_code, excluded.cvm_code),
+            company_name   = COALESCE(cvm_companies.company_name, excluded.company_name),
+            listing_date   = COALESCE(cvm_companies.listing_date, excluded.listing_date),
+            delisting_date = excluded.delisting_date,
+            updated_at     = CURRENT_TIMESTAMP
+    """
+    # Normalise None/NaN to Python None for SQLite
+    records = []
+    for rec in df.to_dict("records"):
+        records.append({
+            "cnpj": rec["cnpj"],
+            "cvm_code": rec.get("cvm_code"),
+            "company_name": rec.get("company_name"),
+            "listing_date": rec.get("listing_date") or None,
+            "delisting_date": rec.get("delisting_date") or None,
+        })
+    conn.executemany(sql, records)
+    conn.commit()
+    logger.info(f"Upserted {len(records):,} CAD company date rows")
+    return len(records)
+
+
 def get_fundamentals_stats(conn: sqlite3.Connection) -> dict:
     """Return counts for the fundamentals stats panel."""
     cursor = conn.cursor()
@@ -201,10 +235,18 @@ def get_fundamentals_stats(conn: sqlite3.Connection) -> dict:
     cursor.execute("SELECT COUNT(*) FROM fundamentals_pit")
     total_fundamentals_pit = cursor.fetchone()[0]
 
+    cursor.execute("SELECT COUNT(*) FROM cvm_companies WHERE listing_date IS NOT NULL")
+    companies_with_listing_date = cursor.fetchone()[0]
+
+    cursor.execute("SELECT COUNT(*) FROM cvm_companies WHERE delisting_date IS NOT NULL")
+    companies_with_delisting_date = cursor.fetchone()[0]
+
     return {
         "total_cvm_companies": total_cvm_companies,
         "total_cvm_filings": total_cvm_filings,
         "total_fundamentals_pit": total_fundamentals_pit,
+        "companies_with_listing_date": companies_with_listing_date,
+        "companies_with_delisting_date": companies_with_delisting_date,
     }
 
 
@@ -268,3 +310,51 @@ def get_ticker_to_cnpj_map(conn: sqlite3.Connection) -> dict:
     cursor = conn.cursor()
     cursor.execute("SELECT ticker, cnpj FROM cvm_companies WHERE ticker IS NOT NULL")
     return {row[0]: row[1] for row in cursor.fetchall()}
+
+
+def upsert_fundamentals_monthly(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
+    """Batch upsert fundamentals_monthly rows from a DataFrame.
+
+    Uses INSERT OR REPLACE keyed on (month_end, ticker).
+    Returns the number of rows processed.
+    """
+    if df.empty:
+        logger.warning("upsert_fundamentals_monthly: empty DataFrame, nothing to insert")
+        return 0
+
+    sql = """
+        INSERT OR REPLACE INTO fundamentals_monthly (
+            month_end, ticker,
+            revenue, net_income, ebitda, total_assets, equity, net_debt,
+            shares_outstanding, pe_ratio, pb_ratio, ev_ebitda
+        ) VALUES (
+            :month_end, :ticker,
+            :revenue, :net_income, :ebitda, :total_assets, :equity, :net_debt,
+            :shares_outstanding, :pe_ratio, :pb_ratio, :ev_ebitda
+        )
+    """
+
+    # Fill optional columns not present in df with None
+    optional_cols = [
+        "revenue", "net_income", "ebitda", "total_assets", "equity", "net_debt",
+        "shares_outstanding", "pe_ratio", "pb_ratio", "ev_ebitda",
+    ]
+    for col in optional_cols:
+        if col not in df.columns:
+            df = df.copy()
+            df[col] = None
+
+    records = df.to_dict("records")
+    conn.executemany(sql, records)
+    conn.commit()
+
+    n = len(records)
+    logger.info(f"Upserted {n} fundamentals_monthly rows")
+    return n
+
+
+def truncate_fundamentals_monthly(conn: sqlite3.Connection) -> None:
+    """Delete all rows from fundamentals_monthly. Used before a full rebuild."""
+    conn.execute("DELETE FROM fundamentals_monthly")
+    conn.commit()
+    logger.info("Truncated fundamentals_monthly table")

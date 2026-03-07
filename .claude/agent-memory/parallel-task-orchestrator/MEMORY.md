@@ -79,6 +79,34 @@
 - Key TDD pattern: tests written FIRST, implementation second; in-memory SQLite fixtures for DB tests
 - CVM ZIP test pattern: use io.BytesIO() + zipfile.ZipFile for in-memory synthetic ZIPs (no real files needed)
 
+### fundamentals_monthly Module -- created 2026-03-05
+- b3_pipeline/storage.py: SCHEMA_FUNDAMENTALS_MONTHLY + 2 indexes added
+- b3_pipeline/cvm_storage.py: upsert_fundamentals_monthly(), truncate_fundamentals_monthly()
+- b3_pipeline/cvm_main.py: _build_adtv_ticker_map() helper (shared by materialize_valuation_ratios + materialize_fundamentals_monthly), materialize_fundamentals_monthly(), --skip-monthly CLI flag
+- backtests/core/data.py: load_fundamentals_pit() bug fix (removed filing_date >= start; uses extended index union for pre-period ffill seeding), load_fundamentals_monthly(), load_all_fundamentals_monthly(), compute_pe_ratio_dynamic(), compute_pb_ratio_dynamic(), compute_ev_ebitda_dynamic()
+- backtests/core/shared_data.py: added f_*_m and f_*_dyn keys when include_fundamentals=True
+- backtests/strategies/low_pe.py: LowPEStrategy (name="LowPE"), needs_fundamentals=True
+- Tests: 153 total (was 60 → now 153); new test files: test_fundamentals_monthly.py, test_materialize_ratios_window.py, test_shared_data_fundamentals.py, test_low_pe_strategy.py
+- Key pattern: existing tests (test_fundamentals_pit.py) needed _insert_company() helper added after ADTV map changed to require cvm_companies rows
+
+### Historical Fundamentals Extension -- created 2026-03-07
+- CRITICAL: CVM IPE (/DOC/IPE/) is a DOCUMENT INDEX (metadata + PDF links), NOT financial data
+  - No account codes, no VL_CONTA, no structured financials — do NOT attempt to parse as DFP/ITR
+  - IPE is useful only for company CNPJ/name/CVM code extraction (populate cvm_companies)
+  - Confirmed Path B (Task 05): no shares outstanding in IPE; _propagate_ipe_shares() not implemented
+- CAD dataset (/CAD/DADOS/cad_cia_aberta.csv): single bulk CSV with listing/delisting dates
+- New files: b3_pipeline/cad_downloader.py, cad_parser.py, ipe_downloader.py, ipe_parser.py
+- b3_pipeline/storage.py: SCHEMA_CVM_COMPANIES now has listing_date DATE, delisting_date DATE
+- b3_pipeline/cvm_storage.py: upsert_cad_company_dates() (COALESCE on listing_date, overwrite delisting_date)
+- b3_pipeline/cvm_main.py: include_historical param + Steps 11-13; --include-historical CLI flag
+  - IPE year range: _orig_start_year captured BEFORE start_year defaults to CVM_START_YEAR
+  - Without --start-year, IPE defaults to 2003-2009; with --start-year 2006, IPE covers 2006-2009
+- backtests/core/data.py: load_active_tickers(), _get_all_known_roots(), _apply_delisted_filter()
+  - load_b3_data() and load_b3_hlc_data() get filter_delisted=False param (backward compat)
+- backtests/core/shared_data.py: build_shared_data() gets filter_delisted=False param
+- Tests: 198 total (was 153); new: test_cad_parser.py, test_cad_downloader.py, test_ipe_parser.py,
+  test_ipe_shares.py, test_cvm_main_historical.py, test_survivorship_filter.py
+
 ### MeanRevComposite Strategy -- created 2026-03-02
 - backtests/core/mean_rev_helpers.py: 3 helpers -- compute_regime_filter(), compute_alpha_score(), compute_signal_stability()
 - backtests/strategies/mean_reversion.py: SimpleMeanReversionStrategy (old) + MeanReversionCompositeStrategy (new, name="MeanRevComposite")

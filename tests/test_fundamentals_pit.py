@@ -29,14 +29,23 @@ def mem_conn():
     conn.close()
 
 
-def _insert_price(conn, ticker, date, close):
+def _insert_price(conn, ticker, date, close, volume=0):
     """Helper: insert a minimal prices row."""
     conn.execute(
         """
         INSERT OR REPLACE INTO prices (ticker, isin_code, date, open, high, low, close, volume)
-        VALUES (?, 'UNKNOWN', ?, ?, ?, ?, ?, 0)
+        VALUES (?, 'UNKNOWN', ?, ?, ?, ?, ?, ?)
         """,
-        (ticker, date, close, close, close, close),
+        (ticker, date, close, close, close, close, int(volume)),
+    )
+    conn.commit()
+
+
+def _insert_company(conn, cnpj, ticker):
+    """Helper: insert a cvm_companies row so ADTV ticker map can find it."""
+    conn.execute(
+        "INSERT OR REPLACE INTO cvm_companies (cnpj, ticker) VALUES (?, ?)",
+        (cnpj, ticker),
     )
     conn.commit()
 
@@ -89,6 +98,7 @@ def _insert_pit_row(conn, **kwargs):
 
 def test_materialize_pe_ratio_basic(mem_conn):
     """P/E = (price * shares) / (net_income * 1000) — CVM values are in thousands BRL."""
+    _insert_company(mem_conn, "33000167000101", "PETR")
     _insert_pit_row(
         mem_conn,
         filing_id="PETR_DFP_2023-12-31_1",
@@ -98,7 +108,7 @@ def test_materialize_pe_ratio_basic(mem_conn):
         filing_date="2023-04-15",
         doc_type="DFP",
     )
-    _insert_price(mem_conn, "PETR3", "2023-04-14", 30.0)
+    _insert_price(mem_conn, "PETR3", "2023-04-14", 30.0, volume=10_000)
 
     materialize_valuation_ratios(mem_conn)
 
@@ -116,6 +126,7 @@ def test_materialize_pe_ratio_basic(mem_conn):
 
 def test_materialize_pe_ratio_null_for_loss(mem_conn):
     """net_income <= 0 should result in pe_ratio = NULL."""
+    _insert_company(mem_conn, "33000167000101", "PETR")
     _insert_pit_row(
         mem_conn,
         filing_id="LOSS_DFP_2023-12-31_1",
@@ -125,7 +136,7 @@ def test_materialize_pe_ratio_null_for_loss(mem_conn):
         filing_date="2023-04-15",
         doc_type="DFP",
     )
-    _insert_price(mem_conn, "PETR3", "2023-04-14", 30.0)
+    _insert_price(mem_conn, "PETR3", "2023-04-14", 30.0, volume=10_000)
 
     materialize_valuation_ratios(mem_conn)
 
@@ -141,6 +152,7 @@ def test_materialize_pe_ratio_null_for_loss(mem_conn):
 
 def test_materialize_itr_annualizes_income(mem_conn):
     """Q1 ITR net_income should be annualized (×4) and converted from thousands BRL."""
+    _insert_company(mem_conn, "33000167000101", "PETR")
     _insert_pit_row(
         mem_conn,
         filing_id="PETR_ITR_2023-03-31_1",
@@ -152,7 +164,7 @@ def test_materialize_itr_annualizes_income(mem_conn):
         quarter=1,
         period_end="2023-03-31",
     )
-    _insert_price(mem_conn, "PETR3", "2023-05-15", 30.0)
+    _insert_price(mem_conn, "PETR3", "2023-05-15", 30.0, volume=10_000)
 
     materialize_valuation_ratios(mem_conn)
 
@@ -168,7 +180,8 @@ def test_materialize_itr_annualizes_income(mem_conn):
 # ──────────────────────────────────────────────────────────────────────────────
 
 def test_materialize_uses_nearest_prior_trading_day(mem_conn):
-    """Price lookup should use the latest price ON OR BEFORE filing_date."""
+    """Price lookup should prefer the nearest date; Friday (-1d) beats Monday (+2d)."""
+    _insert_company(mem_conn, "33000167000101", "PETR")
     _insert_pit_row(
         mem_conn,
         filing_id="PRIOR_DFP_2023-12-31_1",
@@ -178,10 +191,10 @@ def test_materialize_uses_nearest_prior_trading_day(mem_conn):
         filing_date="2023-04-15",  # Saturday
         doc_type="DFP",
     )
-    # Friday before: price = 25
-    _insert_price(mem_conn, "PETR3", "2023-04-14", 25.0)
-    # Monday after: price = 35 — should NOT be used
-    _insert_price(mem_conn, "PETR3", "2023-04-17", 35.0)
+    # Friday before: price = 25, distance = 1 day
+    _insert_price(mem_conn, "PETR3", "2023-04-14", 25.0, volume=10_000)
+    # Monday after: price = 35, distance = 2 days — farther, should NOT be preferred
+    _insert_price(mem_conn, "PETR3", "2023-04-17", 35.0, volume=10_000)
 
     materialize_valuation_ratios(mem_conn)
 
@@ -360,3 +373,122 @@ def test_load_fundamentals_pit_forward_fills(tmp_path):
     assert sep_val == pytest.approx(2000.0), (
         f"Expected 2000.0 at 2023-09-30 (forward-fill from Jun filing), got {sep_val}"
     )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Task 03: Fix filing_date >= start bug
+# ──────────────────────────────────────────────────────────────────────────────
+
+def test_load_fundamentals_pit_uses_pre_period_filing_as_seed(tmp_path):
+    """A filing before the backtest start should be forward-filled as the initial seed."""
+    from backtests.core.data import load_fundamentals_pit
+
+    db_path = str(tmp_path / "test.sqlite")
+    conn = sqlite3.connect(db_path)
+    storage.init_db(conn)
+
+    # Insert prices monthly Jan–Jun 2020 for PETR3
+    dates = pd.date_range("2020-01-01", "2020-06-30", freq="ME")
+    for dt in dates:
+        conn.execute(
+            "INSERT OR REPLACE INTO prices (ticker, isin_code, date, open, high, low, close, volume) "
+            "VALUES ('PETR3', 'UNKNOWN', ?, 30, 30, 30, 30, 0)",
+            (dt.strftime("%Y-%m-%d"),),
+        )
+
+    # Filing BEFORE the backtest start
+    conn.execute("""
+        INSERT INTO fundamentals_pit
+          (filing_id, cnpj, ticker, period_end, filing_date, filing_version, doc_type, revenue)
+        VALUES ('pre_f1', '33000167000101', 'PETR', '2019-12-31', '2019-12-31', 1, 'DFP', 5000.0)
+    """)
+    conn.commit()
+    conn.close()
+
+    wide = load_fundamentals_pit(db_path, "revenue", "2020-01-01", "2020-06-30", freq="ME")
+
+    assert "PETR" in wide.columns, "PETR should be a column in the result"
+    # Each month-end should have revenue=5000 forward-filled from the 2019 filing
+    for dt in pd.date_range("2020-01-31", "2020-06-30", freq="ME"):
+        val = wide.loc[dt, "PETR"] if dt in wide.index else None
+        assert val == pytest.approx(5000.0), (
+            f"Expected revenue=5000.0 at {dt.date()} (forward-filled from 2019 filing), got {val}"
+        )
+
+
+def test_load_fundamentals_pit_result_starts_at_start_date(tmp_path):
+    """Returned DataFrame should not contain dates before start."""
+    from backtests.core.data import load_fundamentals_pit
+
+    db_path = str(tmp_path / "test.sqlite")
+    conn = sqlite3.connect(db_path)
+    storage.init_db(conn)
+
+    dates = pd.date_range("2020-01-01", "2020-06-30", freq="ME")
+    for dt in dates:
+        conn.execute(
+            "INSERT OR REPLACE INTO prices (ticker, isin_code, date, open, high, low, close, volume) "
+            "VALUES ('PETR3', 'UNKNOWN', ?, 30, 30, 30, 30, 0)",
+            (dt.strftime("%Y-%m-%d"),),
+        )
+    conn.execute("""
+        INSERT INTO fundamentals_pit
+          (filing_id, cnpj, ticker, period_end, filing_date, filing_version, doc_type, revenue)
+        VALUES ('pre_f1', '33000167000101', 'PETR', '2019-12-31', '2019-12-31', 1, 'DFP', 5000.0)
+    """)
+    conn.commit()
+    conn.close()
+
+    wide = load_fundamentals_pit(db_path, "revenue", "2020-01-01", "2020-06-30", freq="ME")
+
+    assert wide.index.min() >= pd.Timestamp("2020-01-01"), (
+        f"Index min {wide.index.min()} is before start date 2020-01-01"
+    )
+
+
+def test_load_fundamentals_pit_pre_period_overridden_by_in_period_filing(tmp_path):
+    """Pre-period filing seeds, then in-period filing overrides from its date."""
+    from backtests.core.data import load_fundamentals_pit
+
+    db_path = str(tmp_path / "test.sqlite")
+    conn = sqlite3.connect(db_path)
+    storage.init_db(conn)
+
+    dates = pd.date_range("2020-01-01", "2020-06-30", freq="ME")
+    for dt in dates:
+        conn.execute(
+            "INSERT OR REPLACE INTO prices (ticker, isin_code, date, open, high, low, close, volume) "
+            "VALUES ('PETR3', 'UNKNOWN', ?, 30, 30, 30, 30, 0)",
+            (dt.strftime("%Y-%m-%d"),),
+        )
+    # Pre-period filing
+    conn.execute("""
+        INSERT INTO fundamentals_pit
+          (filing_id, cnpj, ticker, period_end, filing_date, filing_version, doc_type, revenue)
+        VALUES ('pre_f1', '33000167000101', 'PETR', '2019-12-31', '2019-12-31', 1, 'DFP', 5000.0)
+    """)
+    # In-period filing
+    conn.execute("""
+        INSERT INTO fundamentals_pit
+          (filing_id, cnpj, ticker, period_end, filing_date, filing_version, doc_type, revenue)
+        VALUES ('in_f2', '33000167000101', 'PETR', '2020-03-31', '2020-03-31', 1, 'ITR', 7000.0)
+    """)
+    conn.commit()
+    conn.close()
+
+    wide = load_fundamentals_pit(db_path, "revenue", "2020-01-01", "2020-06-30", freq="ME")
+
+    assert "PETR" in wide.columns
+    petr = wide["PETR"]
+
+    # Jan and Feb should be seeded from the 2019 filing (5000)
+    jan_val = petr.get(pd.Timestamp("2020-01-31"))
+    feb_val = petr.get(pd.Timestamp("2020-02-29"))
+    assert jan_val == pytest.approx(5000.0), f"Expected 5000.0 at Jan, got {jan_val}"
+    assert feb_val == pytest.approx(5000.0), f"Expected 5000.0 at Feb, got {feb_val}"
+
+    # Mar–Jun should be from in-period filing (7000)
+    mar_val = petr.get(pd.Timestamp("2020-03-31"))
+    jun_val = petr.get(pd.Timestamp("2020-06-30"))
+    assert mar_val == pytest.approx(7000.0), f"Expected 7000.0 at Mar, got {mar_val}"
+    assert jun_val == pytest.approx(7000.0), f"Expected 7000.0 at Jun, got {jun_val}"

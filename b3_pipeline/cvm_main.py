@@ -18,7 +18,7 @@ import argparse
 import logging
 import sqlite3
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
 import pandas as pd
@@ -31,6 +31,40 @@ logging.basicConfig(
     handlers=[logging.StreamHandler(sys.stdout)],
 )
 logger = logging.getLogger(__name__)
+
+
+# ── Shared helper: ADTV ticker map ────────────────────────────────────────────
+
+def _build_adtv_ticker_map(conn: sqlite3.Connection) -> dict:
+    """Build a {cnpj: best_ticker} map using highest average daily trading volume.
+
+    Only considers standard-lot tickers:
+    - Length 5 ending in '3','4','5','6'
+    - Length 6 ending in '11' (units/FII tickers)
+    """
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT
+            c.cnpj,
+            p.ticker,
+            AVG(p.volume / 100.0) AS adtv
+        FROM cvm_companies c
+        JOIN prices p ON SUBSTR(p.ticker, 1, 4) = c.ticker
+        WHERE c.ticker IS NOT NULL
+          AND (
+              (LENGTH(p.ticker) = 5 AND SUBSTR(p.ticker, 5, 1) IN ('3','4','5','6'))
+              OR (LENGTH(p.ticker) = 6 AND SUBSTR(p.ticker, 5, 2) = '11')
+          )
+        GROUP BY c.cnpj, p.ticker
+        ORDER BY c.cnpj, adtv DESC
+    """)
+    rows = cursor.fetchall()
+
+    adtv_map: dict = {}
+    for cnpj, ticker, adtv in rows:
+        if cnpj not in adtv_map:
+            adtv_map[cnpj] = ticker
+    return adtv_map
 
 
 # ── Valuation ratio materialization ───────────────────────────────────────────
@@ -48,6 +82,10 @@ def materialize_valuation_ratios(conn: sqlite3.Connection) -> int:
     DFP: factor = 1 (already annual).
     """
     cursor = conn.cursor()
+
+    # Build {cnpj: best_ticker} map using highest-ADTV standard-lot ticker per company.
+    # This replaces the old is_primary=1 / LIKE fallback logic.
+    adtv_map = _build_adtv_ticker_map(conn)
 
     # Load all rows that have the required data but missing ratios
     cursor.execute("""
@@ -74,45 +112,44 @@ def materialize_valuation_ratios(conn: sqlite3.Connection) -> int:
 
     updates = []
     for _, row in df.iterrows():
-        ticker_root = str(row["ticker"])
-        filing_date = str(row["filing_date"])
         cnpj = str(row["cnpj"])
+        filing_date_str = str(row["filing_date"])
 
-        # Primary path: ISIN-based join via company_isin_map (Fix 3)
-        # Use the primary share class (is_primary=1) for the company.
+        # Lookup best ticker for this company using the ADTV map.
+        best_ticker = adtv_map.get(cnpj)
+        if best_ticker is None:
+            continue
+
+        # ±10 calendar days window (guarantees ≥5 trading days in either direction).
+        filing_date_obj = datetime.strptime(filing_date_str, "%Y-%m-%d").date()
+        window_start = (filing_date_obj - timedelta(days=10)).strftime("%Y-%m-%d")
+        window_end = (filing_date_obj + timedelta(days=10)).strftime("%Y-%m-%d")
+
         cursor.execute(
             """
-            SELECT p.close FROM prices p
-            JOIN company_isin_map m ON p.isin_code = m.isin_code
-            WHERE m.cnpj = ?
-              AND m.is_primary = 1
-              AND p.date <= ?
-            ORDER BY p.date DESC
-            LIMIT 1
+            SELECT date, close FROM prices
+            WHERE ticker = ?
+              AND date >= ?
+              AND date <= ?
+            ORDER BY date
             """,
-            (cnpj, filing_date),
+            (best_ticker, window_start, window_end),
         )
-        price_row = cursor.fetchone()
+        price_candidates = cursor.fetchall()
 
-        # Fallback path: LIKE-based match when company_isin_map has no data for this CNPJ
-        if price_row is None:
-            cursor.execute(
-                """
-                SELECT close FROM prices
-                WHERE ticker LIKE ?
-                  AND date <= ?
-                  AND LENGTH(ticker) = 5
-                  AND SUBSTR(ticker, 5, 1) IN ('3', '4', '5', '6')
-                ORDER BY date DESC
-                LIMIT 1
-                """,
-                (f"{ticker_root}%", filing_date),
-            )
-            price_row = cursor.fetchone()
-
-        if price_row is None:
+        if not price_candidates:
             continue
-        price = price_row[0]
+
+        # Pick closest date to filing_date; tie-break: prefer earlier date (backward preference).
+        def sort_key(row_pair):
+            date_str, _ = row_pair
+            d = datetime.strptime(date_str, "%Y-%m-%d").date()
+            distance = abs((d - filing_date_obj).days)
+            return (distance, date_str)  # earlier date sorts first on tie
+
+        best = sorted(price_candidates, key=sort_key)[0]
+        price = best[1]
+
         if not price or price <= 0:
             continue
 
@@ -170,6 +207,188 @@ def materialize_valuation_ratios(conn: sqlite3.Connection) -> int:
         logger.info(f"Updated valuation ratios for {len(updates):,} rows")
 
     return len(updates)
+
+
+def materialize_fundamentals_monthly(conn: sqlite3.Connection) -> int:
+    """
+    Build (or rebuild) the fundamentals_monthly snapshot table.
+
+    For each (month_end, ticker), stores the most recently known fundamental
+    values as of that date, with valuation ratios recomputed using the actual
+    month-end closing price from prices.
+
+    Returns the number of rows upserted.
+    """
+    import datetime as dt
+
+    cursor = conn.cursor()
+
+    # Check if fundamentals_pit has any rows with a ticker
+    cursor.execute(
+        "SELECT MIN(filing_date) FROM fundamentals_pit WHERE ticker IS NOT NULL"
+    )
+    row = cursor.fetchone()
+    if row is None or row[0] is None:
+        logger.info("fundamentals_pit is empty — nothing to materialize")
+        return 0
+
+    earliest_filing_date = row[0]
+
+    # Build month-end grid from earliest filing to today
+    today = dt.date.today()
+    month_ends = pd.date_range(
+        start=earliest_filing_date, end=today.strftime("%Y-%m-%d"), freq="ME"
+    )
+    if len(month_ends) == 0:
+        return 0
+
+    # Build ADTV ticker map: {cnpj: best_ticker}
+    adtv_map = _build_adtv_ticker_map(conn)
+
+    # Load all fundamentals_pit rows with a matched ticker
+    raw_metrics = [
+        "revenue", "net_income", "ebitda", "total_assets", "equity",
+        "net_debt", "shares_outstanding",
+    ]
+    metrics_sql = ", ".join(f"f.{m}" for m in raw_metrics)
+    cursor.execute(f"""
+        SELECT f.ticker, f.filing_date, {metrics_sql}
+        FROM fundamentals_pit f
+        WHERE f.ticker IS NOT NULL
+        ORDER BY f.ticker, f.filing_date, f.filing_version
+    """)
+    pit_rows = cursor.fetchall()
+    pit_cols = ["ticker"] + ["filing_date"] + raw_metrics
+    pit_df = pd.DataFrame(pit_rows, columns=pit_cols)
+
+    if pit_df.empty:
+        return 0
+
+    pit_df["filing_date"] = pd.to_datetime(pit_df["filing_date"])
+
+    # Pivot each metric to wide format (filing_date x ticker), then forward-fill to month-ends
+    metric_dfs = {}
+    for metric in raw_metrics:
+        sub = pit_df[["filing_date", "ticker", metric]].dropna(subset=[metric])
+        if sub.empty:
+            metric_dfs[metric] = pd.DataFrame(index=month_ends, dtype=float)
+            continue
+        wide = sub.pivot_table(
+            index="filing_date", columns="ticker", values=metric, aggfunc="last"
+        )
+        wide.index = pd.to_datetime(wide.index)
+        wide.columns.name = None
+        extended_idx = wide.index.union(month_ends).sort_values()
+        wide = wide.reindex(extended_idx).ffill()
+        wide = wide.reindex(month_ends)
+        metric_dfs[metric] = wide
+
+    # Get all best_tickers from adtv_map
+    best_tickers = list(set(adtv_map.values()))
+
+    # Load all prices for best_tickers up to last month_end, pivot to wide
+    max_month_end = month_ends[-1].strftime("%Y-%m-%d")
+    if best_tickers:
+        placeholders = ",".join("?" * len(best_tickers))
+        cursor.execute(f"""
+            SELECT ticker, date, close
+            FROM prices
+            WHERE ticker IN ({placeholders})
+              AND date <= ?
+            ORDER BY ticker, date
+        """, best_tickers + [max_month_end])
+        price_rows = cursor.fetchall()
+        price_df = pd.DataFrame(price_rows, columns=["ticker", "date", "close"])
+        if not price_df.empty:
+            price_df["date"] = pd.to_datetime(price_df["date"])
+            price_wide = price_df.pivot_table(
+                index="date", columns="ticker", values="close", aggfunc="last"
+            )
+            price_wide.columns.name = None
+            # Resample to month-end, use last available price on or before each month-end
+            extended_price_idx = price_wide.index.union(month_ends).sort_values()
+            price_wide = price_wide.reindex(extended_price_idx).ffill()
+            price_wide = price_wide.reindex(month_ends)
+        else:
+            price_wide = pd.DataFrame(index=month_ends, dtype=float)
+    else:
+        price_wide = pd.DataFrame(index=month_ends, dtype=float)
+
+    # Build ticker_root -> best_ticker map via cvm_companies cnpj -> root -> adtv_map
+    cursor.execute("SELECT cnpj, ticker FROM cvm_companies WHERE ticker IS NOT NULL")
+    cnpj_to_root = {row[0]: row[1] for row in cursor.fetchall()}
+    root_to_best: dict = {}
+    for cnpj, best_tkr in adtv_map.items():
+        root = cnpj_to_root.get(cnpj)
+        if root:
+            root_to_best[root] = best_tkr
+
+    if not metric_dfs:
+        cvm_storage.truncate_fundamentals_monthly(conn)
+        return 0
+
+    # ── Vectorized build: stack each metric into (month_end, ticker_root) series ──
+    stacked = []
+    for metric, mdf in metric_dfs.items():
+        s = mdf.stack()  # drops NaN; index=(month_end, ticker_root)
+        s.name = metric
+        stacked.append(s)
+
+    combined = pd.concat(stacked, axis=1)  # outer join keeps any pair with ≥1 metric
+    combined.index.names = ["month_end", "ticker_root"]
+    combined = combined.reset_index()
+
+    # Ensure all raw metric columns exist (some may be absent if no data)
+    for metric in ["revenue", "net_income", "ebitda", "total_assets", "equity", "net_debt", "shares_outstanding"]:
+        if metric not in combined.columns:
+            combined[metric] = float("nan")
+
+    combined["ticker"] = combined["ticker_root"].map(root_to_best).fillna(combined["ticker_root"])
+
+    # ── Map month-end prices from price_wide (best_ticker columns) to ticker_root ──
+    if not price_wide.empty:
+        best_to_root = {v: k for k, v in root_to_best.items()}
+        price_by_root = price_wide.rename(
+            columns={bt: best_to_root.get(bt, bt) for bt in price_wide.columns}
+        )
+        price_by_root.index.name = "month_end"
+        price_stacked = price_by_root.stack()
+        price_stacked.name = "price"
+        price_stacked.index.names = ["month_end", "ticker_root"]
+        combined = combined.merge(price_stacked.reset_index(), on=["month_end", "ticker_root"], how="left")
+    else:
+        combined["price"] = float("nan")
+
+    # ── Vectorized ratio computation ──────────────────────────────────────────────
+    THOUSANDS = 1_000.0
+    price = combined["price"]
+    shares = combined["shares_outstanding"]
+    valid = (price > 0) & (shares > 0) & price.notna() & shares.notna()
+    market_cap = price * shares
+
+    ni_brl = combined["net_income"] * THOUSANDS
+    combined["pe_ratio"] = (market_cap / ni_brl).where(valid & (ni_brl > 0))
+
+    eq_brl = combined["equity"] * THOUSANDS
+    combined["pb_ratio"] = (market_cap / eq_brl).where(valid & (eq_brl > 0))
+
+    ebitda_brl = combined["ebitda"] * THOUSANDS
+    nd_brl = combined["net_debt"].fillna(0) * THOUSANDS
+    ev = market_cap + nd_brl
+    combined["ev_ebitda"] = (ev / ebitda_brl).where(valid & (ebitda_brl > 0))
+
+    combined["month_end"] = combined["month_end"].dt.strftime("%Y-%m-%d")
+
+    output_cols = [
+        "month_end", "ticker", "revenue", "net_income", "ebitda", "total_assets",
+        "equity", "net_debt", "shares_outstanding", "pe_ratio", "pb_ratio", "ev_ebitda",
+    ]
+    result_df = combined[output_cols].copy()
+
+    cvm_storage.truncate_fundamentals_monthly(conn)
+    n = cvm_storage.upsert_fundamentals_monthly(conn, result_df)
+    logger.info(f"Materialized {n:,} fundamentals_monthly rows")
+    return n
 
 
 def _propagate_fre_shares(conn: sqlite3.Connection) -> None:
@@ -319,6 +538,8 @@ def run_fundamentals_pipeline(
     force_download: bool = False,
     skip_ratios: bool = False,
     skip_ticker_fetch: bool = False,
+    skip_monthly: bool = False,
+    include_historical: bool = False,
 ) -> None:
     """
     Execute the complete CVM fundamentals data pipeline.
@@ -336,6 +557,10 @@ def run_fundamentals_pipeline(
      8. Parse and upsert FRE filings + propagate shares_outstanding
      9. Materialize valuation ratios (unless skip_ratios)
     10. Log summary statistics
+    [When include_historical=True:]
+    11. Download and parse CAD company register (listing/delisting dates)
+    12. Download and process IPE document index (pre-2010 company data)
+    13. Re-propagate tickers and re-run ratio/monthly materialization for IPE rows
     """
     start_time = datetime.now()
     logger.info("=" * 60)
@@ -345,6 +570,7 @@ def run_fundamentals_pipeline(
     logger.info(f"Rebuild mode: {rebuild}")
     logger.info(f"Skip ratios: {skip_ratios}")
     logger.info(f"Skip ticker fetch: {skip_ticker_fetch}")
+    logger.info(f"Skip monthly: {skip_monthly}")
 
     conn = storage.get_connection()
 
@@ -357,6 +583,7 @@ def run_fundamentals_pipeline(
         # Step 2
         logger.info("")
         logger.info("Step 2/10: Determining year range...")
+        _orig_start_year = start_year  # preserve before default override (needed for IPE range)
         if start_year is None:
             start_year = config.CVM_START_YEAR
         if end_year is None:
@@ -506,6 +733,16 @@ def run_fundamentals_pipeline(
             logger.info("")
             logger.info("Step 9/10: Skipping valuation ratio computation (--skip-ratios)")
 
+        # Step 9b
+        if not skip_monthly:
+            logger.info("")
+            logger.info("Step 9b/10: Materializing monthly fundamentals snapshot...")
+            monthly_rows = materialize_fundamentals_monthly(conn)
+            logger.info(f"Monthly snapshot: {monthly_rows:,} rows materialized")
+        else:
+            logger.info("")
+            logger.info("Step 9b/10: Skipping monthly snapshot (--skip-monthly)")
+
         # Step 10
         logger.info("")
         logger.info("Step 10/10: Summary statistics...")
@@ -513,6 +750,112 @@ def run_fundamentals_pipeline(
         logger.info(f"Total filings: {stats['total_cvm_filings']:,}")
         logger.info(f"Companies with CVM data: {stats['total_cvm_companies']:,}")
         logger.info(f"Fundamentals rows: {stats['total_fundamentals_pit']:,}")
+
+        # ── Historical extension (Steps 11-13) ────────────────────────────────
+        if include_historical:
+            from . import cad_downloader, cad_parser, ipe_downloader, ipe_parser  # noqa: PLC0415
+
+            IPE_END_YEAR = 2009  # IPE predates DFP/ITR which starts 2010
+            # Use the original user-supplied start_year (not the CVM_START_YEAR default)
+            # so that --include-historical with no --start-year defaults to 2003, not 2010.
+            user_start = _orig_start_year  # captured before Step 2 override
+            ipe_start = max(2003, user_start or 2003)
+            ipe_end = min(IPE_END_YEAR, end_year or IPE_END_YEAR)
+
+            # Step 11: CAD download and company date upsert
+            logger.info("")
+            logger.info("Step 11/13: Downloading and parsing CVM CAD company register...")
+            cad_path = cad_downloader.download_cad_file(force=force_download)
+            if cad_path is None:
+                logger.warning("CAD download failed — skipping company date upsert")
+            else:
+                cad_df = cad_parser.parse_cad_file(cad_path)
+                summary = cad_parser.extract_cad_summary(cad_df)
+                logger.info(
+                    f"CAD: {summary['total']:,} companies "
+                    f"({summary['active']:,} active, {summary['delisted']:,} delisted, "
+                    f"{summary['with_listing_date']:,} with listing date)"
+                )
+                cad_rows = cvm_storage.upsert_cad_company_dates(conn, cad_df)
+                logger.info(f"Upserted {cad_rows:,} CAD company date rows")
+                # Refresh ticker map after CAD adds new CNPJ rows
+                if not skip_ticker_fetch:
+                    logger.info("Re-fetching ticker mappings after CAD upsert...")
+                    _fetch_ticker_mappings(conn)
+                cnpj_ticker_map = cvm_storage.get_cvm_company_map(conn)
+                logger.info(f"Refreshed CNPJ → ticker map: {len(cnpj_ticker_map):,} companies")
+
+            # Step 12: IPE download, index, and parse
+            logger.info("")
+            logger.info(f"Step 12/13: Downloading and processing IPE historical filings ({ipe_start}-{ipe_end})...")
+            total_ipe_filings = 0
+            for year in range(ipe_start, ipe_end + 1):
+                try:
+                    ipe_path = ipe_downloader.download_ipe_file(year, force=force_download)
+                    if ipe_path is None:
+                        logger.warning(f"IPE {year}: download failed — skipping")
+                        continue
+                    # Index companies from IPE
+                    ipe_companies = ipe_parser.extract_ipe_company_index(ipe_path)
+                    if ipe_companies:
+                        cvm_storage.bulk_upsert_companies_index(conn, ipe_companies)
+                        logger.debug(f"IPE {year}: indexed {len(ipe_companies)} companies")
+                    # Parse IPE filings and fundamentals (fundamentals_df will be empty)
+                    filings_df, fund_df = ipe_parser.parse_ipe_zip(ipe_path, cnpj_ticker_map)
+                    if not filings_df.empty:
+                        for _, row in filings_df.iterrows():
+                            try:
+                                cvm_storage.upsert_cvm_filing(
+                                    conn, row["filing_id"], row["cnpj"], row["doc_type"],
+                                    row["period_end"], row["filing_date"],
+                                    int(row["filing_version"]),
+                                    row.get("fiscal_year"), row.get("quarter"),
+                                    row.get("source_file"),
+                                )
+                            except Exception as upsert_err:
+                                logger.warning(f"Failed to upsert IPE filing {row.get('filing_id', '?')}: {upsert_err}")
+                        total_ipe_filings += len(filings_df)
+                    if not fund_df.empty:
+                        cvm_storage.upsert_fundamentals_pit(conn, fund_df)
+                except Exception as e:
+                    logger.error(f"IPE {year}: failed to process — {e}")
+            logger.info(f"IPE total filings processed: {total_ipe_filings:,}")
+
+            # Propagate tickers into any new IPE fundamentals_pit rows
+            ticker_rows = cvm_storage.populate_tickers_from_cvm_companies(conn)
+            logger.info(f"Ticker propagation (post-IPE): {ticker_rows:,} rows updated")
+
+            # Step 13: Re-run ratio materialization and monthly snapshot for IPE rows
+            logger.info("")
+            logger.info("Step 13/13: Re-propagating shares and recomputing ratios for IPE rows...")
+            # Note: _propagate_ipe_shares() is not implemented (Path B from Task 05).
+            # IPE has no capital structure data — shares_outstanding stays NULL for IPE rows.
+            if not skip_ratios:
+                updated = materialize_valuation_ratios(conn)
+                logger.info(f"Valuation ratios (post-IPE): {updated:,} rows updated")
+            if not skip_monthly:
+                monthly_rows = materialize_fundamentals_monthly(conn)
+                logger.info(f"Monthly snapshot (post-IPE): {monthly_rows:,} rows materialized")
+
+            # Log IPE coverage stats
+            try:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT
+                        COUNT(*) as total_ipe,
+                        COUNT(shares_outstanding) as ipe_with_shares,
+                        COUNT(pe_ratio) as ipe_with_pe
+                    FROM fundamentals_pit
+                    WHERE doc_type = 'IPE'
+                """)
+                ipe_row = cursor.fetchone()
+                if ipe_row:
+                    logger.info(
+                        f"IPE coverage: {ipe_row[0]:,} total rows, "
+                        f"{ipe_row[1]:,} with shares, {ipe_row[2]:,} with P/E"
+                    )
+            except Exception:
+                pass
 
         end_time = datetime.now()
         duration = end_time - start_time
@@ -565,6 +908,14 @@ Examples:
         help="Skip fetching ticker mappings from B3 API (use when tickers are already populated)",
     )
     arg_parser.add_argument(
+        "--skip-monthly", action="store_true",
+        help="Skip materializing the fundamentals_monthly snapshot table",
+    )
+    arg_parser.add_argument(
+        "--include-historical", action="store_true",
+        help="Download and process IPE (pre-2010) and CAD company register data",
+    )
+    arg_parser.add_argument(
         "--verbose", "-v", action="store_true",
         help="Enable debug logging",
     )
@@ -580,6 +931,8 @@ Examples:
         force_download=args.force_download,
         skip_ratios=args.skip_ratios,
         skip_ticker_fetch=args.skip_ticker_fetch,
+        skip_monthly=args.skip_monthly,
+        include_historical=args.include_historical,
     )
 
 

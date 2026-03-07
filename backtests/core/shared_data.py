@@ -14,7 +14,7 @@ import pandas as pd
 
 from backtests.core.data import (
     load_b3_data, load_b3_hlc_data, download_benchmark, download_cdi_daily,
-    load_all_fundamentals,
+    load_all_fundamentals, load_all_fundamentals_monthly,
 )
 from backtests.core.mean_rev_helpers import compute_mean_rev_features
 
@@ -119,6 +119,7 @@ def build_shared_data(
     end: str,
     freq: str = "ME",
     include_fundamentals: bool = False,
+    filter_delisted: bool = False,
 ) -> dict:
     """
     Load and precompute all shared DataFrames needed by strategy plugins.
@@ -128,6 +129,8 @@ def build_shared_data(
         start:    Start date string, e.g. '2005-01-01'.
         end:      End date string, e.g. '2025-12-31' or 'today'.
         freq:     Resampling frequency (default 'ME' = month-end).
+        filter_delisted: If True, drop tickers that were delisted before `start`.
+                         Default False — no change to existing behavior.
 
     Returns:
         Dict containing all precomputed DataFrames and Series.
@@ -136,7 +139,7 @@ def build_shared_data(
 
     # ── 1. Load raw data ──────────────────────────────────────────────────────
     adj_close, split_adj_high, split_adj_low, split_adj_close, close_px, fin_vol = (
-        load_b3_hlc_data(db_path, start, end)
+        load_b3_hlc_data(db_path, start, end, filter_delisted=filter_delisted)
     )
     cdi_daily = download_cdi_daily(start, end)
     ibov_px = download_benchmark("^BVSP", start, end)
@@ -269,6 +272,8 @@ def build_shared_data(
         "cdi_cumul_63d": cdi_cumul_63d,
         "ibov_vol_20d_daily": ibov_vol_20d_daily,
         "ibov_ret_20d_daily": ibov_ret_20d_daily,
+        # ── survivorship bias filter flag ─────────────────────────────────────
+        "filter_delisted": filter_delisted,
     }
 
     # ── Optional: CVM fundamentals (PIT-aligned to rebalance calendar) ────────
@@ -281,5 +286,42 @@ def build_shared_data(
         for metric, df_fund in fundamentals.items():
             shared["f_" + metric] = df_fund
         logger.info(f"Added {len(fundamentals)} fundamentals DataFrames with 'f_' prefix")
+
+        # ── Monthly snapshot — f_*_m (raw financials) and f_*_dyn (ratios) ────
+        # Reads from fundamentals_monthly (pre-materialized by pipeline step 9b).
+        # Ratio keys get '_dyn' suffix; raw financial keys get '_m' suffix.
+        # Gracefully degrades if the table is empty or doesn't exist yet.
+        try:
+            fundamentals_monthly = load_all_fundamentals_monthly(db_path, start, end)
+            rebal_dates = ret.index  # use the strategy's rebalance calendar
+            _ratio_cols = {"pe_ratio", "pb_ratio", "ev_ebitda"}
+            for metric, df_m in fundamentals_monthly.items():
+                suffix = "_dyn" if metric in _ratio_cols else "_m"
+                key = "f_" + metric + suffix
+                if df_m.empty:
+                    shared[key] = pd.DataFrame(index=rebal_dates, dtype=float)
+                else:
+                    # Reindex monthly snapshot to the strategy's rebalance calendar
+                    extended_idx = df_m.index.union(rebal_dates).sort_values()
+                    df_aligned = df_m.reindex(extended_idx).ffill().reindex(rebal_dates)
+                    df_aligned = df_aligned.loc[df_aligned.index >= pd.Timestamp(start)]
+                    shared[key] = df_aligned
+            logger.info(
+                f"Added {len(fundamentals_monthly)} monthly fundamentals DataFrames "
+                f"with '_m'/'_dyn' suffix"
+            )
+        except Exception as e:
+            logger.warning(
+                f"Failed to load fundamentals_monthly (table may not exist or be empty): {e}. "
+                f"Adding empty DataFrames for all _m/_dyn keys."
+            )
+            rebal_dates = ret.index
+            _all_monthly_keys = [
+                "f_revenue_m", "f_net_income_m", "f_ebitda_m", "f_equity_m",
+                "f_total_assets_m", "f_net_debt_m", "f_shares_outstanding_m",
+                "f_pe_ratio_dyn", "f_pb_ratio_dyn", "f_ev_ebitda_dyn",
+            ]
+            for key in _all_monthly_keys:
+                shared[key] = pd.DataFrame(index=rebal_dates, dtype=float)
 
     return shared

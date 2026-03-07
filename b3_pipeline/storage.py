@@ -105,6 +105,8 @@ CREATE TABLE IF NOT EXISTS cvm_companies (
     company_name TEXT,
     cvm_code TEXT,
     b3_trading_name TEXT,
+    listing_date DATE,
+    delisting_date DATE,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 """
@@ -169,6 +171,27 @@ INDEX_COMPANY_ISIN_MAP_ISIN = "CREATE INDEX IF NOT EXISTS idx_company_isin_map_i
 INDEX_COMPANY_ISIN_MAP_TICKER = "CREATE INDEX IF NOT EXISTS idx_company_isin_map_ticker ON company_isin_map(ticker);"
 INDEX_COMPANY_ISIN_MAP_PRIMARY = "CREATE INDEX IF NOT EXISTS idx_company_isin_map_primary ON company_isin_map(cnpj, is_primary);"
 
+SCHEMA_FUNDAMENTALS_MONTHLY = """
+CREATE TABLE IF NOT EXISTS fundamentals_monthly (
+    month_end DATE NOT NULL,
+    ticker TEXT NOT NULL,
+    revenue REAL,
+    net_income REAL,
+    ebitda REAL,
+    total_assets REAL,
+    equity REAL,
+    net_debt REAL,
+    shares_outstanding REAL,
+    pe_ratio REAL,
+    pb_ratio REAL,
+    ev_ebitda REAL,
+    PRIMARY KEY (month_end, ticker)
+);
+"""
+
+INDEX_FUNDAMENTALS_MONTHLY_TICKER = "CREATE INDEX IF NOT EXISTS idx_fundamentals_monthly_ticker ON fundamentals_monthly(ticker);"
+INDEX_FUNDAMENTALS_MONTHLY_MONTH_END = "CREATE INDEX IF NOT EXISTS idx_fundamentals_monthly_month_end ON fundamentals_monthly(month_end);"
+
 INDEX_CVM_COMPANIES_TICKER = "CREATE INDEX IF NOT EXISTS idx_cvm_companies_ticker ON cvm_companies(ticker);"
 INDEX_CVM_FILINGS_CNPJ = "CREATE INDEX IF NOT EXISTS idx_cvm_filings_cnpj ON cvm_filings(cnpj);"
 INDEX_CVM_FILINGS_PERIOD = "CREATE INDEX IF NOT EXISTS idx_cvm_filings_period ON cvm_filings(period_end);"
@@ -196,6 +219,8 @@ def init_db(conn: sqlite3.Connection, rebuild: bool = False) -> None:
 
     if rebuild:
         logger.info("Dropping existing tables...")
+        # Drop fundamentals_monthly first (depends on nothing but should be cleaned)
+        cursor.execute("DROP TABLE IF EXISTS fundamentals_monthly")
         # Drop CVM fundamentals tables first (before existing tables)
         cursor.execute("DROP TABLE IF EXISTS fundamentals_pit")
         cursor.execute("DROP TABLE IF EXISTS cvm_filings")
@@ -235,6 +260,10 @@ def init_db(conn: sqlite3.Connection, rebuild: bool = False) -> None:
     cursor.execute(INDEX_COMPANY_ISIN_MAP_ISIN)
     cursor.execute(INDEX_COMPANY_ISIN_MAP_TICKER)
     cursor.execute(INDEX_COMPANY_ISIN_MAP_PRIMARY)
+    # fundamentals_monthly snapshot table (added after CVM tables)
+    cursor.execute(SCHEMA_FUNDAMENTALS_MONTHLY)
+    cursor.execute(INDEX_FUNDAMENTALS_MONTHLY_TICKER)
+    cursor.execute(INDEX_FUNDAMENTALS_MONTHLY_MONTH_END)
 
     # Migrate existing databases: add new columns if they don't exist
     _migrate_schema(conn)
@@ -257,8 +286,15 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         )
 
     # CVM fundamentals tables are created by CREATE TABLE IF NOT EXISTS above.
-    # No explicit migration needed — they are created fresh on first run.
-    # Future migrations for these tables should be added here as ALTER TABLE statements.
+    # Add listing_date / delisting_date to cvm_companies if missing (Task 03 migration).
+    cursor.execute("PRAGMA table_info(cvm_companies)")
+    cvm_companies_cols = {row[1] for row in cursor.fetchall()}
+    if "listing_date" not in cvm_companies_cols:
+        logger.info("Migrating: adding listing_date column to cvm_companies")
+        cursor.execute("ALTER TABLE cvm_companies ADD COLUMN listing_date DATE")
+    if "delisting_date" not in cvm_companies_cols:
+        logger.info("Migrating: adding delisting_date column to cvm_companies")
+        cursor.execute("ALTER TABLE cvm_companies ADD COLUMN delisting_date DATE")
 
     # company_isin_map: created via SCHEMA_COMPANY_ISIN_MAP above (CREATE TABLE IF NOT EXISTS).
     # Ensure indexes exist for existing DBs that were created before this table was added.
@@ -266,6 +302,12 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
     cursor.execute(INDEX_COMPANY_ISIN_MAP_ISIN)
     cursor.execute(INDEX_COMPANY_ISIN_MAP_TICKER)
     cursor.execute(INDEX_COMPANY_ISIN_MAP_PRIMARY)
+
+    # fundamentals_monthly: created via SCHEMA_FUNDAMENTALS_MONTHLY (CREATE TABLE IF NOT EXISTS).
+    # Safe to call on existing DBs that already have the table.
+    cursor.execute(SCHEMA_FUNDAMENTALS_MONTHLY)
+    cursor.execute(INDEX_FUNDAMENTALS_MONTHLY_TICKER)
+    cursor.execute(INDEX_FUNDAMENTALS_MONTHLY_MONTH_END)
 
 
 def _prepare_date(val) -> Optional[str]:
