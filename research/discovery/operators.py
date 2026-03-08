@@ -7,17 +7,48 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+try:
+    import cotahist_rs as _rs
+    _RUST_OPS = True
+except ImportError:
+    _RUST_OPS = False
+
+
+def _wide_to_batch(df: pd.DataFrame):
+    """Convert a wide DataFrame (DatetimeIndex × tickers) to a pyarrow RecordBatch."""
+    import pyarrow as pa
+    tmp = df.reset_index()
+    # The reset_index column name may be None or the index name; rename to "date"
+    tmp = tmp.rename(columns={tmp.columns[0]: "date"})
+    tmp["date"] = tmp["date"].astype(str)
+    return pa.RecordBatch.from_pandas(tmp, preserve_index=False)
+
+
+def _batch_to_wide(batch, original_df: pd.DataFrame) -> pd.DataFrame:
+    """Convert a RecordBatch back to a wide DataFrame, restoring the original index."""
+    result = batch.to_pandas().set_index("date")
+    result.index = pd.to_datetime(result.index)
+    return result.reindex(index=original_df.index, columns=original_df.columns)
+
 
 # ── Unary operators ──────────────────────────────────────────────────────────
 
 
 def op_rank(df: pd.DataFrame) -> pd.DataFrame:
     """Cross-sectional percentile rank per date (axis=1)."""
+    if _RUST_OPS and df.shape[0] * df.shape[1] > 10_000:
+        batch = _wide_to_batch(df)
+        result_batch = _rs.cross_sectional_rank(batch)
+        return _batch_to_wide(result_batch, df)
     return df.rank(axis=1, pct=True)
 
 
 def op_zscore(df: pd.DataFrame) -> pd.DataFrame:
     """Cross-sectional z-score per date (axis=1)."""
+    if _RUST_OPS and df.shape[0] * df.shape[1] > 10_000:
+        batch = _wide_to_batch(df)
+        result_batch = _rs.cross_sectional_zscore(batch)
+        return _batch_to_wide(result_batch, df)
     mean = df.mean(axis=1)
     std = df.std(axis=1)
     # Broadcast: subtract row mean, divide by row std
