@@ -132,7 +132,7 @@
 - New crate: `b3_pipeline_rs/` (Cargo.toml, pyproject.toml, src/{lib.rs, parser.rs, schema.rs})
 - Modified: `b3_pipeline/parser.py` (delegates to Rust), `tests/test_parser_fatcot.py` (stale imports removed)
 - New: Makefile, README section, .gitignore entry, maturin in requirements.txt
-- **CRITICAL BLOCKER**: pyo3=0.20 + pyo3-arrow=0.5 version conflict (pyo3-arrow 0.5 needs pyo3 0.22). Crate does not compile.
+- **FIXED**: pyo3 upgraded to 0.22 (was 0.20) -- version conflict with pyo3-arrow=0.5 resolved.
 - `encoding_rs` dependency declared but never used in source code
 - `from . import config` imported but unused in new parser.py
 - `test_invalid_date_skipped` is a no-op test (asserts nothing)

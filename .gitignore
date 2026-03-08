@@ -11,3 +11,4 @@ results/
 tasks/
 .claude/auth.local.md
 b3_pipeline_rs/target/
+research/feature_store/
