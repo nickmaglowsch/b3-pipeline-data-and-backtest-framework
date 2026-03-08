@@ -60,9 +60,6 @@ def _insert_pit_row(conn, **kwargs):
         "equity": None,
         "net_debt": None,
         "shares_outstanding": None,
-        "pe_ratio": None,
-        "pb_ratio": None,
-        "ev_ebitda": None,
     }
     defaults.update(kwargs)
     conn.execute(
@@ -71,12 +68,12 @@ def _insert_pit_row(conn, **kwargs):
           (filing_id, cnpj, ticker, period_end, filing_date, filing_version,
            doc_type, fiscal_year, quarter,
            revenue, net_income, ebitda, total_assets, equity, net_debt,
-           shares_outstanding, pe_ratio, pb_ratio, ev_ebitda)
+           shares_outstanding)
         VALUES
           (:filing_id, :cnpj, :ticker, :period_end, :filing_date, :filing_version,
            :doc_type, :fiscal_year, :quarter,
            :revenue, :net_income, :ebitda, :total_assets, :equity, :net_debt,
-           :shares_outstanding, :pe_ratio, :pb_ratio, :ev_ebitda)
+           :shares_outstanding)
         """,
         defaults,
     )
@@ -86,13 +83,12 @@ def _insert_pit_row(conn, **kwargs):
 # ── Task 01: Schema tests ──────────────────────────────────────────────────────
 
 def test_fundamentals_monthly_table_exists(mem_conn):
-    """init_db() should create fundamentals_monthly with all required columns."""
+    """init_db() should create fundamentals_monthly with raw financial columns (no ratio columns)."""
     cursor = mem_conn.cursor()
     cursor.execute("PRAGMA table_info(fundamentals_monthly)")
     cols = {row[1] for row in cursor.fetchall()}
     assert "month_end" in cols
     assert "ticker" in cols
-    assert "pe_ratio" in cols
     assert "revenue" in cols
     assert "net_income" in cols
     assert "ebitda" in cols
@@ -100,16 +96,18 @@ def test_fundamentals_monthly_table_exists(mem_conn):
     assert "equity" in cols
     assert "net_debt" in cols
     assert "shares_outstanding" in cols
-    assert "pb_ratio" in cols
-    assert "ev_ebitda" in cols
+    # Ratio columns are intentionally excluded — computed dynamically at query time
+    assert "pe_ratio" not in cols
+    assert "pb_ratio" not in cols
+    assert "ev_ebitda" not in cols
 
 
 def test_fundamentals_monthly_primary_key(mem_conn):
     """INSERT OR REPLACE with same (month_end, ticker) should keep row count at 1."""
     for _ in range(2):
         mem_conn.execute(
-            "INSERT OR REPLACE INTO fundamentals_monthly (month_end, ticker, pe_ratio) VALUES (?,?,?)",
-            ("2023-01-31", "PETR", 15.0),
+            "INSERT OR REPLACE INTO fundamentals_monthly (month_end, ticker, net_income) VALUES (?,?,?)",
+            ("2023-01-31", "PETR", 1000.0),
         )
         mem_conn.commit()
     cursor = mem_conn.cursor()
@@ -120,8 +118,8 @@ def test_fundamentals_monthly_primary_key(mem_conn):
 def test_upsert_fundamentals_monthly_inserts(mem_conn):
     """upsert_fundamentals_monthly should insert all rows from a DataFrame."""
     df = pd.DataFrame([
-        {"month_end": "2023-01-31", "ticker": "PETR", "pe_ratio": 10.0},
-        {"month_end": "2023-01-31", "ticker": "VALE", "pe_ratio": 8.0},
+        {"month_end": "2023-01-31", "ticker": "PETR", "net_income": 1000.0},
+        {"month_end": "2023-01-31", "ticker": "VALE", "net_income": 2000.0},
     ])
     cvm_storage.upsert_fundamentals_monthly(mem_conn, df)
     cursor = mem_conn.cursor()
@@ -130,22 +128,22 @@ def test_upsert_fundamentals_monthly_inserts(mem_conn):
 
 
 def test_upsert_fundamentals_monthly_replaces(mem_conn):
-    """Second upsert with same key should replace pe_ratio."""
-    df1 = pd.DataFrame([{"month_end": "2023-01-31", "ticker": "PETR", "pe_ratio": 10.0}])
-    df2 = pd.DataFrame([{"month_end": "2023-01-31", "ticker": "PETR", "pe_ratio": 20.0}])
+    """Second upsert with same key should replace net_income."""
+    df1 = pd.DataFrame([{"month_end": "2023-01-31", "ticker": "PETR", "net_income": 1000.0}])
+    df2 = pd.DataFrame([{"month_end": "2023-01-31", "ticker": "PETR", "net_income": 2000.0}])
     cvm_storage.upsert_fundamentals_monthly(mem_conn, df1)
     cvm_storage.upsert_fundamentals_monthly(mem_conn, df2)
     cursor = mem_conn.cursor()
-    cursor.execute("SELECT pe_ratio FROM fundamentals_monthly WHERE month_end='2023-01-31' AND ticker='PETR'")
-    assert cursor.fetchone()[0] == pytest.approx(20.0)
+    cursor.execute("SELECT net_income FROM fundamentals_monthly WHERE month_end='2023-01-31' AND ticker='PETR'")
+    assert cursor.fetchone()[0] == pytest.approx(2000.0)
 
 
 def test_truncate_fundamentals_monthly(mem_conn):
     """truncate_fundamentals_monthly should delete all rows."""
     for i, ticker in enumerate(["PETR", "VALE", "ITUB"]):
         mem_conn.execute(
-            "INSERT OR REPLACE INTO fundamentals_monthly (month_end, ticker, pe_ratio) VALUES (?,?,?)",
-            ("2023-01-31", ticker, float(i + 5)),
+            "INSERT OR REPLACE INTO fundamentals_monthly (month_end, ticker, net_income) VALUES (?,?,?)",
+            ("2023-01-31", ticker, float((i + 1) * 1000)),
         )
     mem_conn.commit()
     cvm_storage.truncate_fundamentals_monthly(mem_conn)
@@ -169,8 +167,8 @@ def test_rebuild_drops_fundamentals_monthly(tmp_path):
     conn = sqlite3.connect(db_path)
     storage.init_db(conn)
     conn.execute(
-        "INSERT OR REPLACE INTO fundamentals_monthly (month_end, ticker, pe_ratio) VALUES (?,?,?)",
-        ("2023-01-31", "PETR", 10.0),
+        "INSERT OR REPLACE INTO fundamentals_monthly (month_end, ticker, net_income) VALUES (?,?,?)",
+        ("2023-01-31", "PETR", 1000.0),
     )
     conn.commit()
     storage.init_db(conn, rebuild=True)
@@ -192,7 +190,11 @@ def _setup_petr_company(conn):
 
 
 def test_materialize_monthly_basic_snapshot(mem_conn):
-    """materialize_fundamentals_monthly computes correct pe_ratio at each month-end."""
+    """materialize_fundamentals_monthly writes raw net_income at each month-end.
+
+    When no prices exist to build an ADTV map, the ticker in fundamentals_monthly
+    is the root ticker from fundamentals_pit (e.g. 'PETR'), not the suffixed form.
+    """
     from b3_pipeline.cvm_main import materialize_fundamentals_monthly
 
     _setup_petr_company(mem_conn)
@@ -207,56 +209,54 @@ def test_materialize_monthly_basic_snapshot(mem_conn):
         equity=5000.0,
         shares_outstanding=10_000_000.0,
     )
-    _insert_price(mem_conn, "PETR3", "2023-01-31", 30.0, volume=100_000)
-    _insert_price(mem_conn, "PETR3", "2023-02-28", 32.0, volume=100_000)
-    _insert_price(mem_conn, "PETR3", "2023-03-31", 35.0, volume=100_000)
 
     materialize_fundamentals_monthly(mem_conn)
 
     cursor = mem_conn.cursor()
+    # Without prices, ADTV map is empty → ticker falls back to root "PETR"
     cursor.execute(
-        "SELECT pe_ratio FROM fundamentals_monthly WHERE month_end=? AND ticker=?",
-        ("2023-03-31", "PETR3"),
+        "SELECT net_income FROM fundamentals_monthly WHERE ticker=? ORDER BY month_end LIMIT 1",
+        ("PETR",),
     )
     row = cursor.fetchone()
-    assert row is not None, "Expected a row for PETR3 at 2023-03-31"
-    # pe_ratio = (35 * 10_000_000) / (1000 * 1000) = 350.0
-    assert row[0] == pytest.approx(350.0, rel=1e-3), f"Expected pe_ratio 350.0, got {row[0]}"
+    assert row is not None, "Expected a row for PETR in fundamentals_monthly"
+    assert row[0] == pytest.approx(1000.0, rel=1e-3), f"Expected net_income 1000.0, got {row[0]}"
 
 
 def test_materialize_monthly_forward_fills_financials(mem_conn):
     """net_income at later month-ends is forward-filled from the January filing."""
     from b3_pipeline.cvm_main import materialize_fundamentals_monthly
+    import datetime as dt
 
     _setup_petr_company(mem_conn)
+    filing_date = "2023-01-15"
     _insert_pit_row(
         mem_conn,
         filing_id="PETR_DFP_2022-12-31_1",
         cnpj="33000167000101",
         ticker="PETR",
-        filing_date="2023-01-31",
+        filing_date=filing_date,
         period_end="2022-12-31",
         net_income=1000.0,
         shares_outstanding=10_000_000.0,
     )
-    _insert_price(mem_conn, "PETR3", "2023-01-31", 30.0, volume=100_000)
-    _insert_price(mem_conn, "PETR3", "2023-02-28", 32.0, volume=100_000)
-    _insert_price(mem_conn, "PETR3", "2023-03-31", 35.0, volume=100_000)
 
     materialize_fundamentals_monthly(mem_conn)
 
     cursor = mem_conn.cursor()
+    # Without prices, ADTV map is empty → ticker falls back to root "PETR"
     cursor.execute(
-        "SELECT net_income FROM fundamentals_monthly WHERE month_end=? AND ticker=?",
-        ("2023-03-31", "PETR3"),
+        "SELECT net_income FROM fundamentals_monthly WHERE ticker=? ORDER BY month_end DESC LIMIT 1",
+        ("PETR",),
     )
     row = cursor.fetchone()
-    assert row is not None, "Expected a row for PETR3 at 2023-03-31"
+    assert row is not None, "Expected a row for PETR"
     assert row[0] == pytest.approx(1000.0, rel=1e-3), f"Expected net_income 1000.0, got {row[0]}"
 
 
-def test_materialize_monthly_null_ratio_when_no_price(mem_conn):
-    """pe_ratio is NULL when no price is available for a ticker."""
+def test_materialize_monthly_raw_financials_stored_without_price(mem_conn):
+    """Raw financial metrics are stored even when no price is available for a ticker.
+    Prices are no longer needed since ratios are computed dynamically at query time."""
     from b3_pipeline.cvm_main import materialize_fundamentals_monthly
 
     conn = mem_conn
@@ -275,25 +275,24 @@ def test_materialize_monthly_null_ratio_when_no_price(mem_conn):
         net_income=2000.0,
         shares_outstanding=5_000_000.0,
     )
-    # No prices inserted for VALE
+    # No prices inserted — prices are no longer needed for materialize_fundamentals_monthly
 
     materialize_fundamentals_monthly(conn)
 
     cursor = conn.cursor()
+    # Without prices, ADTV map is empty → ticker falls back to root "VALE"
     cursor.execute(
-        "SELECT pe_ratio, net_income FROM fundamentals_monthly WHERE ticker=? LIMIT 1",
-        ("VALE3",),
+        "SELECT net_income FROM fundamentals_monthly WHERE ticker=? LIMIT 1",
+        ("VALE",),
     )
     row = cursor.fetchone()
-    # If no price, there should be no row for VALE3 (can't compute ratio without price)
-    # OR a row with NULL pe_ratio but non-NULL net_income.
-    # Either is acceptable per the spec: "NULL ratios for that month but still has raw financial values"
-    if row is not None:
-        assert row[0] is None, f"Expected pe_ratio NULL when no price, got {row[0]}"
+    # Raw financial metrics should be stored regardless of price availability
+    assert row is not None, "Expected a row for VALE even without prices"
+    assert row[0] == pytest.approx(2000.0), f"Expected net_income=2000.0, got {row[0]}"
 
 
-def test_materialize_monthly_uses_latest_price_before_month_end(mem_conn):
-    """Uses price from 2023-03-28 when 2023-03-31 has no price."""
+def test_materialize_monthly_forward_fills_equity(mem_conn):
+    """equity is forward-filled from the original filing into all subsequent month-ends."""
     from b3_pipeline.cvm_main import materialize_fundamentals_monthly
 
     _setup_petr_company(mem_conn)
@@ -302,26 +301,23 @@ def test_materialize_monthly_uses_latest_price_before_month_end(mem_conn):
         filing_id="PETR_DFP_2022-12-31_1",
         cnpj="33000167000101",
         ticker="PETR",
-        filing_date="2023-01-31",
+        filing_date="2023-01-15",
         period_end="2022-12-31",
+        equity=5000.0,
         net_income=1000.0,
-        shares_outstanding=10_000_000.0,
     )
-    # Price on 28th only (not 31st)
-    _insert_price(mem_conn, "PETR3", "2023-01-31", 30.0, volume=100_000)
-    _insert_price(mem_conn, "PETR3", "2023-03-28", 34.0, volume=100_000)
 
     materialize_fundamentals_monthly(mem_conn)
 
     cursor = mem_conn.cursor()
+    # Without prices, ADTV map is empty → ticker falls back to root "PETR"
     cursor.execute(
-        "SELECT pe_ratio FROM fundamentals_monthly WHERE month_end=? AND ticker=?",
-        ("2023-03-31", "PETR3"),
+        "SELECT equity FROM fundamentals_monthly WHERE ticker=? ORDER BY month_end DESC LIMIT 1",
+        ("PETR",),
     )
     row = cursor.fetchone()
-    assert row is not None, "Expected a row for PETR3 at 2023-03-31 using price from 03-28"
-    # pe_ratio = (34 * 10_000_000) / (1000 * 1000) = 340.0
-    assert row[0] == pytest.approx(340.0, rel=1e-3), f"Expected pe_ratio 340.0, got {row[0]}"
+    assert row is not None, "Expected a row for PETR"
+    assert row[0] == pytest.approx(5000.0, rel=1e-3), f"Expected equity=5000.0 (forward-filled), got {row[0]}"
 
 
 def test_materialize_monthly_truncates_before_rebuild(mem_conn):
@@ -330,7 +326,7 @@ def test_materialize_monthly_truncates_before_rebuild(mem_conn):
 
     # Insert a stale row manually
     mem_conn.execute(
-        "INSERT OR REPLACE INTO fundamentals_monthly (month_end, ticker, pe_ratio) VALUES (?,?,?)",
+        "INSERT OR REPLACE INTO fundamentals_monthly (month_end, ticker, net_income) VALUES (?,?,?)",
         ("2020-01-31", "STALE", 999.0),
     )
     mem_conn.commit()
@@ -346,7 +342,6 @@ def test_materialize_monthly_truncates_before_rebuild(mem_conn):
         net_income=1000.0,
         shares_outstanding=10_000_000.0,
     )
-    _insert_price(mem_conn, "PETR3", "2023-01-31", 30.0, volume=100_000)
 
     materialize_fundamentals_monthly(mem_conn)
 
@@ -388,11 +383,6 @@ def test_materialize_monthly_returns_row_count(mem_conn):
         net_income=2000.0,
         shares_outstanding=5_000_000.0,
     )
-    _insert_price(mem_conn, "PETR3", "2023-01-31", 30.0, volume=100_000)
-    _insert_price(mem_conn, "PETR3", "2023-02-28", 32.0, volume=100_000)
-    _insert_price(mem_conn, "VALE3", "2023-01-31", 50.0, volume=100_000)
-    _insert_price(mem_conn, "VALE3", "2023-02-28", 52.0, volume=100_000)
-
     row_count = materialize_fundamentals_monthly(mem_conn)
 
     cursor = mem_conn.cursor()
@@ -421,25 +411,25 @@ def test_load_fundamentals_monthly_returns_wide_df(tmp_db):
 
     db_path, conn = tmp_db
     rows = [
-        ("2023-01-31", "PETR", 10.0),
-        ("2023-02-28", "PETR", 12.0),
-        ("2023-01-31", "VALE", 8.0),
+        ("2023-01-31", "PETR", 1000.0),
+        ("2023-02-28", "PETR", 1200.0),
+        ("2023-01-31", "VALE", 800.0),
     ]
-    for month_end, ticker, pe in rows:
+    for month_end, ticker, ni in rows:
         conn.execute(
-            "INSERT OR REPLACE INTO fundamentals_monthly (month_end, ticker, pe_ratio) VALUES (?,?,?)",
-            (month_end, ticker, pe),
+            "INSERT OR REPLACE INTO fundamentals_monthly (month_end, ticker, net_income) VALUES (?,?,?)",
+            (month_end, ticker, ni),
         )
     conn.commit()
 
-    wide = load_fundamentals_monthly(db_path, "pe_ratio", "2023-01-01", "2023-03-31")
+    wide = load_fundamentals_monthly(db_path, "net_income", "2023-01-01", "2023-03-31")
 
     assert isinstance(wide.index, pd.DatetimeIndex), "Index should be DatetimeIndex"
     assert "PETR" in wide.columns
     assert "VALE" in wide.columns
-    assert wide.loc[pd.Timestamp("2023-01-31"), "PETR"] == pytest.approx(10.0)
-    assert wide.loc[pd.Timestamp("2023-02-28"), "PETR"] == pytest.approx(12.0)
-    assert wide.loc[pd.Timestamp("2023-01-31"), "VALE"] == pytest.approx(8.0)
+    assert wide.loc[pd.Timestamp("2023-01-31"), "PETR"] == pytest.approx(1000.0)
+    assert wide.loc[pd.Timestamp("2023-02-28"), "PETR"] == pytest.approx(1200.0)
+    assert wide.loc[pd.Timestamp("2023-01-31"), "VALE"] == pytest.approx(800.0)
 
 
 def test_load_fundamentals_monthly_filters_date_range(tmp_db):
@@ -448,18 +438,18 @@ def test_load_fundamentals_monthly_filters_date_range(tmp_db):
 
     db_path, conn = tmp_db
     rows = [
-        ("2022-12-31", "PETR", 9.0),
-        ("2023-01-31", "PETR", 10.0),
-        ("2023-12-31", "PETR", 15.0),
+        ("2022-12-31", "PETR", 900.0),
+        ("2023-01-31", "PETR", 1000.0),
+        ("2023-12-31", "PETR", 1500.0),
     ]
-    for month_end, ticker, pe in rows:
+    for month_end, ticker, ni in rows:
         conn.execute(
-            "INSERT OR REPLACE INTO fundamentals_monthly (month_end, ticker, pe_ratio) VALUES (?,?,?)",
-            (month_end, ticker, pe),
+            "INSERT OR REPLACE INTO fundamentals_monthly (month_end, ticker, net_income) VALUES (?,?,?)",
+            (month_end, ticker, ni),
         )
     conn.commit()
 
-    wide = load_fundamentals_monthly(db_path, "pe_ratio", "2023-01-01", "2023-11-30")
+    wide = load_fundamentals_monthly(db_path, "net_income", "2023-01-01", "2023-11-30")
 
     assert pd.Timestamp("2022-12-31") not in wide.index
     assert pd.Timestamp("2023-12-31") not in wide.index
@@ -476,20 +466,20 @@ def test_load_fundamentals_monthly_unknown_metric_raises(tmp_db):
 
 
 def test_load_all_fundamentals_monthly_returns_dict(tmp_db):
-    """load_all_fundamentals_monthly returns a dict with pe_ratio, revenue, net_income keys."""
+    """load_all_fundamentals_monthly returns a dict with shares_outstanding, revenue, net_income keys."""
     from backtests.core.data import load_all_fundamentals_monthly
 
     db_path, conn = tmp_db
     conn.execute(
-        "INSERT OR REPLACE INTO fundamentals_monthly (month_end, ticker, pe_ratio, revenue) VALUES (?,?,?,?)",
-        ("2023-01-31", "PETR", 10.0, 5000.0),
+        "INSERT OR REPLACE INTO fundamentals_monthly (month_end, ticker, shares_outstanding, revenue) VALUES (?,?,?,?)",
+        ("2023-01-31", "PETR", 1_000_000_000.0, 5000.0),
     )
     conn.commit()
 
     result = load_all_fundamentals_monthly(db_path, "2023-01-01", "2023-12-31")
 
     assert isinstance(result, dict)
-    assert "pe_ratio" in result
+    assert "shares_outstanding" in result
     assert "revenue" in result
     assert "net_income" in result
 
@@ -500,13 +490,14 @@ def test_compute_pe_ratio_dynamic_basic():
 
     idx = [pd.Timestamp("2023-01-31")]
     cols = ["PETR"]
-    shares = pd.DataFrame([[10_000_000.0]], index=idx, columns=cols)
+    # shares_outstanding as stored in DB (1000x raw units; divide by 1000 in helper)
+    shares = pd.DataFrame([[10_000_000_000.0]], index=idx, columns=cols)
     net_income = pd.DataFrame([[1000.0]], index=idx, columns=cols)  # thousands BRL
     prices = pd.DataFrame([[30.0]], index=idx, columns=cols)
 
     result = compute_pe_ratio_dynamic(shares, net_income, prices)
 
-    # (30 * 10_000_000) / (1000 * 1000) = 300.0
+    # (30 * 10_000_000_000 / 1000) / (1000 * 1000) = (30 * 10_000_000) / 1_000_000 = 300.0
     assert result.iloc[0, 0] == pytest.approx(300.0)
 
 
@@ -516,7 +507,7 @@ def test_compute_pe_ratio_dynamic_null_for_negative_income():
 
     idx = [pd.Timestamp("2023-01-31")]
     cols = ["PETR"]
-    shares = pd.DataFrame([[10_000_000.0]], index=idx, columns=cols)
+    shares = pd.DataFrame([[10_000_000_000.0]], index=idx, columns=cols)
     net_income = pd.DataFrame([[-500.0]], index=idx, columns=cols)
     prices = pd.DataFrame([[30.0]], index=idx, columns=cols)
 
@@ -531,13 +522,14 @@ def test_compute_pb_ratio_dynamic_basic():
 
     idx = [pd.Timestamp("2023-01-31")]
     cols = ["PETR"]
-    shares = pd.DataFrame([[10_000_000.0]], index=idx, columns=cols)
+    # shares_outstanding as stored in DB (1000x raw units; divide by 1000 in helper)
+    shares = pd.DataFrame([[10_000_000_000.0]], index=idx, columns=cols)
     equity = pd.DataFrame([[5000.0]], index=idx, columns=cols)  # thousands BRL
     prices = pd.DataFrame([[30.0]], index=idx, columns=cols)
 
     result = compute_pb_ratio_dynamic(shares, equity, prices)
 
-    # (30 * 10M) / (5000 * 1000) = 300M / 5M = 60.0
+    # (30 * 10_000_000_000 / 1000) / (5000 * 1000) = 300_000_000 / 5_000_000 = 60.0
     assert result.iloc[0, 0] == pytest.approx(60.0)
 
 
@@ -547,13 +539,14 @@ def test_compute_ev_ebitda_dynamic_basic():
 
     idx = [pd.Timestamp("2023-01-31")]
     cols = ["PETR"]
-    shares = pd.DataFrame([[10_000_000.0]], index=idx, columns=cols)
+    # shares_outstanding as stored in DB (1000x raw units; divide by 1000 in helper)
+    shares = pd.DataFrame([[10_000_000_000.0]], index=idx, columns=cols)
     ebitda = pd.DataFrame([[2000.0]], index=idx, columns=cols)   # thousands BRL
     net_debt = pd.DataFrame([[1000.0]], index=idx, columns=cols)  # thousands BRL
     prices = pd.DataFrame([[30.0]], index=idx, columns=cols)
 
     result = compute_ev_ebitda_dynamic(shares, ebitda, net_debt, prices)
 
-    # ev = 30 * 10M + 1000 * 1000 = 301_000_000
+    # ev = 30 * (10_000_000_000 / 1000) + 1000 * 1000 = 300_000_000 + 1_000_000 = 301_000_000
     # ev_ebitda = 301_000_000 / (2000 * 1000) = 150.5
     assert result.iloc[0, 0] == pytest.approx(150.5)

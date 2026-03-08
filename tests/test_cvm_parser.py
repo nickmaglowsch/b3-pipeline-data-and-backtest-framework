@@ -309,3 +309,28 @@ def test_parse_fre_zip_extracts_shares():
     assert shares == pytest.approx(1_000_000_000.0), (
         f"Expected 1_000_000_000.0, got {shares}"
     )
+
+
+def test_parse_fre_zip_zero_shares_stored_as_null():
+    """A row with all share count columns = 0 must produce shares_outstanding = NaN."""
+    import math
+
+    capital_rows = [
+        {
+            "CNPJ_Companhia": "33.000.167/0001-01",
+            "Data_Referencia": "2023-12-31",
+            "DT_RECEB": "2024-02-10",
+            "Versao": "1",
+            "Quantidade_Total_Acoes": "0",
+            "Quantidade_Acoes_Ordinarias": "0",
+            "Quantidade_Acoes_Preferenciais": "0",
+        }
+    ]
+    fake_zip = _make_fake_fre_zip(capital_rows)
+    filings_df, fundamentals_df = parse_fre_zip(fake_zip, {"33000167000101": "PETR"})
+
+    assert not fundamentals_df.empty, "fundamentals_df should not be empty even with zero shares"
+    shares = fundamentals_df["shares_outstanding"].iloc[0]
+    assert shares is None or (isinstance(shares, float) and math.isnan(shares)), (
+        f"Expected NaN/None for zero shares, got {shares}"
+    )

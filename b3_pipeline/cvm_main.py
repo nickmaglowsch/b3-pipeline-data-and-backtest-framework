@@ -18,6 +18,7 @@ import argparse
 import logging
 import sqlite3
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -67,155 +68,14 @@ def _build_adtv_ticker_map(conn: sqlite3.Connection) -> dict:
     return adtv_map
 
 
-# ── Valuation ratio materialization ───────────────────────────────────────────
-
-def materialize_valuation_ratios(conn: sqlite3.Connection) -> int:
-    """
-    Join fundamentals_pit with prices to compute P/E, P/B, and EV/EBITDA.
-
-    Uses the closing price on filing_date (or the nearest prior trading day).
-    Updates pe_ratio, pb_ratio, ev_ebitda columns in-place.
-    Returns the number of rows updated.
-
-    Annualization factor for ITR:
-        Q1 -> 4x, Q2 -> 2x, Q3 -> 1.33x (12 / (quarter * 3))
-    DFP: factor = 1 (already annual).
-    """
-    cursor = conn.cursor()
-
-    # Build {cnpj: best_ticker} map using highest-ADTV standard-lot ticker per company.
-    # This replaces the old is_primary=1 / LIKE fallback logic.
-    adtv_map = _build_adtv_ticker_map(conn)
-
-    # Load all rows that have the required data but missing ratios
-    cursor.execute("""
-        SELECT
-            filing_id, cnpj, ticker, period_end, filing_date, filing_version,
-            doc_type, quarter,
-            net_income, equity, ebitda, net_debt, shares_outstanding
-        FROM fundamentals_pit
-        WHERE shares_outstanding IS NOT NULL
-          AND ticker IS NOT NULL
-          AND (pe_ratio IS NULL OR pb_ratio IS NULL OR ev_ebitda IS NULL)
-    """)
-    rows = cursor.fetchall()
-    cols = [
-        "filing_id", "cnpj", "ticker", "period_end", "filing_date", "filing_version",
-        "doc_type", "quarter",
-        "net_income", "equity", "ebitda", "net_debt", "shares_outstanding",
-    ]
-    df = pd.DataFrame(rows, columns=cols)
-
-    if df.empty:
-        logger.info("No fundamentals rows eligible for valuation ratio computation")
-        return 0
-
-    updates = []
-    for _, row in df.iterrows():
-        cnpj = str(row["cnpj"])
-        filing_date_str = str(row["filing_date"])
-
-        # Lookup best ticker for this company using the ADTV map.
-        best_ticker = adtv_map.get(cnpj)
-        if best_ticker is None:
-            continue
-
-        # ±10 calendar days window (guarantees ≥5 trading days in either direction).
-        filing_date_obj = datetime.strptime(filing_date_str, "%Y-%m-%d").date()
-        window_start = (filing_date_obj - timedelta(days=10)).strftime("%Y-%m-%d")
-        window_end = (filing_date_obj + timedelta(days=10)).strftime("%Y-%m-%d")
-
-        cursor.execute(
-            """
-            SELECT date, close FROM prices
-            WHERE ticker = ?
-              AND date >= ?
-              AND date <= ?
-            ORDER BY date
-            """,
-            (best_ticker, window_start, window_end),
-        )
-        price_candidates = cursor.fetchall()
-
-        if not price_candidates:
-            continue
-
-        # Pick closest date to filing_date; tie-break: prefer earlier date (backward preference).
-        def sort_key(row_pair):
-            date_str, _ = row_pair
-            d = datetime.strptime(date_str, "%Y-%m-%d").date()
-            distance = abs((d - filing_date_obj).days)
-            return (distance, date_str)  # earlier date sorts first on tie
-
-        best = sorted(price_candidates, key=sort_key)[0]
-        price = best[1]
-
-        if not price or price <= 0:
-            continue
-
-        shares = float(row["shares_outstanding"])
-        if shares <= 0:
-            continue
-
-        market_cap = price * shares
-
-        # CVM financial values are reported in thousands of BRL; convert to BRL
-        # for ratio computation so units match market_cap (price × shares).
-        THOUSANDS = 1_000.0
-
-        # Annualization factor
-        quarter_val = row["quarter"]
-        if row["doc_type"] == "ITR" and quarter_val is not None and quarter_val == quarter_val:
-            q = int(quarter_val)
-            ann_factor = 12.0 / (q * 3) if q > 0 else 1.0
-        else:
-            ann_factor = 1.0
-
-        # P/E
-        pe = None
-        if row["net_income"] is not None:
-            net_income = float(row["net_income"]) * THOUSANDS
-            ann_ni = net_income * ann_factor
-            if ann_ni > 0:
-                pe = market_cap / ann_ni
-
-        # P/B
-        pb = None
-        if row["equity"] is not None:
-            equity = float(row["equity"]) * THOUSANDS
-            if equity > 0:
-                pb = market_cap / equity
-
-        # EV/EBITDA
-        ev_ebitda = None
-        if row["ebitda"] is not None:
-            ebitda = float(row["ebitda"]) * THOUSANDS
-            ann_ebitda = ebitda * ann_factor
-            if ann_ebitda > 0:
-                net_debt_val = float(row["net_debt"]) * THOUSANDS if row["net_debt"] is not None else 0.0
-                ev = market_cap + net_debt_val
-                ev_ebitda = ev / ann_ebitda
-
-        updates.append((pe, pb, ev_ebitda, row["filing_id"]))
-
-    if updates:
-        cursor.executemany(
-            "UPDATE fundamentals_pit SET pe_ratio = ?, pb_ratio = ?, ev_ebitda = ? WHERE filing_id = ?",
-            updates,
-        )
-        conn.commit()
-        logger.info(f"Updated valuation ratios for {len(updates):,} rows")
-
-    return len(updates)
-
-
 def materialize_fundamentals_monthly(conn: sqlite3.Connection) -> int:
     """
     Build (or rebuild) the fundamentals_monthly snapshot table.
 
     For each (month_end, ticker), stores the most recently known fundamental
-    values as of that date, with valuation ratios recomputed using the actual
-    month-end closing price from prices.
+    values as of that date. Valuation ratios (P/E, P/B, EV/EBITDA) are no
+    longer stored — they are computed dynamically at query time using the
+    dynamic ratio helpers in backtests.core.data.
 
     Returns the number of rows upserted.
     """
@@ -283,37 +143,6 @@ def materialize_fundamentals_monthly(conn: sqlite3.Connection) -> int:
         wide = wide.reindex(month_ends)
         metric_dfs[metric] = wide
 
-    # Get all best_tickers from adtv_map
-    best_tickers = list(set(adtv_map.values()))
-
-    # Load all prices for best_tickers up to last month_end, pivot to wide
-    max_month_end = month_ends[-1].strftime("%Y-%m-%d")
-    if best_tickers:
-        placeholders = ",".join("?" * len(best_tickers))
-        cursor.execute(f"""
-            SELECT ticker, date, close
-            FROM prices
-            WHERE ticker IN ({placeholders})
-              AND date <= ?
-            ORDER BY ticker, date
-        """, best_tickers + [max_month_end])
-        price_rows = cursor.fetchall()
-        price_df = pd.DataFrame(price_rows, columns=["ticker", "date", "close"])
-        if not price_df.empty:
-            price_df["date"] = pd.to_datetime(price_df["date"])
-            price_wide = price_df.pivot_table(
-                index="date", columns="ticker", values="close", aggfunc="last"
-            )
-            price_wide.columns.name = None
-            # Resample to month-end, use last available price on or before each month-end
-            extended_price_idx = price_wide.index.union(month_ends).sort_values()
-            price_wide = price_wide.reindex(extended_price_idx).ffill()
-            price_wide = price_wide.reindex(month_ends)
-        else:
-            price_wide = pd.DataFrame(index=month_ends, dtype=float)
-    else:
-        price_wide = pd.DataFrame(index=month_ends, dtype=float)
-
     # Build ticker_root -> best_ticker map via cvm_companies cnpj -> root -> adtv_map
     cursor.execute("SELECT cnpj, ticker FROM cvm_companies WHERE ticker IS NOT NULL")
     cnpj_to_root = {row[0]: row[1] for row in cursor.fetchall()}
@@ -344,44 +173,12 @@ def materialize_fundamentals_monthly(conn: sqlite3.Connection) -> int:
             combined[metric] = float("nan")
 
     combined["ticker"] = combined["ticker_root"].map(root_to_best).fillna(combined["ticker_root"])
-
-    # ── Map month-end prices from price_wide (best_ticker columns) to ticker_root ──
-    if not price_wide.empty:
-        best_to_root = {v: k for k, v in root_to_best.items()}
-        price_by_root = price_wide.rename(
-            columns={bt: best_to_root.get(bt, bt) for bt in price_wide.columns}
-        )
-        price_by_root.index.name = "month_end"
-        price_stacked = price_by_root.stack()
-        price_stacked.name = "price"
-        price_stacked.index.names = ["month_end", "ticker_root"]
-        combined = combined.merge(price_stacked.reset_index(), on=["month_end", "ticker_root"], how="left")
-    else:
-        combined["price"] = float("nan")
-
-    # ── Vectorized ratio computation ──────────────────────────────────────────────
-    THOUSANDS = 1_000.0
-    price = combined["price"]
-    shares = combined["shares_outstanding"]
-    valid = (price > 0) & (shares > 0) & price.notna() & shares.notna()
-    market_cap = price * shares
-
-    ni_brl = combined["net_income"] * THOUSANDS
-    combined["pe_ratio"] = (market_cap / ni_brl).where(valid & (ni_brl > 0))
-
-    eq_brl = combined["equity"] * THOUSANDS
-    combined["pb_ratio"] = (market_cap / eq_brl).where(valid & (eq_brl > 0))
-
-    ebitda_brl = combined["ebitda"] * THOUSANDS
-    nd_brl = combined["net_debt"].fillna(0) * THOUSANDS
-    ev = market_cap + nd_brl
-    combined["ev_ebitda"] = (ev / ebitda_brl).where(valid & (ebitda_brl > 0))
-
     combined["month_end"] = combined["month_end"].dt.strftime("%Y-%m-%d")
 
+    # Ratio columns (pe_ratio, pb_ratio, ev_ebitda) intentionally excluded — compute dynamically at query time
     output_cols = [
         "month_end", "ticker", "revenue", "net_income", "ebitda", "total_assets",
-        "equity", "net_debt", "shares_outstanding", "pe_ratio", "pb_ratio", "ev_ebitda",
+        "equity", "net_debt", "shares_outstanding",
     ]
     result_df = combined[output_cols].copy()
 
@@ -407,6 +204,7 @@ def _propagate_fre_shares(conn: sqlite3.Connection) -> None:
               AND fre.doc_type = 'FRE'
               AND fre.filing_date <= fundamentals_pit.filing_date
               AND fre.shares_outstanding IS NOT NULL
+              AND fre.shares_outstanding > 0
             ORDER BY fre.filing_date DESC
             LIMIT 1
         )
@@ -482,34 +280,47 @@ def _fetch_ticker_mappings(conn: sqlite3.Connection) -> int:
             )
         covered_roots.add(root)
 
-    # ── Fallback path: per-company GetListedSupplementCompany ─────────────────
+    # ── Fallback path: per-company GetListedSupplementCompany (concurrent) ──────
     fallback_roots = [r for r in ticker_roots if r not in covered_roots]
     if fallback_roots:
         logger.info(
             f"Falling back to per-company API for {len(fallback_roots)} roots "
-            f"not found in bulk list..."
+            f"not found in bulk list (concurrent, {config.MAX_WORKERS} workers)..."
         )
-        for i, root in enumerate(fallback_roots, 1):
-            if i % 50 == 0 or i == len(fallback_roots):
-                logger.info(f"  Fallback {i}/{len(fallback_roots)} ({root})")
-            company_data = b3_corporate_actions.fetch_company_data(root, conn=conn)
-            if company_data is None:
-                continue
-            cvm_code = str(company_data.get("codeCVM", "") or "").strip()
-            if not cvm_code:
-                continue
-            matched = cvm_storage.update_ticker_by_cvm_code(
-                conn,
-                cvm_code=cvm_code,
-                ticker=root,
-                b3_trading_name=company_data.get("tradingName", ""),
-            )
-            if matched:
-                updated += 1
-            else:
-                logger.debug(
-                    f"No cvm_companies row for codeCVM={cvm_code} ({root}) from fallback"
+        completed = 0
+
+        def _fetch_one(root: str):
+            return root, b3_corporate_actions.fetch_company_data(root, conn=None)
+
+        with ThreadPoolExecutor(max_workers=config.MAX_WORKERS) as executor:
+            futures = {executor.submit(_fetch_one, root): root for root in fallback_roots}
+            for future in as_completed(futures):
+                completed += 1
+                if completed % 50 == 0 or completed == len(fallback_roots):
+                    logger.info(f"  Fallback {completed}/{len(fallback_roots)}")
+                try:
+                    root, company_data = future.result()
+                except Exception as e:
+                    logger.debug(f"Fallback fetch failed for {futures[future]}: {e}")
+                    continue
+                if company_data is None:
+                    continue
+                cvm_code = str(company_data.get("codeCVM", "") or "").strip()
+                if not cvm_code:
+                    continue
+                # DB write is sequential (one at a time via GIL + SQLite serialization)
+                matched = cvm_storage.update_ticker_by_cvm_code(
+                    conn,
+                    cvm_code=cvm_code,
+                    ticker=root,
+                    b3_trading_name=company_data.get("tradingName", ""),
                 )
+                if matched:
+                    updated += 1
+                else:
+                    logger.debug(
+                        f"No cvm_companies row for codeCVM={cvm_code} ({root}) from fallback"
+                    )
 
     # ── Fix 4: Match rate warning ──────────────────────────────────────────────
     match_rate = updated / len(ticker_roots) if ticker_roots else 0
@@ -555,7 +366,7 @@ def run_fundamentals_pipeline(
      6. Parse and upsert DFP filings
      7. Parse and upsert ITR filings
      8. Parse and upsert FRE filings + propagate shares_outstanding
-     9. Materialize valuation ratios (unless skip_ratios)
+     9. [No-op] Valuation ratios are computed dynamically at query time
     10. Log summary statistics
     [When include_historical=True:]
     11. Download and parse CAD company register (listing/delisting dates)
@@ -590,35 +401,41 @@ def run_fundamentals_pipeline(
             end_year = config.get_current_year()
         logger.info(f"Year range: {start_year} – {end_year}")
 
-        # Step 3
+        # Steps 3-5: Download DFP, ITR, FRE files concurrently
         logger.info("")
-        logger.info("Step 3/10: Downloading DFP files...")
-        dfp_paths = []
-        for year in range(start_year, end_year + 1):
-            path = cvm_downloader.download_dfp_file(year, force=force_download)
-            if path:
-                dfp_paths.append(path)
-        logger.info(f"DFP files available: {len(dfp_paths)}")
+        logger.info("Steps 3-5/10: Downloading DFP, ITR, FRE files concurrently...")
 
-        # Step 4
-        logger.info("")
-        logger.info("Step 4/10: Downloading ITR files...")
-        itr_paths = []
-        for year in range(start_year, end_year + 1):
-            path = cvm_downloader.download_itr_file(year, force=force_download)
-            if path:
-                itr_paths.append(path)
-        logger.info(f"ITR files available: {len(itr_paths)}")
+        download_fns = {
+            "DFP": cvm_downloader.download_dfp_file,
+            "ITR": cvm_downloader.download_itr_file,
+            "FRE": cvm_downloader.download_fre_file,
+        }
+        years = list(range(start_year, end_year + 1))
+        tasks = [(doc_type, year, fn) for doc_type, fn in download_fns.items() for year in years]
 
-        # Step 5
-        logger.info("")
-        logger.info("Step 5/10: Downloading FRE files...")
-        fre_paths = []
-        for year in range(start_year, end_year + 1):
-            path = cvm_downloader.download_fre_file(year, force=force_download)
-            if path:
-                fre_paths.append(path)
-        logger.info(f"FRE files available: {len(fre_paths)}")
+        dfp_paths, itr_paths, fre_paths = [], [], []
+        path_buckets = {"DFP": dfp_paths, "ITR": itr_paths, "FRE": fre_paths}
+
+        MAX_DOWNLOAD_WORKERS = 6  # be respectful to CVM servers
+
+        with ThreadPoolExecutor(max_workers=MAX_DOWNLOAD_WORKERS) as executor:
+            future_to_meta = {
+                executor.submit(fn, year, force_download): (doc_type, year)
+                for doc_type, year, fn in tasks
+            }
+            for future in as_completed(future_to_meta):
+                doc_type, year = future_to_meta[future]
+                try:
+                    path = future.result()
+                    if path:
+                        path_buckets[doc_type].append(path)
+                except Exception as e:
+                    logger.warning(f"Download failed for {doc_type} {year}: {e}")
+
+        dfp_paths.sort()
+        itr_paths.sort()
+        fre_paths.sort()
+        logger.info(f"DFP: {len(dfp_paths)} files, ITR: {len(itr_paths)} files, FRE: {len(fre_paths)} files")
 
         # Step 5b: Populate cvm_companies from CVM files (CNPJ + CVM code + company name).
         # This must run before reading the ticker map so the B3 pipeline can link tickers.
@@ -724,14 +541,8 @@ def run_fundamentals_pipeline(
         logger.info(f"company_isin_map: {isin_map_rows:,} rows inserted/replaced")
 
         # Step 9
-        if not skip_ratios:
-            logger.info("")
-            logger.info("Step 9/10: Materializing valuation ratios...")
-            updated = materialize_valuation_ratios(conn)
-            logger.info(f"Valuation ratios updated for {updated:,} rows")
-        else:
-            logger.info("")
-            logger.info("Step 9/10: Skipping valuation ratio computation (--skip-ratios)")
+        logger.info("")
+        logger.info("Step 9/10: Valuation ratio columns removed — ratios computed dynamically at query time.")
 
         # Step 9b
         if not skip_monthly:
@@ -825,14 +636,12 @@ def run_fundamentals_pipeline(
             ticker_rows = cvm_storage.populate_tickers_from_cvm_companies(conn)
             logger.info(f"Ticker propagation (post-IPE): {ticker_rows:,} rows updated")
 
-            # Step 13: Re-run ratio materialization and monthly snapshot for IPE rows
+            # Step 13: Re-run monthly snapshot for IPE rows
             logger.info("")
-            logger.info("Step 13/13: Re-propagating shares and recomputing ratios for IPE rows...")
+            logger.info("Step 13/13: Re-propagating shares and rebuilding monthly snapshot for IPE rows...")
             # Note: _propagate_ipe_shares() is not implemented (Path B from Task 05).
             # IPE has no capital structure data — shares_outstanding stays NULL for IPE rows.
-            if not skip_ratios:
-                updated = materialize_valuation_ratios(conn)
-                logger.info(f"Valuation ratios (post-IPE): {updated:,} rows updated")
+            # Valuation ratios are computed dynamically at query time — no re-materialization needed.
             if not skip_monthly:
                 monthly_rows = materialize_fundamentals_monthly(conn)
                 logger.info(f"Monthly snapshot (post-IPE): {monthly_rows:,} rows materialized")
@@ -843,8 +652,7 @@ def run_fundamentals_pipeline(
                 cursor.execute("""
                     SELECT
                         COUNT(*) as total_ipe,
-                        COUNT(shares_outstanding) as ipe_with_shares,
-                        COUNT(pe_ratio) as ipe_with_pe
+                        COUNT(shares_outstanding) as ipe_with_shares
                     FROM fundamentals_pit
                     WHERE doc_type = 'IPE'
                 """)
@@ -852,7 +660,7 @@ def run_fundamentals_pipeline(
                 if ipe_row:
                     logger.info(
                         f"IPE coverage: {ipe_row[0]:,} total rows, "
-                        f"{ipe_row[1]:,} with shares, {ipe_row[2]:,} with P/E"
+                        f"{ipe_row[1]:,} with shares"
                     )
             except Exception:
                 pass
@@ -901,7 +709,7 @@ Examples:
     )
     arg_parser.add_argument(
         "--skip-ratios", action="store_true",
-        help="Skip valuation ratio computation (P/E, P/B, EV/EBITDA)",
+        help="[DEPRECATED — no-op] Valuation ratios are computed dynamically at query time and are no longer materialized.",
     )
     arg_parser.add_argument(
         "--skip-ticker-fetch", action="store_true",

@@ -287,12 +287,10 @@ _FUNDAMENTALS_METRICS = [
     "equity",
     "net_debt",
     "shares_outstanding",
-    "pe_ratio",
-    "pb_ratio",
-    "ev_ebitda",
 ]
+# Ratio columns (pe_ratio, pb_ratio, ev_ebitda) intentionally excluded — compute dynamically at query time
 
-# All metrics available in fundamentals_monthly (raw financials + ratio columns)
+# All metrics available in fundamentals_monthly (raw financials only — no stored ratios)
 _FUNDAMENTALS_MONTHLY_METRICS = set(_FUNDAMENTALS_METRICS)
 
 
@@ -399,12 +397,14 @@ def load_all_fundamentals(
     freq: str = "ME",
 ) -> dict:
     """
-    Load all 10 fundamentals metrics and return them as a dict of wide DataFrames.
+    Load all fundamentals metrics and return them as a dict of wide DataFrames.
 
     Returns:
         dict with keys matching _FUNDAMENTALS_METRICS:
-        {"revenue": df, "net_income": df, ..., "ev_ebitda": df}
+        {"revenue": df, "net_income": df, "ebitda": df, "total_assets": df,
+         "equity": df, "net_debt": df, "shares_outstanding": df}
         Each df has DatetimeIndex (rebalance dates) and ticker columns.
+        Ratio columns (pe_ratio, pb_ratio, ev_ebitda) are excluded — compute dynamically.
     """
     result = {}
     for metric in _FUNDAMENTALS_METRICS:
@@ -479,8 +479,10 @@ def load_all_fundamentals_monthly(
 
     Returns:
         dict with keys matching _FUNDAMENTALS_MONTHLY_METRICS:
-        {"revenue": df, ..., "pe_ratio": df, "pb_ratio": df, "ev_ebitda": df}
+        {"revenue": df, "net_income": df, "ebitda": df, "total_assets": df,
+         "equity": df, "net_debt": df, "shares_outstanding": df}
         Each df has DatetimeIndex (month_end dates) and ticker columns.
+        Ratio columns excluded — computed dynamically in shared_data / strategies.
     """
     result = {}
     for metric in _FUNDAMENTALS_MONTHLY_METRICS:
@@ -494,6 +496,22 @@ def load_all_fundamentals_monthly(
 
 
 # ── Dynamic ratio helpers (pure pandas, no DB access) ─────────────────────────
+#
+# Investigation finding (2026-03-07): CVM capital_social FRE files report
+# Quantidade_Total_Acoes in raw units, but the values in the database were found
+# to be 1000x too large relative to actual share counts (e.g. CIEL stored as
+# 6,000,000,000,000 vs actual ~6,000,000,000; VSPT stored as 210,197,643,696,260
+# vs actual ~210,197,643,696). Root cause: CVM reports some share counts in
+# thousands of shares, not raw units. The stored shares_outstanding values are
+# therefore effectively in units that are 1000x smaller than expected.
+#
+# Fix: divide shares_outstanding by SHARES_SCALE (1000) in all three helpers
+# before computing market cap. This converts stored values back to correct units.
+# All ratio formulas assume: prices in BRL, financial metrics in thousands BRL,
+# shares_outstanding as stored (i.e. divide by 1000 to get raw unit count).
+
+_SHARES_SCALE = 1_000.0  # shares_outstanding in DB is 1000x the actual raw unit count
+
 
 def compute_pe_ratio_dynamic(
     shares: pd.DataFrame,
@@ -504,15 +522,16 @@ def compute_pe_ratio_dynamic(
     Compute P/E ratio from wide DataFrames aligned on the same DatetimeIndex.
 
     Args:
-        shares:     Wide DataFrame: rebalance_date × ticker, shares_outstanding (units).
+        shares:     Wide DataFrame: rebalance_date × ticker, shares_outstanding as stored
+                    in DB (divide by 1000 to get raw unit count — see _SHARES_SCALE note).
         net_income: Wide DataFrame: rebalance_date × ticker, net_income in thousands BRL.
         prices:     Wide DataFrame: rebalance_date × ticker, close price (BRL).
 
     Returns:
-        Wide DataFrame with same shape: pe_ratio = (prices × shares) / (net_income × 1000).
+        Wide DataFrame with same shape: pe_ratio = (prices × shares / SCALE) / (net_income × 1000).
         Entries where net_income × 1000 <= 0 or shares <= 0 or prices <= 0 are NaN.
     """
-    market_cap = prices * shares
+    market_cap = prices * (shares / _SHARES_SCALE)
     net_income_brl = net_income * 1_000.0
     result = market_cap / net_income_brl
     # Mask invalid denominators/numerators
@@ -531,15 +550,16 @@ def compute_pb_ratio_dynamic(
     Compute P/B ratio from wide DataFrames aligned on the same DatetimeIndex.
 
     Args:
-        shares: Wide DataFrame: shares_outstanding (units).
+        shares: Wide DataFrame: shares_outstanding as stored in DB (divide by 1000
+                to get raw unit count — see _SHARES_SCALE note).
         equity: Wide DataFrame: equity in thousands BRL.
         prices: Wide DataFrame: close price (BRL).
 
     Returns:
-        Wide DataFrame: pb_ratio = (prices × shares) / (equity × 1000).
+        Wide DataFrame: pb_ratio = (prices × shares / SCALE) / (equity × 1000).
         Entries where equity × 1000 <= 0 or shares <= 0 or prices <= 0 are NaN.
     """
-    market_cap = prices * shares
+    market_cap = prices * (shares / _SHARES_SCALE)
     equity_brl = equity * 1_000.0
     result = market_cap / equity_brl
     result = result.where(equity_brl > 0)
@@ -558,16 +578,17 @@ def compute_ev_ebitda_dynamic(
     Compute EV/EBITDA from wide DataFrames aligned on the same DatetimeIndex.
 
     Args:
-        shares:   Wide DataFrame: shares_outstanding (units).
+        shares:   Wide DataFrame: shares_outstanding as stored in DB (divide by 1000
+                  to get raw unit count — see _SHARES_SCALE note).
         ebitda:   Wide DataFrame: EBITDA in thousands BRL.
         net_debt: Wide DataFrame: net debt in thousands BRL.
         prices:   Wide DataFrame: close price (BRL).
 
     Returns:
-        Wide DataFrame: ev_ebitda = (prices × shares + net_debt × 1000) / (ebitda × 1000).
+        Wide DataFrame: ev_ebitda = (prices × shares / SCALE + net_debt × 1000) / (ebitda × 1000).
         Entries where ebitda × 1000 <= 0 or shares <= 0 or prices <= 0 are NaN.
     """
-    market_cap = prices * shares
+    market_cap = prices * (shares / _SHARES_SCALE)
     ebitda_brl = ebitda * 1_000.0
     net_debt_brl = net_debt * 1_000.0
     ev = market_cap + net_debt_brl

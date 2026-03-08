@@ -207,7 +207,6 @@ def test_run_fundamentals_pipeline_calls_ticker_fetch_by_default(mem_conn):
          patch("b3_pipeline.cvm_main.cvm_downloader.download_itr_file", return_value=None), \
          patch("b3_pipeline.cvm_main.cvm_downloader.download_fre_file", return_value=None), \
          patch("b3_pipeline.cvm_main._fetch_ticker_mappings", return_value=0) as mock_ticker_fetch, \
-         patch("b3_pipeline.cvm_main.materialize_valuation_ratios", return_value=0), \
          patch("b3_pipeline.cvm_main._propagate_fre_shares"), \
          patch("b3_pipeline.cvm_main.cvm_storage.populate_tickers_from_cvm_companies", return_value=0), \
          patch("b3_pipeline.cvm_main.cvm_storage.get_fundamentals_stats", return_value={
@@ -234,7 +233,6 @@ def test_run_fundamentals_pipeline_skips_ticker_fetch_when_flag_set(mem_conn):
          patch("b3_pipeline.cvm_main.cvm_downloader.download_itr_file", return_value=None), \
          patch("b3_pipeline.cvm_main.cvm_downloader.download_fre_file", return_value=None), \
          patch("b3_pipeline.cvm_main._fetch_ticker_mappings", return_value=0) as mock_ticker_fetch, \
-         patch("b3_pipeline.cvm_main.materialize_valuation_ratios", return_value=0), \
          patch("b3_pipeline.cvm_main._propagate_fre_shares"), \
          patch("b3_pipeline.cvm_main.cvm_storage.populate_tickers_from_cvm_companies", return_value=0), \
          patch("b3_pipeline.cvm_main.cvm_storage.get_fundamentals_stats", return_value={

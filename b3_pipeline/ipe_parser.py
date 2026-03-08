@@ -188,11 +188,12 @@ def parse_ipe_zip(
     filings_df = pd.DataFrame(filings_rows)
 
     # fundamentals_df is always empty for IPE — no financial data available
+    # Ratio columns (pe_ratio, pb_ratio, ev_ebitda) intentionally excluded — computed dynamically
     fundamentals_df = pd.DataFrame(columns=[
         "filing_id", "cnpj", "ticker", "period_end", "filing_date", "filing_version",
         "doc_type", "fiscal_year", "quarter",
         "revenue", "net_income", "ebitda", "total_assets", "equity", "net_debt",
-        "shares_outstanding", "pe_ratio", "pb_ratio", "ev_ebitda",
+        "shares_outstanding",
     ])
 
     return filings_df, fundamentals_df

@@ -117,3 +117,13 @@
 - Bare `except Exception: pass` in IPE filing upsert loop (cvm_main.py:834)
 - `backtests/core/data.py` missing `from __future__ import annotations`
 - `upsert_fundamentals_monthly` inconsistent df.copy() -- sometimes mutates input
+
+## Ratio Refactor Review Notes (Mar 2026)
+- pe_ratio, pb_ratio, ev_ebitda columns REMOVED from schema and all upsert SQL
+- `materialize_valuation_ratios()` DELETED from cvm_main.py
+- Ratios computed dynamically via `compute_*_dynamic()` helpers in data.py
+- `_SHARES_SCALE = 1_000.0` divides shares before market cap -- questionable root cause
+- `_FUNDAMENTALS_METRICS` reduced from 10 to 7; docstrings NOT updated (stale "10")
+- LowPE: only reads f_pe_ratio_dyn (no fallback); ValueQuality: reads f_pb_ratio_dyn
+- `_fetch_ticker_mappings` concurrent refactor snuck into this diff (unrelated)
+- 188 tests passing

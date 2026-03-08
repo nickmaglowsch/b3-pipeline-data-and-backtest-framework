@@ -4,12 +4,10 @@ Strategy: LowPE — Low P/E Ratio Selection
 Selects the N companies with the lowest positive P/E ratio (within a configurable
 [min_pe, max_pe] band) and weights them equally.
 
-Uses f_pe_ratio_dyn from shared_data — the monthly snapshot P/E computed with the
-actual month-end closing price rather than the filing-date price. Falls back to
-f_pe_ratio (filing-date-based stored P/E) when the monthly snapshot is not available
-(i.e., the CVM pipeline has not yet been re-run after Task 04 integration).
+Uses f_pe_ratio_dyn from shared_data — P/E computed dynamically at each rebalance
+date using raw_close × shares_outstanding / net_income. No stored ratio column is read.
 
-Requires: shared_data["f_pe_ratio_dyn"] (or "f_pe_ratio" as fallback).
+Requires: shared_data["f_pe_ratio_dyn"].
 The backtest_service detects this via needs_fundamentals = True.
 
 Important: this strategy requires the CVM fundamentals monthly snapshot table
@@ -43,9 +41,9 @@ class LowPEStrategy(StrategyBase):
     within the [min_pe, max_pe] band, after applying ADTV and price filters.
     Stocks are weighted equally (1/N).
 
-    Uses f_pe_ratio_dyn (month-end-price-based P/E from the fundamentals_monthly
-    snapshot) for more accurate and current valuations. Falls back to the
-    filing-date-based f_pe_ratio if the monthly snapshot has not been populated.
+    Uses f_pe_ratio_dyn (dynamically computed from raw monthly fundamentals and
+    raw_close prices in build_shared_data). The stored f_pe_ratio key is no longer
+    used — only f_pe_ratio_dyn is read.
 
     Requires the CVM fundamentals pipeline to be run with:
         python -m b3_pipeline.cvm_main
@@ -122,15 +120,9 @@ class LowPEStrategy(StrategyBase):
         adtv = shared_data.get("adtv", pd.DataFrame())
         raw_close = shared_data.get("raw_close", pd.DataFrame())
 
-        # Use monthly-snapshot P/E if available; fall back to filing-date P/E.
-        # The _dyn key is populated by build_shared_data() when fundamentals_monthly
-        # has been materialized by the pipeline. The stored f_pe_ratio is the
-        # filing-date-based fallback for older pipeline versions.
-        if "f_pe_ratio_dyn" in shared_data and not shared_data["f_pe_ratio_dyn"].empty:
-            f_pe = shared_data["f_pe_ratio_dyn"]
-        else:
-            # Fallback to filing-date-based stored P/E (no monthly snapshot yet)
-            f_pe = shared_data.get("f_pe_ratio", pd.DataFrame())
+        # f_pe_ratio_dyn is computed dynamically by build_shared_data() from raw monthly
+        # fundamentals and raw_close prices. The stored f_pe_ratio key is no longer used.
+        f_pe = shared_data.get("f_pe_ratio_dyn", pd.DataFrame())
 
         min_adtv = float(params.get("min_adtv", 1_000_000))
         min_price = float(params.get("min_price", 1.0))
