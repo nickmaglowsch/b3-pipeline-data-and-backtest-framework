@@ -1,0 +1,23 @@
+[package]
+name = "cotahist_rs"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "cotahist_rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.22", features = ["extension-module"] }
+pyo3-arrow = "0.5"
+arrow = { version = "53", features = ["ffi"] }
+rayon = "1.8"
+zip = "0.6"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

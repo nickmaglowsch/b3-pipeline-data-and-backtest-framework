@@ -194,6 +194,48 @@ def run_pipeline(
         logger.info("Step 9/10: Updating adjusted columns in database...")
         storage.update_adjusted_columns(conn, adjusted_prices)
 
+        if not skip_corporate_actions:
+            unresolved = storage.get_unresolved_failures(conn)
+            if unresolved:
+                logger.info("")
+                logger.info(
+                    f"Step 9b/10: Retrying {len(unresolved)} previously failed corporate "
+                    "action fetches..."
+                )
+                ticker_to_isin = storage.get_ticker_isin_map(conn)
+                for failure in unresolved:
+                    company_code = failure["company_code"]
+                    logger.info(f"  Retrying {company_code}...")
+                    company_data = b3_corporate_actions.fetch_company_data(
+                        company_code, conn=conn
+                    )
+                    if company_data is None:
+                        logger.warning(f"  Retry still failed for {company_code}")
+                        continue
+                    storage.resolve_fetch_failure(conn, company_code, failure["endpoint"])
+                    stock_divs = company_data.get("stockDividends", [])
+                    if stock_divs:
+                        corp_df, stock_df, skipped_df = b3_corporate_actions.parse_stock_dividends(
+                            stock_divs
+                        )
+                        if not corp_df.empty:
+                            storage.upsert_corporate_actions(conn, corp_df)
+                        if not stock_df.empty:
+                            storage.upsert_stock_actions(conn, stock_df)
+                        if not skipped_df.empty:
+                            storage.upsert_skipped_events(conn, skipped_df)
+                    full_trading_name = company_data.get("tradingName", "").strip()
+                    if full_trading_name:
+                        cash_divs = b3_corporate_actions.fetch_cash_dividends_paginated(
+                            full_trading_name
+                        )
+                        if cash_divs:
+                            corp_df = b3_corporate_actions.parse_cash_dividends(
+                                cash_divs, company_code, ticker_to_isin
+                            )
+                            if not corp_df.empty:
+                                storage.upsert_corporate_actions(conn, corp_df)
+
         logger.info("")
         logger.info("Step 10/10: Summary statistics...")
         stats = storage.get_summary_stats(conn)

@@ -405,6 +405,26 @@ def parse_stock_dividends(
         if ex_date is None:
             continue
 
+        # Sanity-check: B3 real-world splits are at most a few thousand to one.
+        # The adjustments layer already caps at 1000x, but storing junk in the DB
+        # pollutes the stock_actions table. Reject anything beyond that bound here.
+        _MAX_SPLIT_FACTOR = 1000.0
+        _MIN_SPLIT_FACTOR = 1.0 / 1000.0
+        if factor > _MAX_SPLIT_FACTOR or factor < _MIN_SPLIT_FACTOR:
+            logger.warning(
+                f"Rejecting extreme factor {factor} for {isin_code} on {date_str} "
+                f"(label={label!r}) — outside [{_MIN_SPLIT_FACTOR}, {_MAX_SPLIT_FACTOR}]"
+            )
+            skipped_events.append({
+                "isin_code": isin_code,
+                "event_date": ex_date.date(),
+                "label": label,
+                "factor": factor,
+                "source": "B3",
+                "reason": "extreme_factor",
+            })
+            continue
+
         if label == config.B3_LABEL_DESDOBRAMENTO:
             action_type = config.EVENT_TYPE_STOCK_SPLIT
         elif label == config.B3_LABEL_GRUPAMENTO:

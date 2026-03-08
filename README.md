@@ -59,6 +59,61 @@ pip install -r requirements.txt
 
 This installs everything needed for the data pipeline, backtesting framework, ML research, and the Streamlit web UI.
 
+## Rust Extension (COTAHIST Parser)
+
+The COTAHIST fixed-width parsing loop is implemented as a compiled Rust extension (`cotahist_rs`)
+for performance. It uses `pyo3` + `maturin` to produce a Python `.so` and `rayon` for parallel
+processing of line records and multiple annual files. Parsing 33 years of data takes ~100ms
+instead of ~60s.
+
+### Prerequisites
+
+Install the Rust stable toolchain (one-time, system-wide):
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source $HOME/.cargo/env   # or restart your shell
+```
+
+Install `maturin` into the active Python venv (already in `requirements.txt`):
+
+```bash
+pip install maturin
+```
+
+### Building the Extension
+
+```bash
+# Development build — fast compile, installs into active venv
+make dev-rust
+
+# Release build — optimised, produces a .whl in b3_pipeline_rs/target/wheels/
+make build-rust
+```
+
+The `make dev-rust` command must be run once after cloning, and again whenever
+the Rust source files in `b3_pipeline_rs/src/` are changed.
+
+### Running Tests
+
+```bash
+make test-rust   # Rust unit tests (cargo test)
+make test        # Python test suite (pytest)
+make all         # build + test in sequence
+```
+
+### Troubleshooting
+
+If you see:
+
+```
+ImportError: The cotahist_rs Rust extension is not compiled.
+Run `make dev-rust` (or `cd b3_pipeline_rs && maturin develop`)
+to build it before running the pipeline.
+```
+
+Run `make dev-rust` to compile the extension.
+
 ## Usage
 
 Run the pipeline using the main module:

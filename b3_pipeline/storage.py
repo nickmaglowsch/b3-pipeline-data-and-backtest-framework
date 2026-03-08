@@ -360,6 +360,24 @@ def upsert_prices(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
     else:
         df["quotation_factor"] = df["quotation_factor"].fillna(1).astype(int)
 
+    # Drop records with non-positive prices or zero volume — these are non-trading
+    # entries or B3 data errors that would corrupt backtests.
+    before = len(df)
+    df = df[(df["close"] > 0) & (df["volume"] > 0)]
+    dropped_zero = before - len(df)
+    if dropped_zero:
+        logger.warning(f"Dropped {dropped_zero:,} rows with zero/negative close or zero volume")
+
+    # Drop records where OHLC is internally inconsistent (high < low, or close
+    # outside [low, high]).  These are data quality errors in the source files,
+    # concentrated in pre-2010 COTAHIST data.
+    before = len(df)
+    valid_ohlc = (df["high"] >= df["low"]) & (df["close"] >= df["low"]) & (df["close"] <= df["high"])
+    df = df[valid_ohlc]
+    dropped_ohlc = before - len(df)
+    if dropped_ohlc:
+        logger.warning(f"Dropped {dropped_ohlc:,} rows with invalid OHLC (close outside [low, high] or high < low)")
+
     cols = ["ticker", "isin_code", "date", "open", "high", "low", "close", "volume", "quotation_factor"]
     records = df[cols].values.tolist()
 
