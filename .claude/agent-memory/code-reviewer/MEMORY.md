@@ -127,3 +127,16 @@
 - LowPE: only reads f_pe_ratio_dyn (no fallback); ValueQuality: reads f_pb_ratio_dyn
 - `_fetch_ticker_mappings` concurrent refactor snuck into this diff (unrelated)
 - 188 tests passing
+
+## Rust COTAHIST Parser Review Notes (Mar 2026)
+- New crate: `b3_pipeline_rs/` (Cargo.toml, pyproject.toml, src/{lib.rs, parser.rs, schema.rs})
+- Modified: `b3_pipeline/parser.py` (delegates to Rust), `tests/test_parser_fatcot.py` (stale imports removed)
+- New: Makefile, README section, .gitignore entry, maturin in requirements.txt
+- **CRITICAL BLOCKER**: pyo3=0.20 + pyo3-arrow=0.5 version conflict (pyo3-arrow 0.5 needs pyo3 0.22). Crate does not compile.
+- `encoding_rs` dependency declared but never used in source code
+- `from . import config` imported but unused in new parser.py
+- `test_invalid_date_skipped` is a no-op test (asserts nothing)
+- close_price field position [108:121] confirmed same as old Python parser (pre-existing preco_medio issue)
+- Deferred import pattern in parser.py is correct (ImportError at call time, not module load)
+- 24 Rust unit tests + 7 Python integration tests (none can run until version conflict fixed)
+- Key pyo3 API note: 0.20 uses `&PyModule`, 0.22+ uses `&Bound<'_, PyModule>` -- lib.rs needs update after upgrade

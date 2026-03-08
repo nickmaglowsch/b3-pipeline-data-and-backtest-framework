@@ -2,8 +2,9 @@
 
 ## Test Framework
 - pytest; run with `pytest tests/ -v`
-- 60 tests, all in `tests/` directory
-- Test style: class-based (`class TestFoo`), in-memory SQLite via `sqlite3.connect(":memory:")`
+- ~198+ tests in `tests/` directory (count grows with each task)
+- Test style: class-based (`class TestFoo`), helper functions (not pytest fixtures)
+- DB fixture pattern: `_setup_db(tmp_path)` calls `storage.init_db(conn)` on a temp file
 - Mock pattern: `unittest.mock.patch("b3_pipeline.<module>.<symbol>")` — patch at point of use
 
 ## Project Structure
@@ -24,6 +25,18 @@
 - Each worker opens + closes its own `storage.get_connection()` for SQLite side-effects
 - Main thread collects via `as_completed`, appends to lists, does final `pd.concat` + dedup
 - Progress counter uses `threading.Lock` + shared int; logged every 10 completions
+
+## Rust Extension (cotahist_rs)
+- Crate at `b3_pipeline_rs/`, PyO3 module name `cotahist_rs`, crate name `cotahist_rs`
+- Build: `make dev-rust` (debug) / `make build-rust` (release wheel) / `make test-rust`
+- Boundary pattern: Arrow RecordBatch in, Arrow RecordBatch out (pyo3-arrow 0.5 + arrow 53)
+- rayon already available for parallelism; DO NOT create extra ThreadPoolBuilders
+- Python lazy-import: `try: import cotahist_rs` with graceful None fallback
+- New Rust modules added to `b3_pipeline_rs/src/` and declared in `lib.rs` with `mod name;`
+- Log messages: Rust collects `Vec<String>` and returns to Python; Python calls logger
+- Float precision: always `f64`, never `f32`; use `MAX_CUMULATIVE_FACTOR = 100_000.0`
+- Date boundary: convert Python dates to `Date32` (days since epoch) before Arrow conversion
+- Arrow null vs NaN: use `append_null()` in Float64Builder for missing cells (not NaN sentinel)
 
 ## B3 Corporate Actions API
 - Two endpoints per company: `GetListedSupplementCompany` (stock splits/bonuses) + `GetListedCashDividends` (paginated)
