@@ -211,26 +211,47 @@ def get_connection(db_path: Optional[Path] = None) -> sqlite3.Connection:
     return conn
 
 
-def init_db(conn: sqlite3.Connection, rebuild: bool = False) -> None:
-    """Initialize the database schema."""
+def init_db(conn: sqlite3.Connection, rebuild: bool = False, cvm_only: bool = False) -> None:
+    """Initialize the database schema.
+
+    Args:
+        conn: SQLite connection.
+        rebuild: When True, drop tables before recreating them.
+        cvm_only: When True (and rebuild=True), only drop the 5 CVM-specific tables
+            (fundamentals_monthly, fundamentals_pit, cvm_filings, company_isin_map,
+            cvm_companies).  COTAHIST-owned tables (prices, corporate_actions,
+            stock_actions, detected_splits, skipped_events, fetch_failures) are left
+            intact.  When False (default), all tables are dropped — this is the
+            full-pipeline rebuild behaviour used by main.py.
+    """
     cursor = conn.cursor()
 
     if rebuild:
-        logger.info("Dropping existing tables...")
-        # Drop fundamentals_monthly first (depends on nothing but should be cleaned)
-        cursor.execute("DROP TABLE IF EXISTS fundamentals_monthly")
-        # Drop CVM fundamentals tables first (before existing tables)
-        cursor.execute("DROP TABLE IF EXISTS fundamentals_pit")
-        cursor.execute("DROP TABLE IF EXISTS cvm_filings")
-        cursor.execute("DROP TABLE IF EXISTS company_isin_map")
-        cursor.execute("DROP TABLE IF EXISTS cvm_companies")
-        # Drop original tables
-        cursor.execute("DROP TABLE IF EXISTS prices")
-        cursor.execute("DROP TABLE IF EXISTS corporate_actions")
-        cursor.execute("DROP TABLE IF EXISTS stock_actions")
-        cursor.execute("DROP TABLE IF EXISTS detected_splits")
-        cursor.execute("DROP TABLE IF EXISTS skipped_events")
-        cursor.execute("DROP TABLE IF EXISTS fetch_failures")
+        if cvm_only:
+            logger.info("Dropping CVM tables only (prices and COTAHIST tables preserved)...")
+            cursor.execute("DROP TABLE IF EXISTS fundamentals_monthly")
+            cursor.execute("DROP TABLE IF EXISTS fundamentals_pit")
+            cursor.execute("DROP TABLE IF EXISTS cvm_filings")
+            cursor.execute("DROP TABLE IF EXISTS company_isin_map")
+            cursor.execute("DROP TABLE IF EXISTS cvm_companies")
+        else:
+            logger.warning(
+                "Full rebuild: dropping ALL tables including prices and corporate actions"
+            )
+            # Drop fundamentals_monthly first (depends on nothing but should be cleaned)
+            cursor.execute("DROP TABLE IF EXISTS fundamentals_monthly")
+            # Drop CVM fundamentals tables first (before existing tables)
+            cursor.execute("DROP TABLE IF EXISTS fundamentals_pit")
+            cursor.execute("DROP TABLE IF EXISTS cvm_filings")
+            cursor.execute("DROP TABLE IF EXISTS company_isin_map")
+            cursor.execute("DROP TABLE IF EXISTS cvm_companies")
+            # Drop original tables
+            cursor.execute("DROP TABLE IF EXISTS prices")
+            cursor.execute("DROP TABLE IF EXISTS corporate_actions")
+            cursor.execute("DROP TABLE IF EXISTS stock_actions")
+            cursor.execute("DROP TABLE IF EXISTS detected_splits")
+            cursor.execute("DROP TABLE IF EXISTS skipped_events")
+            cursor.execute("DROP TABLE IF EXISTS fetch_failures")
 
     logger.info("Creating database schema...")
     cursor.execute(SCHEMA_PRICES)

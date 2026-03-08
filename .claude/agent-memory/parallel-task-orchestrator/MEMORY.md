@@ -107,6 +107,22 @@
 - Tests: 198 total (was 153); new: test_cad_parser.py, test_cad_downloader.py, test_ipe_parser.py,
   test_ipe_shares.py, test_cvm_main_historical.py, test_survivorship_filter.py
 
+### Rust Extension Module (b3_pipeline_rs/) -- created 2026-03-08
+- Crate: cotahist_rs, PyO3 0.22, pyo3-arrow 0.5, arrow 53, rayon 1.8
+- New files: src/adjustments.rs, src/pivot.rs (src/parser.rs, src/schema.rs pre-existed)
+- Functions added: detect_splits, compute_split_adjustment, pivot_and_ffill
+- Python wrappers: _detect_splits_rs, _compute_split_adjustment_rs in b3_pipeline/adjustments.py
+- Python wrapper: _pivot_and_ffill_rs in backtests/core/data.py
+- Build: `make dev-rust` (maturin develop); Test: `make test-rust` (cargo test)
+- CRITICAL: Arrow Date32 casting — pandas datetime64[ns] converts to Timestamp[ns] in Arrow,
+  NOT Date32. Must explicitly cast: `old_col.cast(pa.date32())` via _cast_date_col() helper
+  before passing date columns to Rust. Applied to both "date" and "ex_date" columns.
+- cargo path on macOS: /Users/nickmaglowsch/.cargo/bin/cargo (not in default PATH)
+  Use `export PATH="$HOME/.cargo/bin:$PATH"` before cargo commands.
+- Tests: 220 Python tests + 45 Rust unit tests all passing
+- Integration test files: tests/test_detect_splits_rs.py, test_split_adjustment_rs.py,
+  test_load_b3_data_pivot_rs.py — all skip if cotahist_rs not compiled
+
 ### MeanRevComposite Strategy -- created 2026-03-02
 - backtests/core/mean_rev_helpers.py: 3 helpers -- compute_regime_filter(), compute_alpha_score(), compute_signal_stability()
 - backtests/strategies/mean_reversion.py: SimpleMeanReversionStrategy (old) + MeanReversionCompositeStrategy (new, name="MeanRevComposite")

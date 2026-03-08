@@ -98,3 +98,14 @@
 - Task 07: Add `LowPE` strategy plugin using `f_pe_ratio_dyn` (n_stocks lowest P/E)
 - Key insight: monthly snapshot ratios use CURRENT month-end price × forward-filled financials (not filing-date price)
 - Key insight: `_build_adtv_ticker_map(conn)` helper should be extracted and shared between Tasks 02 and 04
+
+## Rust COTAHIST Parser (tasks/ as of 2026-03-07)
+- Crate: `b3_pipeline_rs/` at project root; `name = "cotahist_rs"`, importable as top-level `import cotahist_rs`
+- Deps: pyo3=0.20, pyo3-arrow=0.5, arrow=50, rayon=1.8, zip=0.6, encoding_rs=0.8
+- Python interface: `cotahist_rs.parse_zip(path: str) -> pa.RecordBatch`, `cotahist_rs.parse_multiple_zips(paths: list[str]) -> pa.RecordBatch`
+- Schema: date(Utf8 "YYYY-MM-DD"), ticker(Utf8), isin_code(Utf8), open/high/low/close/volume(Float64), quotation_factor(Int64)
+- Hard ImportError in parser.py if extension not compiled (no Python fallback)
+- Parallelism: rayon par_iter for lines within each ZIP + par_iter across ZIP files
+- maturin added to requirements.txt; Makefile targets: dev-rust, build-rust, test-rust, test
+- `_parse_price`, `_parse_date`, `_parse_int` helpers DELETED from parser.py after Task 06
+- test_parser_fatcot.py: remove import of deleted helpers; 7 existing tests become Rust integration tests

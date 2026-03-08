@@ -403,7 +403,7 @@ def run_fundamentals_pipeline(
         # Step 1
         logger.info("")
         logger.info("Step 1/10: Initializing database...")
-        storage.init_db(conn, rebuild=rebuild)
+        storage.init_db(conn, rebuild=rebuild, cvm_only=True)
 
         # Step 2
         logger.info("")
