@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 
 from research.discovery import config
+from research.discovery.fundamental_signals import generate_fundamental_base_signals
 
 
 def compute_momentum_return(adj_close: pd.DataFrame, window: int) -> pd.DataFrame:
@@ -313,3 +314,6 @@ def generate_all_base_signals(data: dict):
     for w in config.MEAN_REVERSION_WINDOWS:
         yield (f"Mean_reversion_{w}d", "mean_reversion", {"window": w},
                compute_mean_reversion(adj_close, w))
+
+    # 22. Fundamental signals (valuation, quality, growth, leverage)
+    yield from generate_fundamental_base_signals(data)

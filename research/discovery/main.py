@@ -53,6 +53,10 @@ def main():
         "--force-recompute", action="store_true",
         help="Invalidate feature store and recompute everything"
     )
+    parser.add_argument(
+        "--no-fundamentals", action="store_true",
+        help="Disable fundamentals signals (skip loading from fundamentals_pit)"
+    )
     args = parser.parse_args()
 
     if args.incremental and args.force_recompute:
@@ -75,7 +79,7 @@ def main():
     # Step 1: Load data
     print("\nStep 1: Loading data...")
     t0 = time.time()
-    data = load_all_data()
+    data = load_all_data(use_fundamentals=not args.no_fundamentals)
     print_data_summary(data)
     print(f"  Completed in {time.time() - t0:.1f}s")
 
