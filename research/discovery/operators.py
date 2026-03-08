@@ -17,7 +17,7 @@ except ImportError:
 def _wide_to_batch(df: pd.DataFrame):
     """Convert a wide DataFrame (DatetimeIndex × tickers) to a pyarrow RecordBatch."""
     import pyarrow as pa
-    tmp = df.reset_index()
+    tmp = df.astype("float64").reset_index()
     # The reset_index column name may be None or the index name; rename to "date"
     tmp = tmp.rename(columns={tmp.columns[0]: "date"})
     tmp["date"] = tmp["date"].astype(str)
