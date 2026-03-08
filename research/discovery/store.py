@@ -45,7 +45,7 @@ class FeatureStore:
     
     Manages:
     1. JSON registry of feature metadata
-    2. Parquet files of feature values (long format)
+    2. Parquet files of feature values (wide format: date index, ticker columns)
     3. Parquet files of evaluation results
     """
     
@@ -93,7 +93,14 @@ class FeatureStore:
         return current_hash == data_hash
     
     def invalidate(self) -> None:
-        """Clear all cached features and evaluations. Reset registry."""
+        """
+        Clear all cached features and evaluations. Reset registry.
+
+        NOTE: As of Task 03, features are stored in wide format (date index,
+        ticker columns). Any Parquet files written before this change are in
+        long format and must be deleted before the new code can read them.
+        Always run with ``--force-recompute`` after upgrading to this version.
+        """
         # Delete all Parquet files
         for f in self.features_dir.glob("*.parquet"):
             f.unlink()
@@ -122,22 +129,24 @@ class FeatureStore:
     ) -> None:
         """
         Save a computed feature to the store.
-        
+
         Args:
             feature_id: Unique feature identifier
-            df: Long-format DataFrame with columns [date, ticker, value]
+            df: Wide-format DataFrame with date index and ticker columns.
+                All value columns are cast to float32 before writing.
             metadata: dict with keys: category, level, formula, params
         """
         # Sanitize feature ID for filesystem
         safe_id = sanitize_feature_id(feature_id)
         parquet_path = self.features_dir / f"{safe_id}.parquet"
-        
-        # Ensure value column is float32
-        if "value" in df.columns:
-            df["value"] = df["value"].astype("float32")
-        
-        # Write Parquet
-        df.to_parquet(parquet_path, engine="pyarrow", index=False)
+
+        # Ensure index is named "date" and all value columns are float32
+        df = df.copy()
+        df.index.name = "date"
+        df = df.astype("float32")
+
+        # Write Parquet with the date index preserved
+        df.to_parquet(parquet_path, engine="pyarrow", index=True)
         
         # Update registry
         self._registry["features"][feature_id] = {
@@ -153,7 +162,7 @@ class FeatureStore:
         self._registry["updated_at"] = datetime.now().isoformat()
     
     def load_feature(self, feature_id: str) -> pd.DataFrame:
-        """Load a feature's values from Parquet. Returns long-format DataFrame."""
+        """Load a feature's values from Parquet. Returns wide-format DataFrame (date index, ticker columns)."""
         if feature_id not in self._registry["features"]:
             raise ValueError(f"Feature {feature_id} not found in store")
         
@@ -163,20 +172,14 @@ class FeatureStore:
         df = pd.read_parquet(path, engine="pyarrow")
         return df
     
-    def load_features_batch(self, feature_ids: list) -> pd.DataFrame:
+    def load_features_batch(self, feature_ids: list) -> dict:
         """
-        Load multiple features and return wide DataFrame (date x ticker x features).
-        
-        Actually returns a long-format combined DataFrame with a feature_id column.
-        This is more practical than true wide format with many feature columns.
+        Load multiple features and return a dict of wide DataFrames.
+
+        Returns:
+            dict mapping feature_id -> wide DataFrame (date index, ticker columns)
         """
-        frames = []
-        for fid in feature_ids:
-            df = self.load_feature(fid)
-            df["feature_id"] = fid
-            frames.append(df)
-        
-        return pd.concat(frames, ignore_index=True)
+        return {fid: self.load_feature(fid) for fid in feature_ids}
     
     def save_evaluation(self, feature_id: str, evaluation: dict) -> None:
         """Save IC evaluation results for a feature into the registry."""

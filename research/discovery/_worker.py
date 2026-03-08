@@ -42,9 +42,8 @@ def evaluate_feature_worker(args: tuple):
 
         store = FeatureStore(store_dir=Path(store_dir_str))
 
-        # Load feature from Parquet
-        long_df = store.load_feature(feature_id)
-        wide_df = long_df.pivot_table(index="date", columns="ticker", values="value")
+        # Load feature from Parquet (wide format: date index, ticker columns)
+        wide_df = store.load_feature(feature_id)
 
         # Load pre-computed forward rank DataFrames
         fwd_ranks_precomputed = {}
@@ -109,9 +108,8 @@ def generate_unary_feature_worker(args: tuple):
 
         store = FeatureStore(store_dir=Path(store_dir_str))
 
-        # Load feature from Parquet
-        long_df = store.load_feature(feature_id)
-        wide_df = long_df.pivot_table(index="date", columns="ticker", values="value")
+        # Load feature from Parquet (wide format: date index, ticker columns)
+        wide_df = store.load_feature(feature_id)
 
         # Load universe mask
         universe_mask = pd.read_parquet(universe_mask_parquet, engine="pyarrow")
@@ -120,12 +118,8 @@ def generate_unary_feature_worker(args: tuple):
         op_func = UNARY_OPS[op_name]
         result = op_func(wide_df)
 
-        # Mask and convert to long format
-        masked = result.where(universe_mask)
-        long_result = masked.stack().reset_index()
-        long_result.columns = ["date", "ticker", "value"]
-        long_result = long_result.dropna(subset=["value"])
-        long_result["value"] = long_result["value"].astype("float32")
+        # Mask and convert to wide float32
+        masked = result.where(universe_mask).astype("float32")
 
         metadata = {
             "category": category,
@@ -134,7 +128,7 @@ def generate_unary_feature_worker(args: tuple):
             "params": {},
         }
 
-        return {"new_id": new_id, "df": long_result, "metadata": metadata}
+        return {"new_id": new_id, "df": masked, "metadata": metadata}
 
     except Exception:
         print(
@@ -163,18 +157,14 @@ def generate_delta_feature_worker(args: tuple):
 
         store = FeatureStore(store_dir=Path(store_dir_str))
 
-        long_df = store.load_feature(feature_id)
-        wide_df = long_df.pivot_table(index="date", columns="ticker", values="value")
+        # Load feature from Parquet (wide format: date index, ticker columns)
+        wide_df = store.load_feature(feature_id)
 
         universe_mask = pd.read_parquet(universe_mask_parquet, engine="pyarrow")
 
         result = op_delta(wide_df, period)
 
-        masked = result.where(universe_mask)
-        long_result = masked.stack().reset_index()
-        long_result.columns = ["date", "ticker", "value"]
-        long_result = long_result.dropna(subset=["value"])
-        long_result["value"] = long_result["value"].astype("float32")
+        masked = result.where(universe_mask).astype("float32")
 
         metadata = {
             "category": category,
@@ -183,7 +173,7 @@ def generate_delta_feature_worker(args: tuple):
             "params": {"period": period},
         }
 
-        return {"new_id": new_id, "df": long_result, "metadata": metadata}
+        return {"new_id": new_id, "df": masked, "metadata": metadata}
 
     except Exception:
         print(
@@ -212,18 +202,14 @@ def generate_ratio_to_mean_feature_worker(args: tuple):
 
         store = FeatureStore(store_dir=Path(store_dir_str))
 
-        long_df = store.load_feature(feature_id)
-        wide_df = long_df.pivot_table(index="date", columns="ticker", values="value")
+        # Load feature from Parquet (wide format: date index, ticker columns)
+        wide_df = store.load_feature(feature_id)
 
         universe_mask = pd.read_parquet(universe_mask_parquet, engine="pyarrow")
 
         result = op_ratio_to_mean(wide_df, period)
 
-        masked = result.where(universe_mask)
-        long_result = masked.stack().reset_index()
-        long_result.columns = ["date", "ticker", "value"]
-        long_result = long_result.dropna(subset=["value"])
-        long_result["value"] = long_result["value"].astype("float32")
+        masked = result.where(universe_mask).astype("float32")
 
         metadata = {
             "category": category,
@@ -232,7 +218,7 @@ def generate_ratio_to_mean_feature_worker(args: tuple):
             "params": {"period": period},
         }
 
-        return {"new_id": new_id, "df": long_result, "metadata": metadata}
+        return {"new_id": new_id, "df": masked, "metadata": metadata}
 
     except Exception:
         print(
@@ -261,22 +247,16 @@ def generate_binary_feature_worker(args: tuple):
 
         store = FeatureStore(store_dir=Path(store_dir_str))
 
-        long_a = store.load_feature(feat_a)
-        long_b = store.load_feature(feat_b)
-
-        wide_a = long_a.pivot_table(index="date", columns="ticker", values="value")
-        wide_b = long_b.pivot_table(index="date", columns="ticker", values="value")
+        # Load features from Parquet (wide format: date index, ticker columns)
+        wide_a = store.load_feature(feat_a)
+        wide_b = store.load_feature(feat_b)
 
         universe_mask = pd.read_parquet(universe_mask_parquet, engine="pyarrow")
 
         op_func = BINARY_OPS[op_name]
         result = op_func(wide_a, wide_b)
 
-        masked = result.where(universe_mask)
-        long_result = masked.stack().reset_index()
-        long_result.columns = ["date", "ticker", "value"]
-        long_result = long_result.dropna(subset=["value"])
-        long_result["value"] = long_result["value"].astype("float32")
+        masked = result.where(universe_mask).astype("float32")
 
         metadata = {
             "category": "composite",
@@ -285,7 +265,7 @@ def generate_binary_feature_worker(args: tuple):
             "params": {},
         }
 
-        return {"new_id": new_id, "df": long_result, "metadata": metadata}
+        return {"new_id": new_id, "df": masked, "metadata": metadata}
 
     except Exception:
         print(

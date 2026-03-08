@@ -368,25 +368,26 @@ def test_compute_evaluation_summary_train_test_split():
 # ===========================================================================
 
 
-def _build_store_with_feature(tmp_path, feature_id, long_df):
-    """Helper: create a FeatureStore in tmp_path and save one feature."""
+def _build_store_with_feature(tmp_path, feature_id, wide_df):
+    """Helper: create a FeatureStore in tmp_path and save one feature (wide format)."""
     from research.discovery.store import FeatureStore
     store = FeatureStore(store_dir=tmp_path)
     store.save_feature(
         feature_id,
-        long_df,
+        wide_df,
         {"category": "test", "level": 0, "formula": "", "params": {}},
     )
     return store
 
 
-def _make_long_df(dates, tickers, values):
-    """Build a long-format feature DataFrame."""
-    rows = []
-    for d in dates:
-        for t, v in zip(tickers, values):
-            rows.append({"date": d, "ticker": t, "value": v})
-    return pd.DataFrame(rows)
+def _make_wide_df(dates, tickers, values):
+    """Build a wide-format feature DataFrame (date index, ticker columns).
+
+    ``values`` is a sequence of length ``n_tickers`` applied uniformly across
+    all dates (used to create constant rows for zero-variance testing).
+    """
+    data = {t: [v] * len(dates) for t, v in zip(tickers, values)}
+    return pd.DataFrame(data, index=dates)
 
 
 def test_filter_by_ic_removes_below_threshold():
@@ -408,12 +409,8 @@ def test_filter_nan_and_variance_removes_all_nan_feature(tmp_path):
     """filter_nan_and_variance removes a feature whose value column is all-NaN."""
     dates = pd.date_range("2020-01-02", periods=10, freq="B")
     tickers = ["T0", "T1", "T2"]
-    long_df = pd.DataFrame({
-        "date": list(dates) * len(tickers),
-        "ticker": tickers * len(dates),
-        "value": [np.nan] * (len(dates) * len(tickers)),
-    })
-    store = _build_store_with_feature(tmp_path, "all_nan_feat", long_df)
+    wide_df = pd.DataFrame(np.nan, index=dates, columns=tickers)
+    store = _build_store_with_feature(tmp_path, "all_nan_feat", wide_df)
     mask = pd.DataFrame(True, index=dates, columns=tickers)
     kept, removed = filter_nan_and_variance(store, ["all_nan_feat"], mask)
     assert "all_nan_feat" in removed
@@ -425,8 +422,8 @@ def test_filter_nan_and_variance_removes_zero_variance_feature(tmp_path):
     dates = pd.date_range("2020-01-02", periods=10, freq="B")
     tickers = ["T0", "T1", "T2"]
     # All tickers have the same value (7.0) on every date → zero cross-sectional variance
-    long_df = _make_long_df(dates, tickers, [7.0, 7.0, 7.0])
-    store = _build_store_with_feature(tmp_path, "zero_var_feat", long_df)
+    wide_df = _make_wide_df(dates, tickers, [7.0, 7.0, 7.0])
+    store = _build_store_with_feature(tmp_path, "zero_var_feat", wide_df)
     mask = pd.DataFrame(True, index=dates, columns=tickers)
     kept, removed = filter_nan_and_variance(store, ["zero_var_feat"], mask)
     assert "zero_var_feat" in removed
@@ -437,15 +434,12 @@ def test_filter_nan_and_variance_keeps_good_feature(tmp_path):
     rng = np.random.default_rng(0)
     dates = pd.date_range("2020-01-02", periods=30, freq="B")
     tickers = ["T0", "T1", "T2", "T3", "T4"]
-    values = rng.standard_normal(len(dates) * len(tickers))
-    long_df = pd.DataFrame({
-        "date": list(dates) * len(tickers),
-        "ticker": tickers * len(dates),
-        "value": values,
-    })
-    # Sort so pivot_table works cleanly
-    long_df = long_df.sort_values(["date", "ticker"]).reset_index(drop=True)
-    store = _build_store_with_feature(tmp_path, "good_feat", long_df)
+    wide_df = pd.DataFrame(
+        rng.standard_normal((len(dates), len(tickers))),
+        index=dates,
+        columns=tickers,
+    )
+    store = _build_store_with_feature(tmp_path, "good_feat", wide_df)
     mask = pd.DataFrame(True, index=dates, columns=tickers)
     kept, removed = filter_nan_and_variance(store, ["good_feat"], mask)
     assert "good_feat" in kept
@@ -490,24 +484,15 @@ def test_deduplicate_by_correlation_removes_lower_ic_ir_duplicate(tmp_path):
     base_values = rng.standard_normal((len(dates), len(tickers)))
 
     # feat_high: the base signal (will be assigned high IC_IR)
-    rows_high = []
-    for di, d in enumerate(dates):
-        for ti, t in enumerate(tickers):
-            rows_high.append({"date": d, "ticker": t, "value": float(base_values[di, ti])})
-    long_high = pd.DataFrame(rows_high)
+    wide_high = pd.DataFrame(base_values, index=dates, columns=tickers)
 
     # feat_low: the base signal + tiny noise (will be assigned low IC_IR, corr > 0.90)
     noise = rng.standard_normal((len(dates), len(tickers))) * 0.05
-    correlated_values = base_values + noise
-    rows_low = []
-    for di, d in enumerate(dates):
-        for ti, t in enumerate(tickers):
-            rows_low.append({"date": d, "ticker": t, "value": float(correlated_values[di, ti])})
-    long_low = pd.DataFrame(rows_low)
+    wide_low = pd.DataFrame(base_values + noise, index=dates, columns=tickers)
 
     store = FeatureStore(store_dir=tmp_path)
-    store.save_feature("feat_high", long_high, {"category": "test", "level": 0, "formula": "", "params": {}})
-    store.save_feature("feat_low", long_low, {"category": "test", "level": 0, "formula": "", "params": {}})
+    store.save_feature("feat_high", wide_high, {"category": "test", "level": 0, "formula": "", "params": {}})
+    store.save_feature("feat_low", wide_low, {"category": "test", "level": 0, "formula": "", "params": {}})
 
     # Evaluations: feat_high has higher IC_IR
     evaluations_df = pd.DataFrame({
