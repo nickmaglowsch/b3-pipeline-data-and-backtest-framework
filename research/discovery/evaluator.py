@@ -11,6 +11,12 @@ from scipy.stats import spearmanr
 from research.discovery import config
 from research.discovery.store import FeatureStore
 
+try:
+    import cotahist_rs as _rs
+    _RUST_EVAL = True
+except ImportError:
+    _RUST_EVAL = False
+
 
 def compute_forward_returns_wide(
     adj_close: pd.DataFrame, horizons: list[int]
@@ -23,6 +29,38 @@ def compute_forward_returns_wide(
     for h in horizons:
         result[h] = adj_close.shift(-h) / adj_close - 1
     return result
+
+
+def _compute_ic_series_rust(
+    feature_wide: pd.DataFrame,
+    fwd_rank_wide: pd.DataFrame,
+    universe_mask: pd.DataFrame,
+) -> pd.Series:
+    """Call the Rust implementation of IC series computation."""
+    import pyarrow as pa
+    feat_masked = feature_wide.where(universe_mask).astype("float64")
+    fwd_masked = fwd_rank_wide.where(universe_mask)
+
+    # reset_index() may name the index column by the index name or "index"
+    # We need to ensure the date column is named "date" for the Rust function.
+    feat_reset = feat_masked.reset_index()
+    fwd_reset = fwd_masked.reset_index()
+    # Rename the first column (index) to "date"
+    feat_reset = feat_reset.rename(columns={feat_reset.columns[0]: "date"})
+    fwd_reset = fwd_reset.rename(columns={fwd_reset.columns[0]: "date"})
+    # Convert date to string (YYYY-MM-DD) so Rust reads it as Utf8
+    feat_reset["date"] = feat_reset["date"].astype(str)
+    fwd_reset["date"] = fwd_reset["date"].astype(str)
+
+    feat_batch = pa.RecordBatch.from_pandas(feat_reset, preserve_index=False)
+    fwd_batch = pa.RecordBatch.from_pandas(fwd_reset, preserve_index=False)
+    result_batch = _rs.compute_ic_series(feat_batch, fwd_batch, min_valid_stocks=10)
+    result_df = result_batch.to_pandas().set_index("date")
+    result_df.index = pd.to_datetime(result_df.index)
+    # Preserve the original DatetimeIndex (including frequency metadata) so the result
+    # is index-compatible with the Python path (which keeps the original freq).
+    result_df.index = feature_wide.index
+    return result_df["ic"]
 
 
 def compute_ic_series_fast(
@@ -47,6 +85,10 @@ def compute_ic_series_fast(
     Returns:
         pd.Series of IC values, indexed by date. NaN for dates with < 10 valid stocks.
     """
+    if _RUST_EVAL and fwd_rank_precomputed is not None:
+        return _compute_ic_series_rust(feature_wide, fwd_rank_precomputed, universe_mask)
+
+    # Python fallback (also used when fwd_rank_precomputed is None)
     # Apply universe mask and rank feature
     feat = feature_wide.where(universe_mask)
     feat_rank = feat.rank(axis=1, pct=True)
