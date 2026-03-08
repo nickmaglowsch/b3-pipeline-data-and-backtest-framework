@@ -26,17 +26,14 @@ def filter_nan_and_variance(
 
     for feature_id in feature_ids:
         try:
-            long_df = store.load_feature(feature_id)
+            wide_df = store.load_feature(feature_id)
 
-            # Compute NaN rate
-            total_rows = len(long_df)
-            nan_rows = long_df["value"].isna().sum()
-            nan_rate = nan_rows / total_rows if total_rows > 0 else 0
+            # Compute NaN rate over all cells
+            total_cells = wide_df.size
+            nan_cells = wide_df.isna().sum().sum()
+            nan_rate = nan_cells / total_cells if total_cells > 0 else 0
 
             # Check zero-variance dates
-            wide_df = long_df.pivot_table(
-                index="date", columns="ticker", values="value"
-            )
             zero_var_count = (wide_df.std(axis=1) == 0).sum()
             zero_var_rate = zero_var_count / len(wide_df) if len(wide_df) > 0 else 0
 
@@ -117,17 +114,14 @@ def compute_feature_correlation_matrix(
         if i % 100 == 0 and i > 0:
             print(f"      Loaded {i}/{len(feature_ids)} features...")
         try:
-            df = store.load_feature(fid)
-            df_pivot = df.pivot_table(
-                index="date", columns="ticker", values="value"
-            )
+            wide_df = store.load_feature(fid)
             # Reindex to common grid (sampled_dates x common_tickers) so all arrays same length
-            sampled = df_pivot.reindex(index=sampled_dates, columns=common_tickers)
+            sampled = wide_df.reindex(index=sampled_dates, columns=common_tickers)
             ranked = sampled.rank(axis=1, pct=True)
             # Flatten to a single vector (date*ticker)
             rank_data[fid] = ranked.values.flatten()
             valid_ids.append(fid)
-            del df, df_pivot, sampled, ranked
+            del wide_df, sampled, ranked
         except Exception as e:
             print(f"      WARNING: Could not load {fid}: {e}")
             continue

@@ -274,14 +274,9 @@ def run_generation_pipeline(
                     {col: wide_df for col in universe_mask.columns},
                     index=wide_df.index,
                 ).reindex(universe_mask.index)
-                masked = broadcast_df.where(universe_mask)
+                masked = broadcast_df.where(universe_mask).astype("float32")
             else:
-                masked = wide_df.where(universe_mask)
-
-            long_df = masked.stack().reset_index()
-            long_df.columns = ["date", "ticker", "value"]
-            long_df = long_df.dropna(subset=["value"])
-            long_df["value"] = long_df["value"].astype("float32")
+                masked = wide_df.where(universe_mask).astype("float32")
 
             metadata = {
                 "category": category,
@@ -289,7 +284,7 @@ def run_generation_pipeline(
                 "formula": feature_id,
                 "params": params,
             }
-            store.save_feature(feature_id, long_df, metadata)
+            store.save_feature(feature_id, masked, metadata)
             n_new += 1
 
         except Exception as e:
@@ -297,7 +292,7 @@ def run_generation_pipeline(
             continue
 
         # Free memory
-        del wide_df, long_df
+        del wide_df, masked
 
         if n_new % 50 == 0:
             print(f"    Generated {n_new} base signals...")
