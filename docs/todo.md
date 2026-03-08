@@ -181,3 +181,45 @@ ranked = signals.with_columns([
 - Rust parser (Part 1) can be done independently of Polars (Part 2)
 - Part 2 Phase 1 can be done before Part 1 — both are independent
 - Part 2 Phase 3 (strategy migration) depends on Phase 2
+
+---
+
+# Known Limitation: No Pre-2010 Fundamental Data
+
+## Problem
+
+CVM's open data portal (`dados.cvm.gov.br`) provides structured bulk financial data only from
+2010 onward. The IPE dataset (2003-2009) contains per-company PDF documents — not structured
+CSV data — so automated financial extraction from it is not viable.
+
+Current coverage:
+```
+prices:        1994+  (COTAHIST)
+DFP (annual):  2010+
+ITR (quarterly):2011+
+FRE (shares):  2010+
+fundamentals_pit: 2010+ only
+```
+
+## What --include-historical actually provides
+
+- **CAD company register**: listing/delisting dates for survivorship-bias correction
+- **IPE document index**: company CNPJs and filing metadata (2003-2009), helps ticker mapping
+- **NOT** pre-2010 financial statements
+
+## Verified findings
+
+- `dados.cvm.gov.br/dados/CIA_ABERTA/DOC/IAN/` → 404 (IAN dataset does not exist as bulk data)
+- IPE ZIP files contain `ipe_cia_aberta_{year}.csv` — an index of document links
+- Each document link (`rad.cvm.gov.br/ENET/frmDownloadDocumento.aspx?...`) returns a **PDF file**
+- ~530 PDF documents per year for "Demonstrações Financeiras Anuais Completas" in 2008 alone
+- No structured parsing path exists without a PDF extraction library + company-specific layout handling
+
+## Options if pre-2010 data is needed
+
+1. **Commercial data providers**: Economatica, Bloomberg, Refinitiv — all have structured
+   Brazilian fundamentals going back to 2000+ with clean corporate action handling.
+2. **Academic datasets**: NEFIN (USP) provides risk factors but not individual fundamentals.
+3. **PDF extraction (future)**: If `pdfplumber` or similar is added, IPE PDFs for
+   "Demonstrações Financeiras Anuais Completas" could be parsed. High engineering effort,
+   variable accuracy across companies. ~3,700 PDF downloads for 2003-2009.
