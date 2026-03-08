@@ -17,7 +17,7 @@ import pytest
 
 # We test at the function level to avoid needing real ZIP files.
 # Import the helpers directly.
-from b3_pipeline.parser import _parse_int, _parse_price, parse_cotahist_file
+from b3_pipeline.parser import parse_cotahist_file
 
 
 def _build_cotahist_line(

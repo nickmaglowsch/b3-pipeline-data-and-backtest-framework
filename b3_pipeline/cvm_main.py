@@ -603,6 +603,19 @@ def run_fundamentals_pipeline(
                 )
                 cad_rows = cvm_storage.upsert_cad_company_dates(conn, cad_df)
                 logger.info(f"Upserted {cad_rows:,} CAD company date rows")
+                # Warn about companies with tickers that still have no listing_date —
+                # these are not in the CAD file and may affect survivorship bias filtering.
+                cur = conn.cursor()
+                cur.execute(
+                    "SELECT COUNT(*) FROM cvm_companies WHERE ticker IS NOT NULL AND listing_date IS NULL"
+                )
+                missing_listing = cur.fetchone()[0]
+                if missing_listing:
+                    logger.warning(
+                        f"⚠️  {missing_listing} companies have a B3 ticker but no listing_date "
+                        "after CAD ingestion — they are absent from the CVM CAD file. "
+                        "Survivorship bias filtering may be inaccurate for these companies."
+                    )
                 # Refresh ticker map after CAD adds new CNPJ rows
                 if not skip_ticker_fetch:
                     logger.info("Re-fetching ticker mappings after CAD upsert...")
