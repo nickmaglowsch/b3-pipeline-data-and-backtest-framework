@@ -14,7 +14,6 @@ import pandas as pd
 import pytest
 
 from b3_pipeline import storage, cvm_storage
-from b3_pipeline.cvm_main import materialize_valuation_ratios
 
 
 # ── Fixtures ───────────────────────────────────────────────────────────────────
@@ -27,27 +26,6 @@ def mem_conn():
     storage.init_db(conn)
     yield conn
     conn.close()
-
-
-def _insert_price(conn, ticker, date, close, volume=0):
-    """Helper: insert a minimal prices row."""
-    conn.execute(
-        """
-        INSERT OR REPLACE INTO prices (ticker, isin_code, date, open, high, low, close, volume)
-        VALUES (?, 'UNKNOWN', ?, ?, ?, ?, ?, ?)
-        """,
-        (ticker, date, close, close, close, close, int(volume)),
-    )
-    conn.commit()
-
-
-def _insert_company(conn, cnpj, ticker):
-    """Helper: insert a cvm_companies row so ADTV ticker map can find it."""
-    conn.execute(
-        "INSERT OR REPLACE INTO cvm_companies (cnpj, ticker) VALUES (?, ?)",
-        (cnpj, ticker),
-    )
-    conn.commit()
 
 
 def _insert_pit_row(conn, **kwargs):
@@ -69,9 +47,6 @@ def _insert_pit_row(conn, **kwargs):
         "equity": None,
         "net_debt": None,
         "shares_outstanding": None,
-        "pe_ratio": None,
-        "pb_ratio": None,
-        "ev_ebitda": None,
     }
     defaults.update(kwargs)
     conn.execute(
@@ -80,12 +55,12 @@ def _insert_pit_row(conn, **kwargs):
           (filing_id, cnpj, ticker, period_end, filing_date, filing_version,
            doc_type, fiscal_year, quarter,
            revenue, net_income, ebitda, total_assets, equity, net_debt,
-           shares_outstanding, pe_ratio, pb_ratio, ev_ebitda)
+           shares_outstanding)
         VALUES
           (:filing_id, :cnpj, :ticker, :period_end, :filing_date, :filing_version,
            :doc_type, :fiscal_year, :quarter,
            :revenue, :net_income, :ebitda, :total_assets, :equity, :net_debt,
-           :shares_outstanding, :pe_ratio, :pb_ratio, :ev_ebitda)
+           :shares_outstanding)
         """,
         defaults,
     )
@@ -93,123 +68,7 @@ def _insert_pit_row(conn, **kwargs):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 1. Basic P/E ratio
-# ──────────────────────────────────────────────────────────────────────────────
-
-def test_materialize_pe_ratio_basic(mem_conn):
-    """P/E = (price * shares) / (net_income * 1000) — CVM values are in thousands BRL."""
-    _insert_company(mem_conn, "33000167000101", "PETR")
-    _insert_pit_row(
-        mem_conn,
-        filing_id="PETR_DFP_2023-12-31_1",
-        ticker="PETR",
-        net_income=1_000.0,  # 1,000 thousands BRL = 1,000,000 BRL
-        shares_outstanding=10_000_000.0,
-        filing_date="2023-04-15",
-        doc_type="DFP",
-    )
-    _insert_price(mem_conn, "PETR3", "2023-04-14", 30.0, volume=10_000)
-
-    materialize_valuation_ratios(mem_conn)
-
-    cursor = mem_conn.cursor()
-    cursor.execute("SELECT pe_ratio FROM fundamentals_pit WHERE filing_id = 'PETR_DFP_2023-12-31_1'")
-    pe = cursor.fetchone()[0]
-    # market_cap = 30 * 10M = 300M BRL; net_income = 1_000 * 1_000 = 1M BRL; PE = 300
-    expected = (30.0 * 10_000_000) / (1_000.0 * 1_000)  # = 300.0
-    assert pe == pytest.approx(expected, rel=1e-3), f"Expected pe_ratio ~{expected}, got {pe}"
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# 2. P/E is NULL for loss-making companies
-# ──────────────────────────────────────────────────────────────────────────────
-
-def test_materialize_pe_ratio_null_for_loss(mem_conn):
-    """net_income <= 0 should result in pe_ratio = NULL."""
-    _insert_company(mem_conn, "33000167000101", "PETR")
-    _insert_pit_row(
-        mem_conn,
-        filing_id="LOSS_DFP_2023-12-31_1",
-        ticker="PETR",
-        net_income=-500_000.0,
-        shares_outstanding=10_000_000.0,
-        filing_date="2023-04-15",
-        doc_type="DFP",
-    )
-    _insert_price(mem_conn, "PETR3", "2023-04-14", 30.0, volume=10_000)
-
-    materialize_valuation_ratios(mem_conn)
-
-    cursor = mem_conn.cursor()
-    cursor.execute("SELECT pe_ratio FROM fundamentals_pit WHERE filing_id = 'LOSS_DFP_2023-12-31_1'")
-    pe = cursor.fetchone()[0]
-    assert pe is None, f"Expected pe_ratio = NULL for loss-making company, got {pe}"
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# 3. ITR Q1 annualizes income by factor of 4
-# ──────────────────────────────────────────────────────────────────────────────
-
-def test_materialize_itr_annualizes_income(mem_conn):
-    """Q1 ITR net_income should be annualized (×4) and converted from thousands BRL."""
-    _insert_company(mem_conn, "33000167000101", "PETR")
-    _insert_pit_row(
-        mem_conn,
-        filing_id="PETR_ITR_2023-03-31_1",
-        ticker="PETR",
-        net_income=250.0,   # 250 thousands BRL Q1 actual = 250,000 BRL
-        shares_outstanding=10_000_000.0,
-        filing_date="2023-05-15",
-        doc_type="ITR",
-        quarter=1,
-        period_end="2023-03-31",
-    )
-    _insert_price(mem_conn, "PETR3", "2023-05-15", 30.0, volume=10_000)
-
-    materialize_valuation_ratios(mem_conn)
-
-    cursor = mem_conn.cursor()
-    cursor.execute("SELECT pe_ratio FROM fundamentals_pit WHERE filing_id = 'PETR_ITR_2023-03-31_1'")
-    pe = cursor.fetchone()[0]
-    # annualized NI = 250 * 1_000 * 4 = 1_000_000 BRL; PE = (30 * 10M) / 1M = 300
-    assert pe == pytest.approx(300.0, rel=1e-3), f"Expected pe_ratio ~300.0, got {pe}"
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# 4. Uses nearest prior trading day (not future price)
-# ──────────────────────────────────────────────────────────────────────────────
-
-def test_materialize_uses_nearest_prior_trading_day(mem_conn):
-    """Price lookup should prefer the nearest date; Friday (-1d) beats Monday (+2d)."""
-    _insert_company(mem_conn, "33000167000101", "PETR")
-    _insert_pit_row(
-        mem_conn,
-        filing_id="PRIOR_DFP_2023-12-31_1",
-        ticker="PETR",
-        net_income=1_000.0,  # 1,000 thousands BRL = 1,000,000 BRL
-        shares_outstanding=10_000_000.0,
-        filing_date="2023-04-15",  # Saturday
-        doc_type="DFP",
-    )
-    # Friday before: price = 25, distance = 1 day
-    _insert_price(mem_conn, "PETR3", "2023-04-14", 25.0, volume=10_000)
-    # Monday after: price = 35, distance = 2 days — farther, should NOT be preferred
-    _insert_price(mem_conn, "PETR3", "2023-04-17", 35.0, volume=10_000)
-
-    materialize_valuation_ratios(mem_conn)
-
-    cursor = mem_conn.cursor()
-    cursor.execute("SELECT pe_ratio FROM fundamentals_pit WHERE filing_id = 'PRIOR_DFP_2023-12-31_1'")
-    pe = cursor.fetchone()[0]
-    # market_cap = 25 * 10M = 250M BRL; net_income = 1_000 * 1_000 = 1M BRL; PE = 250
-    expected = (25.0 * 10_000_000) / (1_000.0 * 1_000)  # 250.0
-    assert pe == pytest.approx(expected, rel=1e-3), (
-        f"Expected pe_ratio computed with Friday price (25.0), got {pe}"
-    )
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# 5. PIT correctness — only v1 returned as of 2023-05-01
+# 1. PIT correctness — only v1 returned as of 2023-05-01
 # ──────────────────────────────────────────────────────────────────────────────
 
 def test_pit_query_respects_filing_date(mem_conn):

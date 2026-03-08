@@ -28,17 +28,19 @@ def upsert_cvm_company(
     Uses ON CONFLICT(cnpj) DO UPDATE so calling twice with the same CNPJ
     updates the existing row rather than raising an IntegrityError.
     """
+    ticker_root = ticker[:4] if ticker else None
     sql = """
-        INSERT INTO cvm_companies (cnpj, ticker, company_name, cvm_code, b3_trading_name, updated_at)
-        VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        INSERT INTO cvm_companies (cnpj, ticker, ticker_root, company_name, cvm_code, b3_trading_name, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
         ON CONFLICT(cnpj) DO UPDATE SET
             ticker = excluded.ticker,
+            ticker_root = excluded.ticker_root,
             company_name = excluded.company_name,
             cvm_code = excluded.cvm_code,
             b3_trading_name = excluded.b3_trading_name,
             updated_at = CURRENT_TIMESTAMP
     """
-    conn.execute(sql, (cnpj, ticker, company_name, cvm_code, b3_trading_name))
+    conn.execute(sql, (cnpj, ticker, ticker_root, company_name, cvm_code, b3_trading_name))
     conn.commit()
     logger.debug(f"Upserted cvm_company: cnpj={cnpj} ticker={ticker}")
 
@@ -76,13 +78,14 @@ def update_ticker_by_cvm_code(
     # B3 API returns codeCVM as a bare integer; CVM CSVs store 6-digit zero-padded strings.
     if cvm_code.isdigit():
         cvm_code = cvm_code.zfill(6)
+    ticker_root = ticker[:4] if ticker else None
     result = conn.execute(
         """
         UPDATE cvm_companies
-        SET ticker = ?, b3_trading_name = ?, updated_at = CURRENT_TIMESTAMP
+        SET ticker = ?, ticker_root = ?, b3_trading_name = ?, updated_at = CURRENT_TIMESTAMP
         WHERE cvm_code = ?
         """,
-        (ticker, b3_trading_name, cvm_code),
+        (ticker, ticker_root, b3_trading_name, cvm_code),
     )
     conn.commit()
     return result.rowcount > 0
@@ -160,12 +163,12 @@ def upsert_fundamentals_pit(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
             filing_id, cnpj, ticker, period_end, filing_date, filing_version,
             doc_type, fiscal_year, quarter,
             revenue, net_income, ebitda, total_assets, equity, net_debt,
-            shares_outstanding, pe_ratio, pb_ratio, ev_ebitda
+            shares_outstanding
         ) VALUES (
             :filing_id, :cnpj, :ticker, :period_end, :filing_date, :filing_version,
             :doc_type, :fiscal_year, :quarter,
             :revenue, :net_income, :ebitda, :total_assets, :equity, :net_debt,
-            :shares_outstanding, :pe_ratio, :pb_ratio, :ev_ebitda
+            :shares_outstanding
         )
     """
 
@@ -173,7 +176,7 @@ def upsert_fundamentals_pit(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
     optional_cols = [
         "ticker", "fiscal_year", "quarter",
         "revenue", "net_income", "ebitda", "total_assets", "equity", "net_debt",
-        "shares_outstanding", "pe_ratio", "pb_ratio", "ev_ebitda",
+        "shares_outstanding",
     ]
     for col in optional_cols:
         if col not in df.columns:
@@ -256,44 +259,65 @@ def populate_company_isin_map(conn: sqlite3.Connection) -> int:
     Links each (cnpj, isin_code) pair to the ticker and share_class derived from
     the ticker suffix. Sets is_primary=1 for the ON share class (suffix '3').
 
+    Uses an in-memory Python dict to avoid a SUBSTR JOIN on the large prices table.
     Safe to call multiple times -- uses INSERT OR REPLACE to handle updates.
     Returns the number of rows inserted or replaced.
     """
-    sql = """
+    cursor = conn.cursor()
+
+    # Build root -> cnpj map from cvm_companies (fast: small table)
+    cursor.execute("SELECT ticker_root, cnpj FROM cvm_companies WHERE ticker_root IS NOT NULL")
+    root_to_cnpj = {row[0]: row[1] for row in cursor.fetchall()}
+    if not root_to_cnpj:
+        return 0
+
+    # Load prices grouped by (ticker, isin_code) — no JOIN needed
+    cursor.execute("""
+        SELECT ticker, isin_code, MIN(date), MAX(date)
+        FROM prices
+        WHERE isin_code != 'UNKNOWN'
+        GROUP BY ticker, isin_code
+    """)
+    price_rows = cursor.fetchall()
+
+    records = []
+    for ticker, isin, first, last in price_rows:
+        root = ticker[:4]
+        cnpj = root_to_cnpj.get(root)
+        if cnpj is None:
+            continue
+        last_char = ticker[-1] if ticker else ""
+        last_two = ticker[-2:] if len(ticker) >= 2 else ""
+        if len(ticker) >= 6 and last_two == "11":
+            share_class = "UNT"
+            is_primary = 0
+        elif last_char == "3":
+            share_class = "ON"
+            is_primary = 1
+        elif last_char == "4":
+            share_class = "PN"
+            is_primary = 0
+        elif last_char == "5":
+            share_class = "PNA"
+            is_primary = 0
+        elif last_char == "6":
+            share_class = "PNB"
+            is_primary = 0
+        else:
+            share_class = "OTHER"
+            is_primary = 0
+        records.append((cnpj, isin, ticker, share_class, is_primary, first, last))
+
+    if not records:
+        return 0
+
+    cursor.executemany("""
         INSERT OR REPLACE INTO company_isin_map
             (cnpj, isin_code, ticker, share_class, is_primary, first_seen, last_seen)
-        SELECT
-            c.cnpj,
-            p.isin_code,
-            p.ticker,
-            CASE
-                WHEN LENGTH(p.ticker) >= 6
-                     AND CAST(SUBSTR(p.ticker, LENGTH(p.ticker) - 1, 2) AS TEXT) = '11'
-                    THEN 'UNT'
-                WHEN SUBSTR(p.ticker, LENGTH(p.ticker), 1) = '3' THEN 'ON'
-                WHEN SUBSTR(p.ticker, LENGTH(p.ticker), 1) = '4' THEN 'PN'
-                WHEN SUBSTR(p.ticker, LENGTH(p.ticker), 1) = '5' THEN 'PNA'
-                WHEN SUBSTR(p.ticker, LENGTH(p.ticker), 1) = '6' THEN 'PNB'
-                ELSE 'OTHER'
-            END AS share_class,
-            CASE
-                WHEN LENGTH(p.ticker) >= 6
-                     AND CAST(SUBSTR(p.ticker, LENGTH(p.ticker) - 1, 2) AS TEXT) = '11'
-                    THEN 0
-                WHEN SUBSTR(p.ticker, LENGTH(p.ticker), 1) = '3' THEN 1
-                ELSE 0
-            END AS is_primary,
-            MIN(p.date) AS first_seen,
-            MAX(p.date) AS last_seen
-        FROM cvm_companies c
-        JOIN prices p ON SUBSTR(p.ticker, 1, 4) = c.ticker
-        WHERE c.ticker IS NOT NULL
-          AND p.isin_code != 'UNKNOWN'
-        GROUP BY c.cnpj, p.isin_code, p.ticker
-    """
-    result = conn.execute(sql)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    """, records)
     conn.commit()
-    count = result.rowcount
+    count = len(records)
     logger.info(f"Populated company_isin_map: {count} rows inserted/replaced")
     return count
 
@@ -326,18 +350,18 @@ def upsert_fundamentals_monthly(conn: sqlite3.Connection, df: pd.DataFrame) -> i
         INSERT OR REPLACE INTO fundamentals_monthly (
             month_end, ticker,
             revenue, net_income, ebitda, total_assets, equity, net_debt,
-            shares_outstanding, pe_ratio, pb_ratio, ev_ebitda
+            shares_outstanding
         ) VALUES (
             :month_end, :ticker,
             :revenue, :net_income, :ebitda, :total_assets, :equity, :net_debt,
-            :shares_outstanding, :pe_ratio, :pb_ratio, :ev_ebitda
+            :shares_outstanding
         )
     """
 
     # Fill optional columns not present in df with None
     optional_cols = [
         "revenue", "net_income", "ebitda", "total_assets", "equity", "net_debt",
-        "shares_outstanding", "pe_ratio", "pb_ratio", "ev_ebitda",
+        "shares_outstanding",
     ]
     for col in optional_cols:
         if col not in df.columns:

@@ -130,11 +130,15 @@ def test_low_pe_excludes_pe_below_min():
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Test 5: Falls back to stored P/E when dyn key is absent
+# Test 5: No fallback to stored P/E — only f_pe_ratio_dyn is used
 # ──────────────────────────────────────────────────────────────────────────────
 
-def test_low_pe_falls_back_to_stored_pe():
-    """Strategy should use f_pe_ratio when f_pe_ratio_dyn is absent."""
+def test_low_pe_no_fallback_to_stored_pe():
+    """Strategy should return zero weights when only f_pe_ratio (stored key) is present.
+
+    The old fallback logic was removed — the strategy exclusively uses f_pe_ratio_dyn.
+    When f_pe_ratio_dyn is absent, f_pe_ratio must NOT be used as a substitute.
+    """
     from backtests.strategies.low_pe import LowPEStrategy
 
     shared = _make_shared_data(
@@ -142,12 +146,14 @@ def test_low_pe_falls_back_to_stored_pe():
         pe_values={"TICK1": 5.0, "TICK2": 15.0, "TICK3": 25.0},
         use_dyn_key=False,  # only f_pe_ratio, no f_pe_ratio_dyn
     )
-    # Should not raise; should use f_pe_ratio
+    # Should not raise; f_pe_ratio_dyn is absent so all weights should be zero
     ret, tw = LowPEStrategy().generate_signals(
         shared, {"n_stocks": 2, "min_pe": 1.0, "max_pe": 30.0, "min_stocks": 2}
     )
-    row = tw.iloc[1]
-    assert row["TICK1"] == pytest.approx(0.5), "Fallback to f_pe_ratio should select TICK1"
+    # All rows should be zero since f_pe_ratio_dyn is empty
+    assert tw.sum().sum() == pytest.approx(0.0), (
+        "Expected all-zero weights when f_pe_ratio_dyn is absent (no fallback to stored key)"
+    )
 
 
 # ──────────────────────────────────────────────────────────────────────────────

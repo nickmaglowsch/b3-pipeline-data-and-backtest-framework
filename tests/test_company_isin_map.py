@@ -8,7 +8,7 @@ Fix 3 coverage:
 - populate_company_isin_map() fills rows from prices + cvm_companies join
 - share_class inference from ticker suffix
 - is_primary flag set for ON share class (suffix 3)
-- materialize_valuation_ratios uses ISIN-based join when company_isin_map has data
+- company_isin_map enables ISIN-based price joins for dynamic ratio computation
 """
 from __future__ import annotations
 
@@ -307,20 +307,19 @@ def test_populate_company_isin_map_is_idempotent(mem_conn):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 3. materialize_valuation_ratios uses ISIN-based join when possible
+# 3. company_isin_map enables price lookup for fundamentals (ISIN join)
+#    Note: materialize_valuation_ratios() was removed in the refactor.
+#    Ratios are now computed dynamically at query time in build_shared_data().
+#    These tests verify the company_isin_map data can be queried for price joins.
 # ──────────────────────────────────────────────────────────────────────────────
 
-def test_materialize_uses_isin_join_when_company_isin_map_populated(mem_conn):
+def test_company_isin_map_can_join_prices_via_isin(mem_conn):
     """
-    When company_isin_map has a primary share row, materialize_valuation_ratios
-    should find the price using the ISIN join (not the LIKE 'ticker%' fallback).
-    This test verifies ratio is computed correctly.
+    When company_isin_map is populated, a CNPJ can be joined to a price row via ISIN.
+    This is the join pattern used for dynamic ratio computation at query time.
     """
-    from b3_pipeline import cvm_main
-
     cnpj = "33000167000101"
 
-    # Seed cvm_companies
     cvm_storage.upsert_cvm_company(
         mem_conn,
         cnpj=cnpj,
@@ -329,83 +328,42 @@ def test_materialize_uses_isin_join_when_company_isin_map_populated(mem_conn):
         cvm_code="009512",
         b3_trading_name="PETROBRAS",
     )
-    # Seed prices
     mem_conn.execute(
         "INSERT INTO prices (ticker, isin_code, date, close) VALUES ('PETR3', 'BRPETRACNOR9', '2024-03-14', 36.50)"
     )
     mem_conn.commit()
 
-    # Populate company_isin_map so materialize can use ISIN join
     cvm_storage.populate_company_isin_map(mem_conn)
 
-    # Seed fundamentals_pit row that needs ratio computation
-    mem_conn.execute("""
-        INSERT INTO fundamentals_pit
-            (filing_id, cnpj, ticker, period_end, filing_date, filing_version,
-             doc_type, fiscal_year, quarter, net_income, equity, ebitda, net_debt, shares_outstanding)
-        VALUES
-            ('CNPJ_DFP_2023-12-31_1', ?, 'PETR', '2023-12-31', '2024-03-15', 1,
-             'DFP', 2023, NULL, 50000.0, 200000.0, 80000.0, 10000.0, 13000.0)
-    """, (cnpj,))
-    mem_conn.commit()
-
-    updated = cvm_main.materialize_valuation_ratios(mem_conn)
-    assert updated == 1, f"Expected 1 row updated, got {updated}"
-
+    # Verify that a CNPJ → price join via company_isin_map works
     cursor = mem_conn.cursor()
-    cursor.execute("SELECT pe_ratio, pb_ratio FROM fundamentals_pit WHERE filing_id = 'CNPJ_DFP_2023-12-31_1'")
-    row = cursor.fetchone()
-    assert row is not None
-    pe, pb = row
-    assert pe is not None, "pe_ratio should be computed"
-    assert pb is not None, "pb_ratio should be computed"
-    # market_cap = 36.50 * 13000 = 474500
-    # net_income = 50000 * 1000 = 50_000_000
-    # pe = 474500 / 50_000_000 ≈ 0.00949
-    assert abs(pe - (36.50 * 13000.0) / (50000.0 * 1000.0)) < 0.001
-
-
-def test_materialize_uses_ticker_like_fallback_when_no_isin_map(mem_conn):
-    """
-    When company_isin_map is empty, materialize_valuation_ratios falls back to
-    the LIKE 'ticker%' price lookup and still computes ratios correctly.
-    """
-    from b3_pipeline import cvm_main
-
-    cnpj = "19526477000175"
-
-    cvm_storage.upsert_cvm_company(
-        mem_conn,
-        cnpj=cnpj,
-        ticker="VALE",
-        company_name="Vale",
-        cvm_code="004170",
-        b3_trading_name="VALE",
-    )
-    mem_conn.execute(
-        "INSERT INTO prices (ticker, isin_code, date, close) VALUES ('VALE3', 'BRVALEACNOR0', '2024-03-14', 65.00)"
-    )
-    mem_conn.commit()
-
-    # Do NOT call populate_company_isin_map — leave company_isin_map empty
-
-    mem_conn.execute("""
-        INSERT INTO fundamentals_pit
-            (filing_id, cnpj, ticker, period_end, filing_date, filing_version,
-             doc_type, fiscal_year, quarter, net_income, equity, ebitda, net_debt, shares_outstanding)
-        VALUES
-            ('VALE_DFP_2023-12-31_1', ?, 'VALE', '2023-12-31', '2024-03-15', 1,
-             'DFP', 2023, NULL, 70000.0, 300000.0, 100000.0, 20000.0, 5000.0)
+    cursor.execute("""
+        SELECT p.close
+        FROM prices p
+        JOIN company_isin_map m ON m.isin_code = p.isin_code
+        JOIN cvm_companies c ON c.cnpj = m.cnpj
+        WHERE c.cnpj = ? AND m.is_primary = 1 AND p.date = '2024-03-14'
     """, (cnpj,))
-    mem_conn.commit()
-
-    updated = cvm_main.materialize_valuation_ratios(mem_conn)
-    assert updated == 1, f"Expected 1 row updated with LIKE fallback, got {updated}"
-
-    cursor = mem_conn.cursor()
-    cursor.execute("SELECT pe_ratio FROM fundamentals_pit WHERE filing_id = 'VALE_DFP_2023-12-31_1'")
     row = cursor.fetchone()
-    assert row is not None and row[0] is not None, "pe_ratio should be computed via LIKE fallback"
+    assert row is not None, "Expected a price row via ISIN join"
+    assert abs(row[0] - 36.50) < 0.01, f"Expected close=36.50, got {row[0]}"
+
+
+def test_company_isin_map_fundamentals_pit_has_no_ratio_columns(mem_conn):
+    """
+    fundamentals_pit no longer contains pe_ratio / pb_ratio / ev_ebitda columns.
+    Ratios are computed dynamically at query time by build_shared_data().
+    """
+    cursor = mem_conn.cursor()
+    cursor.execute("PRAGMA table_info(fundamentals_pit)")
+    cols = {row[1] for row in cursor.fetchall()}
+    assert "pe_ratio" not in cols, "pe_ratio should not be a column in fundamentals_pit"
+    assert "pb_ratio" not in cols, "pb_ratio should not be a column in fundamentals_pit"
+    assert "ev_ebitda" not in cols, "ev_ebitda should not be a column in fundamentals_pit"
+    # Raw inputs for dynamic computation must still be present
+    assert "net_income" in cols
+    assert "equity" in cols
+    assert "shares_outstanding" in cols
 
 
 # ──────────────────────────────────────────────────────────────────────────────

@@ -344,7 +344,6 @@ def _extract_metrics_from_csvs(
         "filing_id", "cnpj_clean", "ticker", "period_end_parsed",
         "filing_date_parsed", "version", "fiscal_year", "quarter",
     ] + metric_cols
-    # Add ratio columns (NULL — computed by orchestration layer)
     fundamentals_df = merged[[c for c in fund_cols if c in merged.columns]].copy()
     fundamentals_df.rename(columns={
         "cnpj_clean": "cnpj",
@@ -353,8 +352,6 @@ def _extract_metrics_from_csvs(
         "version": "filing_version",
     }, inplace=True)
     fundamentals_df["doc_type"] = doc_type
-    for ratio_col in ["pe_ratio", "pb_ratio", "ev_ebitda"]:
-        fundamentals_df[ratio_col] = None
     if "shares_outstanding" not in fundamentals_df.columns:
         fundamentals_df["shares_outstanding"] = None
 
@@ -448,13 +445,17 @@ def parse_fre_zip(
     # Determine total shares. CVM uses different column names across file versions:
     # - New format: Quantidade_Total_Acoes (may be 0; fall back to Ord + Pref sum)
     # - Legacy format: QTDE_TOTAL_ACOES
+    # Any value <= 0 is replaced with NaN so that downstream propagation and ratio
+    # computation treat it as missing data rather than dividing by zero.
     if "Quantidade_Total_Acoes" in cap.columns:
         total = pd.to_numeric(cap["Quantidade_Total_Acoes"], errors="coerce").fillna(0)
         ord_ = pd.to_numeric(cap.get("Quantidade_Acoes_Ordinarias", pd.Series(0, index=cap.index)), errors="coerce").fillna(0)
         pref = pd.to_numeric(cap.get("Quantidade_Acoes_Preferenciais", pd.Series(0, index=cap.index)), errors="coerce").fillna(0)
-        cap["shares_outstanding"] = total.where(total > 0, ord_ + pref)
+        shares = total.where(total > 0, ord_ + pref)
+        cap["shares_outstanding"] = shares.where(shares > 0, other=float("nan"))
     elif "QTDE_TOTAL_ACOES" in cap.columns:
-        cap["shares_outstanding"] = pd.to_numeric(cap["QTDE_TOTAL_ACOES"], errors="coerce")
+        shares_raw = pd.to_numeric(cap["QTDE_TOTAL_ACOES"], errors="coerce")
+        cap["shares_outstanding"] = shares_raw.where(shares_raw > 0, other=float("nan"))
     else:
         logger.warning("No shares outstanding column found in FRE capital_social CSV")
         return pd.DataFrame(), pd.DataFrame()
@@ -503,8 +504,7 @@ def parse_fre_zip(
         "version": "filing_version",
     }, inplace=True)
     fundamentals_df["doc_type"] = doc_type
-    for col in ["revenue", "net_income", "ebitda", "total_assets", "equity", "net_debt",
-                "pe_ratio", "pb_ratio", "ev_ebitda"]:
+    for col in ["revenue", "net_income", "ebitda", "total_assets", "equity", "net_debt"]:
         fundamentals_df[col] = None
 
     return filings_df, fundamentals_df

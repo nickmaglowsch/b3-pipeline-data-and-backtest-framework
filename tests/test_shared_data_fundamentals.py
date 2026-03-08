@@ -53,23 +53,23 @@ def tmp_db(tmp_path):
     conn.execute("""
         INSERT OR REPLACE INTO fundamentals_pit
           (filing_id, cnpj, ticker, period_end, filing_date, filing_version, doc_type,
-           revenue, pe_ratio, pb_ratio, ev_ebitda)
+           revenue, net_income, equity, shares_outstanding)
         VALUES ('f1', '33000167000101', 'PETR3', '2022-12-31', '2023-01-01', 1, 'DFP',
-                1000.0, 15.0, 2.0, 8.0)
+                1000.0, 100.0, 500.0, 10_000_000_000.0)
     """)
 
     # Insert fundamentals_monthly rows
     monthly_rows = [
-        ("2023-01-31", "PETR3", 15.0, 10.0, 2.0, 1000.0, 100.0),
-        ("2023-02-28", "PETR3", 14.0, 10.0, 2.0, 1000.0, 100.0),
-        ("2023-01-31", "VALE3", 8.0, 20.0, 1.5, 2000.0, 200.0),
+        ("2023-01-31", "PETR3", 10.0, 500.0, 1000.0, 100.0, 10_000_000_000.0),
+        ("2023-02-28", "PETR3", 10.0, 500.0, 1000.0, 100.0, 10_000_000_000.0),
+        ("2023-01-31", "VALE3", 20.0, 1000.0, 2000.0, 200.0, 5_000_000_000.0),
     ]
-    for me, tkr, pe, ni, pb, rev, eq in monthly_rows:
+    for me, tkr, ni, eq, rev, ebitda, shares in monthly_rows:
         conn.execute(
             """INSERT OR REPLACE INTO fundamentals_monthly
-               (month_end, ticker, pe_ratio, net_income, pb_ratio, revenue, equity)
+               (month_end, ticker, net_income, equity, revenue, ebitda, shares_outstanding)
                VALUES (?,?,?,?,?,?,?)""",
-            (me, tkr, pe, ni, pb, rev, eq),
+            (me, tkr, ni, eq, rev, ebitda, shares),
         )
 
     conn.commit()
@@ -141,11 +141,12 @@ def test_build_shared_data_original_keys_unaffected(mock_bench, mock_cdi, tmp_db
         include_fundamentals=True,
     )
 
-    # These must still be present (backward compat for ValueQuality)
-    assert "f_pe_ratio" in shared, "Original f_pe_ratio key should still be present"
+    # These must still be present (PIT-based fundamentals from load_all_fundamentals)
     assert "f_revenue" in shared, "Original f_revenue key should still be present"
-    # Both old and new keys together
-    assert "f_pe_ratio_dyn" in shared
+    assert "f_net_income" in shared, "Original f_net_income key should still be present"
+    # Dynamic ratio keys (no stored ratio keys anymore)
+    assert "f_pe_ratio_dyn" in shared, "f_pe_ratio_dyn key should be present"
+    assert "f_pb_ratio_dyn" in shared, "f_pb_ratio_dyn key should be present"
 
 
 @patch("backtests.core.shared_data.download_cdi_daily", side_effect=_mock_cdi)

@@ -72,3 +72,112 @@ For stocks with `quotedPerSharSince` dates from B3's API, only apply corporate a
 - B3 COTAHIST layout specification (positions and field formats)
 - B3 API field: `quotedPerSharSince` in GetListedSupplementCompany response
 - FATCOT field documentation in B3's historical data manual
+
+---
+
+# TODO: Rust + Polars Performance Overhaul
+
+## Motivation
+
+The pipeline is well-architected but has two structural performance ceilings that Python cannot overcome without algorithmic workarounds:
+
+1. **COTAHIST parsing** is fixed-width binary record parsing over 2.5M rows per year — pure CPU-bound string slicing where Python is 50-100x slower than a compiled parser.
+2. **Backtest signal computation** builds wide sparse DataFrames (dates x tickers) and runs rolling window operations, where pandas' copy-heavy memory model becomes the bottleneck at 1000+ tickers.
+
+## Part 1: Rust COTAHIST Parser
+
+### Target
+Replace `b3_pipeline/parser.py` record parsing loop with a Rust extension compiled to a Python `.so` via `pyo3`.
+
+### What to rewrite
+Only the inner parsing loop — the fixed-width record extraction from raw bytes. Everything else (orchestration, DB upserts, corporate actions) stays in Python.
+
+### Interface contract
+```python
+# Current (Python)
+prices_df = parser.parse_cotahist_zip(zip_path)
+
+# Target (Rust via pyo3)
+import b3_pipeline.cotahist_rs as cotahist_rs
+records = cotahist_rs.parse_zip(zip_path)  # -> list[dict] or PyArrow RecordBatch
+prices_df = pd.DataFrame(records)
+```
+
+### Expected gains
+- Parse time: from ~1-2s per year to ~10-50ms per year
+- Memory: avoid intermediate Python string allocations (parse directly to typed arrays)
+- Parallelism: use rayon to parse multiple year files concurrently
+
+### Implementation notes
+- Use `pyo3` + `maturin` for the Python extension
+- Crate lives at `b3_pipeline_rs/` at project root
+- Output Arrow RecordBatch (via `arrow2`) to skip the Python list→DataFrame conversion overhead
+- COTAHIST layout documented in B3's spec: fixed-width ASCII, record type `01` = header, `99` = trailer, `02` = quote record
+- Key fields: positions 12-24 (ticker), 27-39 (ISIN), 99-108 (close price), 170-188 (total volume), 210-217 (FATCOT)
+- Prices are stored as integers (divide by 100.0 for BRL)
+
+### Files affected
+- New: `b3_pipeline_rs/src/lib.rs`, `b3_pipeline_rs/Cargo.toml`, `b3_pipeline_rs/pyproject.toml`
+- Modified: `b3_pipeline/parser.py` (call Rust extension, fall back to Python if not compiled)
+- Modified: `pyproject.toml` or `setup.py` (add maturin build step)
+
+---
+
+## Part 2: Polars Backtest Engine
+
+### Target
+Replace `backtests/core/data.py` (data loading) and the rolling/rank operations in `backtests/core/shared_data.py` with Polars lazy queries + Arrow-native computation.
+
+### Why Polars instead of just optimizing pandas
+- `join_asof` in Polars is the correct primitive for PIT forward-fill (vs. manual pivot + ffill)
+- Lazy evaluation means signal chains don't materialize intermediate DataFrames
+- Arrow memory layout eliminates the copy-on-write overhead of pandas operations
+- `rolling().rank()` on wide frames avoids the intermediate allocations pandas creates
+
+### Key Polars primitives to use
+```python
+import polars as pl
+
+# PIT forward-fill fundamentals (replaces pivot + ffill + reindex)
+prices = pl.scan_parquet("prices.parquet")  # or read from SQLite
+fundamentals = pl.scan_parquet("fundamentals.parquet")
+merged = prices.join_asof(
+    fundamentals,
+    on="date",
+    by="ticker",
+    strategy="backward"
+)
+
+# Rolling signals (replaces pandas rolling().rank())
+signals = merged.with_columns([
+    pl.col("adj_close").pct_change().over("ticker").alias("ret"),
+    pl.col("ret").rolling_mean(12).over("ticker").alias("mom_12m"),
+])
+ranked = signals.with_columns([
+    pl.col("mom_12m").rank("dense").over("date").alias("mom_rank")
+])
+```
+
+### Migration strategy
+- Phase 1: Replace `load_b3_data()` and `load_fundamentals_pit()` with Polars reads (drop-in: convert to pandas at the end for strategy compatibility)
+- Phase 2: Rewrite `build_shared_data()` to return a Polars LazyFrame dict instead of wide DataFrames
+- Phase 3: Port strategies one-by-one to use Polars expressions natively
+
+### Files affected
+- Modified: `backtests/core/data.py`
+- Modified: `backtests/core/shared_data.py`
+- Modified: Strategies in `backtests/strategies/` (Phase 3 only)
+- New: `backtests/core/data_polars.py` (parallel implementation during migration)
+
+### Expected gains
+- Backtest initialization: from 2-5s to ~200-500ms
+- Memory: from 400-600MB to ~80-120MB for 532 tickers over 20 years (Arrow layout + lazy eval)
+- PIT fundamentals join: from 5s (pivot + ffill + reindex) to ~50ms (join_asof)
+- Scales to 2000+ tickers without memory pressure
+
+---
+
+## Dependency
+- Rust parser (Part 1) can be done independently of Polars (Part 2)
+- Part 2 Phase 1 can be done before Part 1 — both are independent
+- Part 2 Phase 3 (strategy migration) depends on Phase 2

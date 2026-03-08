@@ -38,7 +38,7 @@ class ValueQualityStrategy(StrategyBase):
     Typical fundamentals coverage is sparse (only publicly-listed Brazilian equities
     that file DFP/ITR with CVM), so a wider top_pct (default 20%) is used.
 
-    Requires: shared_data["f_pb_ratio"], shared_data["f_net_income"], shared_data["f_equity"]
+    Requires: shared_data["f_pb_ratio_dyn"], shared_data["f_net_income"], shared_data["f_equity"]
     """
 
     # Signals to the backtest service that this strategy needs CVM fundamentals data.
@@ -104,8 +104,8 @@ class ValueQualityStrategy(StrategyBase):
         adtv = shared_data.get("adtv", pd.DataFrame())
         raw_close = shared_data.get("raw_close", pd.DataFrame())
 
-        # Fundamentals (aligned to rebalance calendar by load_all_fundamentals)
-        f_pb = shared_data.get("f_pb_ratio", pd.DataFrame())
+        # Fundamentals (dynamic P/B computed from raw monthly inputs in build_shared_data)
+        f_pb = shared_data.get("f_pb_ratio_dyn", pd.DataFrame())
         f_net_income = shared_data.get("f_net_income", pd.DataFrame())
         f_equity = shared_data.get("f_equity", pd.DataFrame())
 

@@ -47,8 +47,11 @@ def test_init_db_creates_new_tables(mem_conn):
     cursor.execute("PRAGMA table_info(fundamentals_pit)")
     cols = [row[1] for row in cursor.fetchall()]
     assert "filing_id" in cols
-    assert "pe_ratio" in cols
     assert "net_debt" in cols
+    # Ratio columns are intentionally excluded — computed dynamically at query time
+    assert "pe_ratio" not in cols
+    assert "pb_ratio" not in cols
+    assert "ev_ebitda" not in cols
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -124,9 +127,6 @@ def test_upsert_fundamentals_pit_batch(mem_conn):
             "equity": 2_000_000.0,
             "net_debt": 500_000.0,
             "shares_outstanding": 1_000_000.0,
-            "pe_ratio": None,
-            "pb_ratio": None,
-            "ev_ebitda": None,
         },
         {
             "filing_id": "CNPJ2_DFP_2023-12-31_1",
@@ -145,9 +145,6 @@ def test_upsert_fundamentals_pit_batch(mem_conn):
             "equity": 800_000.0,
             "net_debt": 200_000.0,
             "shares_outstanding": 500_000.0,
-            "pe_ratio": None,
-            "pb_ratio": None,
-            "ev_ebitda": None,
         },
         {
             "filing_id": "CNPJ3_DFP_2023-12-31_1",
@@ -166,9 +163,6 @@ def test_upsert_fundamentals_pit_batch(mem_conn):
             "equity": 1_200_000.0,
             "net_debt": 300_000.0,
             "shares_outstanding": 750_000.0,
-            "pe_ratio": None,
-            "pb_ratio": None,
-            "ev_ebitda": None,
         },
     ])
 

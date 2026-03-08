@@ -10,7 +10,7 @@ capital structure / shares outstanding data. This is Path B:
 These tests confirm the Path B behavior:
 1. IPE parse output always has NULL shares_outstanding
 2. The ipe_parser module has the NOTE comment
-3. materialize_valuation_ratios() gracefully handles NULL shares (no crash)
+3. NULL shares_outstanding rows in fundamentals_pit do not cause crashes at query time
 """
 from __future__ import annotations
 

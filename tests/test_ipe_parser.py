@@ -106,13 +106,15 @@ def test_parse_ipe_zip_fundamentals_empty_or_all_null():
             assert fundamentals_df[col].isna().all(), f"{col} should be null in IPE output"
 
 
-def test_parse_ipe_zip_ratios_are_none():
-    """pe_ratio, pb_ratio, ev_ebitda are None in fundamentals_df."""
+def test_parse_ipe_zip_ratio_columns_absent_from_output():
+    """pe_ratio, pb_ratio, ev_ebitda are not output columns — ratios computed dynamically."""
     rows = [_ipe_row()]
     _, fundamentals_df = parse_ipe_zip(_make_ipe_zip(rows), cnpj_ticker_map={})
+    # Ratio columns were removed from the schema; they must not appear in parser output
     for col in ["pe_ratio", "pb_ratio", "ev_ebitda"]:
-        if col in fundamentals_df.columns and not fundamentals_df.empty:
-            assert fundamentals_df[col].isna().all()
+        assert col not in fundamentals_df.columns, (
+            f"{col} should not be in IPE parser output — ratios computed dynamically"
+        )
 
 
 def test_parse_ipe_zip_shares_outstanding_is_none():

@@ -102,6 +102,7 @@ SCHEMA_CVM_COMPANIES = """
 CREATE TABLE IF NOT EXISTS cvm_companies (
     cnpj TEXT NOT NULL PRIMARY KEY,
     ticker TEXT,
+    ticker_root TEXT,
     company_name TEXT,
     cvm_code TEXT,
     b3_trading_name TEXT,
@@ -143,9 +144,7 @@ CREATE TABLE IF NOT EXISTS fundamentals_pit (
     equity REAL,
     net_debt REAL,
     shares_outstanding REAL,
-    pe_ratio REAL,
-    pb_ratio REAL,
-    ev_ebitda REAL,
+    -- Ratio columns (pe_ratio, pb_ratio, ev_ebitda) intentionally excluded — compute dynamically at query time
     FOREIGN KEY (filing_id) REFERENCES cvm_filings(filing_id)
 );
 """
@@ -182,9 +181,7 @@ CREATE TABLE IF NOT EXISTS fundamentals_monthly (
     equity REAL,
     net_debt REAL,
     shares_outstanding REAL,
-    pe_ratio REAL,
-    pb_ratio REAL,
-    ev_ebitda REAL,
+    -- Ratio columns (pe_ratio, pb_ratio, ev_ebitda) intentionally excluded — compute dynamically at query time
     PRIMARY KEY (month_end, ticker)
 );
 """
@@ -193,6 +190,7 @@ INDEX_FUNDAMENTALS_MONTHLY_TICKER = "CREATE INDEX IF NOT EXISTS idx_fundamentals
 INDEX_FUNDAMENTALS_MONTHLY_MONTH_END = "CREATE INDEX IF NOT EXISTS idx_fundamentals_monthly_month_end ON fundamentals_monthly(month_end);"
 
 INDEX_CVM_COMPANIES_TICKER = "CREATE INDEX IF NOT EXISTS idx_cvm_companies_ticker ON cvm_companies(ticker);"
+INDEX_CVM_COMPANIES_TICKER_ROOT = "CREATE INDEX IF NOT EXISTS idx_cvm_companies_ticker_root ON cvm_companies(ticker_root);"
 INDEX_CVM_FILINGS_CNPJ = "CREATE INDEX IF NOT EXISTS idx_cvm_filings_cnpj ON cvm_filings(cnpj);"
 INDEX_CVM_FILINGS_PERIOD = "CREATE INDEX IF NOT EXISTS idx_cvm_filings_period ON cvm_filings(period_end);"
 INDEX_FUNDAMENTALS_PIT_CNPJ = "CREATE INDEX IF NOT EXISTS idx_fundamentals_pit_cnpj ON fundamentals_pit(cnpj);"
@@ -295,6 +293,17 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
     if "delisting_date" not in cvm_companies_cols:
         logger.info("Migrating: adding delisting_date column to cvm_companies")
         cursor.execute("ALTER TABLE cvm_companies ADD COLUMN delisting_date DATE")
+    if "ticker_root" not in cvm_companies_cols:
+        logger.info("Migrating: adding ticker_root column to cvm_companies")
+        cursor.execute("ALTER TABLE cvm_companies ADD COLUMN ticker_root TEXT")
+        cursor.execute(INDEX_CVM_COMPANIES_TICKER_ROOT)
+        cursor.execute(
+            "UPDATE cvm_companies SET ticker_root = SUBSTR(ticker, 1, 4)"
+            " WHERE ticker IS NOT NULL AND ticker_root IS NULL"
+        )
+
+    # Ensure ticker_root index exists for both fresh and migrated DBs.
+    cursor.execute(INDEX_CVM_COMPANIES_TICKER_ROOT)
 
     # company_isin_map: created via SCHEMA_COMPANY_ISIN_MAP above (CREATE TABLE IF NOT EXISTS).
     # Ensure indexes exist for existing DBs that were created before this table was added.
@@ -340,21 +349,19 @@ def upsert_prices(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
             quotation_factor = excluded.quotation_factor
     """
 
-    records = []
-    for _, row in df.iterrows():
-        records.append(
-            (
-                row["ticker"],
-                row.get("isin_code", "UNKNOWN"),
-                _prepare_date(row["date"]),
-                row["open"],
-                row["high"],
-                row["low"],
-                row["close"],
-                row["volume"],
-                int(row.get("quotation_factor", 1) or 1),
-            )
-        )
+    df = df.copy()
+    if "isin_code" not in df.columns:
+        df["isin_code"] = "UNKNOWN"
+    else:
+        df["isin_code"] = df["isin_code"].fillna("UNKNOWN")
+    df["date"] = pd.to_datetime(df["date"]).dt.strftime("%Y-%m-%d")
+    if "quotation_factor" not in df.columns:
+        df["quotation_factor"] = 1
+    else:
+        df["quotation_factor"] = df["quotation_factor"].fillna(1).astype(int)
+
+    cols = ["ticker", "isin_code", "date", "open", "high", "low", "close", "volume", "quotation_factor"]
+    records = df[cols].values.tolist()
 
     cursor.executemany(sql, records)
     conn.commit()
@@ -376,18 +383,19 @@ def upsert_corporate_actions(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
         VALUES (?, ?, ?, ?, ?, ?)
     """
 
-    records = []
-    for _, row in df.iterrows():
-        records.append(
-            (
-                row["isin_code"],
-                _prepare_date(row["event_date"]),
-                row["event_type"],
-                row.get("value"),
-                row.get("factor"),
-                row.get("source", "B3"),
-            )
-        )
+    df = df.copy()
+    df["event_date"] = pd.to_datetime(df["event_date"]).dt.strftime("%Y-%m-%d")
+    if "value" not in df.columns:
+        df["value"] = None
+    if "factor" not in df.columns:
+        df["factor"] = None
+    if "source" not in df.columns:
+        df["source"] = "B3"
+    else:
+        df["source"] = df["source"].fillna("B3")
+
+    cols = ["isin_code", "event_date", "event_type", "value", "factor", "source"]
+    records = df[cols].values.tolist()
 
     cursor.executemany(sql, records)
     conn.commit()
@@ -409,16 +417,13 @@ def upsert_detected_splits(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
         VALUES (?, ?, ?, ?)
     """
 
-    records = []
-    for _, row in df.iterrows():
-        records.append(
-            (
-                row["isin_code"],
-                _prepare_date(row["ex_date"]),
-                row["split_factor"],
-                row.get("description"),
-            )
-        )
+    df = df.copy()
+    df["ex_date"] = pd.to_datetime(df["ex_date"]).dt.strftime("%Y-%m-%d")
+    if "description" not in df.columns:
+        df["description"] = None
+
+    cols = ["isin_code", "ex_date", "split_factor", "description"]
+    records = df[cols].values.tolist()
 
     cursor.executemany(sql, records)
     conn.commit()
@@ -440,17 +445,15 @@ def upsert_stock_actions(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
         VALUES (?, ?, ?, ?, ?)
     """
 
-    records = []
-    for _, row in df.iterrows():
-        records.append(
-            (
-                row["isin_code"],
-                _prepare_date(row["ex_date"]),
-                row["action_type"],
-                row["factor"],
-                row.get("source", "B3"),
-            )
-        )
+    df = df.copy()
+    df["ex_date"] = pd.to_datetime(df["ex_date"]).dt.strftime("%Y-%m-%d")
+    if "source" not in df.columns:
+        df["source"] = "B3"
+    else:
+        df["source"] = df["source"].fillna("B3")
+
+    cols = ["isin_code", "ex_date", "action_type", "factor", "source"]
+    records = df[cols].values.tolist()
 
     cursor.executemany(sql, records)
     conn.commit()
@@ -477,21 +480,20 @@ def update_adjusted_columns(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
         WHERE ticker = ? AND isin_code = ? AND date = ?
     """
 
-    records = []
-    for _, row in df.iterrows():
-        records.append(
-            (
-                row.get("split_adj_open"),
-                row.get("split_adj_high"),
-                row.get("split_adj_low"),
-                row.get("split_adj_close"),
-                row.get("adj_close"),
-                row.get("volume"),
-                row["ticker"],
-                row.get("isin_code", "UNKNOWN"),
-                _prepare_date(row["date"]),
-            )
-        )
+    df = df.copy()
+    df["date"] = pd.to_datetime(df["date"]).dt.strftime("%Y-%m-%d")
+    if "isin_code" not in df.columns:
+        df["isin_code"] = "UNKNOWN"
+    else:
+        df["isin_code"] = df["isin_code"].fillna("UNKNOWN")
+    for col in ["split_adj_open", "split_adj_high", "split_adj_low", "split_adj_close", "adj_close"]:
+        if col not in df.columns:
+            df[col] = None
+    if "volume" not in df.columns:
+        df["volume"] = None
+
+    cols = ["split_adj_open", "split_adj_high", "split_adj_low", "split_adj_close", "adj_close", "volume", "ticker", "isin_code", "date"]
+    records = df[cols].values.tolist()
 
     cursor.executemany(sql, records)
     conn.commit()
@@ -626,18 +628,19 @@ def upsert_skipped_events(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
         VALUES (?, ?, ?, ?, ?, ?)
     """
 
-    records = []
-    for _, row in df.iterrows():
-        records.append(
-            (
-                row["isin_code"],
-                _prepare_date(row["event_date"]),
-                row["label"],
-                row.get("factor"),
-                row.get("source", "B3"),
-                row.get("reason"),
-            )
-        )
+    df = df.copy()
+    df["event_date"] = pd.to_datetime(df["event_date"]).dt.strftime("%Y-%m-%d")
+    if "factor" not in df.columns:
+        df["factor"] = None
+    if "source" not in df.columns:
+        df["source"] = "B3"
+    else:
+        df["source"] = df["source"].fillna("B3")
+    if "reason" not in df.columns:
+        df["reason"] = None
+
+    cols = ["isin_code", "event_date", "label", "factor", "source", "reason"]
+    records = df[cols].values.tolist()
 
     cursor.executemany(sql, records)
     conn.commit()
