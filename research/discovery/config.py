@@ -3,6 +3,7 @@ Configuration for B3 Feature Discovery Engine.
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 # Import parent config for shared constants
@@ -77,6 +78,10 @@ MIN_PRICE = parent_config.MIN_PRICE
 MIN_HISTORY_DAYS = parent_config.MIN_HISTORY_DAYS
 ADTV_WINDOW = parent_config.ADTV_WINDOW
 OUTPUT_DIR = parent_config.OUTPUT_DIR
+
+# ── Parallelism Config ────────────────────────────────────────────────
+
+MAX_WORKERS = min(os.cpu_count() or 4, 8)
 
 # ── Feature Flags ─────────────────────────────────────────────────────
 

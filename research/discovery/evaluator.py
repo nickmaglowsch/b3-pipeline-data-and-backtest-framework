@@ -245,7 +245,7 @@ def evaluate_all_features(
     force: bool = False,
 ) -> pd.DataFrame:
     """
-    Evaluate all features in the store.
+    Evaluate all features in the store using ProcessPoolExecutor for parallelism.
     Skips features that already have evaluation results (unless force=True).
 
     Returns DataFrame with one row per feature, columns for all metrics.
@@ -256,7 +256,11 @@ def evaluate_all_features(
         universe_mask: boolean DataFrame (date x ticker)
         force: if True, recompute all evaluations
     """
+    import shutil
+    from concurrent.futures import ProcessPoolExecutor, as_completed
+    from pathlib import Path
     from research.targets import compute_forward_returns_multi
+    from research.discovery._worker import evaluate_feature_worker
 
     adj_close = data["adj_close"]
 
@@ -277,72 +281,81 @@ def evaluate_all_features(
     cutoff_idx = int(n_dates * config.TRAIN_FRACTION)
     train_cutoff_date = dates[cutoff_idx]
 
-    # Evaluate each feature
+    # Serialize shared read inputs to tmp Parquet files once
+    tmp_dir = Path(store.store_dir) / "tmp_eval"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+
+    print(f"    Writing shared tmp Parquet files for workers...")
+    fwd_rank_parquet_paths = {}
+    for horizon, fwd_rank_df in fwd_ranks_precomputed.items():
+        path = tmp_dir / f"fwd_rank_{horizon}d.parquet"
+        fwd_rank_df.to_parquet(path, engine="pyarrow")
+        fwd_rank_parquet_paths[horizon] = str(path)
+
+    universe_mask_path = str(tmp_dir / "universe_mask.parquet")
+    universe_mask.to_parquet(universe_mask_path, engine="pyarrow")
+
+    # Determine features to evaluate
     registry = store.get_registry()
     all_features = list(registry["features"].keys())
     n_total = len(all_features)
 
-    rows = []
+    features_to_evaluate = [
+        fid for fid in all_features
+        if force or not store.has_evaluation(fid)
+    ]
+    n_to_eval = len(features_to_evaluate)
+    print(f"    Evaluating {n_to_eval}/{n_total} features (parallel, max_workers={config.MAX_WORKERS})...")
+
     all_ic_records = []
+    completed = 0
 
-    for idx, feature_id in enumerate(all_features):
-        if idx % 50 == 0:
-            print(f"    Evaluating: {idx}/{n_total} features...")
+    args_list = [
+        (
+            feature_id,
+            str(store.store_dir),
+            fwd_rank_parquet_paths,
+            universe_mask_path,
+            str(train_cutoff_date),
+            config.FORWARD_HORIZONS,
+            config.IC_DECAY_LAGS,
+        )
+        for feature_id in features_to_evaluate
+    ]
 
-        # Skip if already evaluated (unless force)
-        if not force and store.has_evaluation(feature_id):
-            continue
+    with ProcessPoolExecutor(max_workers=config.MAX_WORKERS) as pool:
+        futures = {pool.submit(evaluate_feature_worker, args): args[0] for args in args_list}
+        for future in as_completed(futures):
+            feature_id = futures[future]
+            try:
+                result = future.result()
+            except Exception as e:
+                print(f"    WARNING: Future for {feature_id} raised: {e}")
+                result = None
 
-        try:
-            # Load feature
-            long_df = store.load_feature(feature_id)
-            wide_df = long_df.pivot_table(
-                index="date", columns="ticker", values="value"
-            )
+            completed += 1
+            if completed % 50 == 0:
+                print(f"    Evaluated: {completed}/{n_to_eval} features...")
 
-            # Evaluate (with pre-ranked forward returns)
-            evaluation, ic_records = evaluate_feature(
-                feature_id, wide_df, forward_returns, universe_mask,
-                train_cutoff_date, fwd_ranks_precomputed,
-            )
-            all_ic_records.extend(ic_records)
+            if result is None:
+                continue
 
-            # Save evaluation
-            store.save_evaluation(feature_id, evaluation)
-
-            # Build row for results DataFrame
-            row = {
-                "feature_id": feature_id,
-                "category": registry["features"][feature_id].get("category"),
-                "level": registry["features"][feature_id].get("level"),
-                "formula": registry["features"][feature_id].get("formula"),
-            }
-
-            # Flatten evaluation metrics
-            for horizon, metrics in evaluation.items():
-                if isinstance(metrics, dict):
-                    for metric_name, value in metrics.items():
-                        col = f"{metric_name}_{horizon}"
-                        row[col] = value
-
-            rows.append(row)
-
-            del wide_df, long_df
+            store.save_evaluation(result["feature_id"], result["evaluation"])
+            all_ic_records.extend(result["ic_records"])
 
             # Persist IC records periodically to avoid data loss on interruption
             if len(all_ic_records) >= 50000:
                 store.save_ic_timeseries_batch(all_ic_records)
                 all_ic_records = []
 
-        except Exception as e:
-            print(f"    WARNING: Failed to evaluate {feature_id}: {e}")
-            continue
-
     if all_ic_records:
         print(f"    Persisting IC time series ({len(all_ic_records)} records)...")
         store.save_ic_timeseries_batch(all_ic_records)
 
     store.save_registry()
+
+    # Clean up tmp Parquet files
+    shutil.rmtree(tmp_dir, ignore_errors=True)
 
     # Always return full evaluations from store (not just newly computed)
     return store.get_all_evaluations()

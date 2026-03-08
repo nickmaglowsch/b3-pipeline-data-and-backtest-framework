@@ -5,6 +5,8 @@ Combines base signals with operators to produce Level 1 and Level 2 features.
 from __future__ import annotations
 
 import itertools
+import shutil
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 import pandas as pd
 
@@ -20,6 +22,7 @@ def generate_level1_features(
 ) -> int:
     """
     Generate Level 1 features: apply rank and zscore to all base signals.
+    Uses ProcessPoolExecutor for parallelism.
 
     For each base signal in the store, apply each unary operator and save
     the result to the store (if not already present).
@@ -32,6 +35,8 @@ def generate_level1_features(
     Returns:
         Number of new features generated.
     """
+    from research.discovery._worker import generate_unary_feature_worker
+
     n_new = 0
 
     # Get all Level 0 features from registry
@@ -43,59 +48,51 @@ def generate_level1_features(
 
     print(f"  Generating Level 1 features for {len(level0_features)} base signals...")
 
+    # Write universe mask to a tmp Parquet file shared across workers
+    tmp_dir = Path(store.store_dir) / "tmp_gen_l1"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    universe_mask_path = str(tmp_dir / "universe_mask.parquet")
+    universe_mask.to_parquet(universe_mask_path, engine="pyarrow")
+
+    # Build args list, filtering already-computed features
+    args_list = []
     for feature_id in level0_features:
-        # Skip market-level signals (Series, not DataFrames)
         category = registry["features"][feature_id].get("category")
         if category in ["market_ibov", "market_cdi"]:
             continue
-
-        # Load wide-format feature
-        long_df = store.load_feature(feature_id)
-
-        # Pivot to wide (date x ticker)
-        wide_df = long_df.pivot_table(
-            index="date", columns="ticker", values="value"
-        )
-
-        # Apply unary operators
-        for op_name, op_func in UNARY_OPS.items():
+        for op_name in UNARY_OPS:
             new_id = f"{op_name}__{feature_id}"
-
             if store.has_feature(new_id):
                 continue
+            args_list.append((feature_id, op_name, new_id, str(store.store_dir), universe_mask_path, category))
 
+    n_todo = len(args_list)
+    print(f"    {n_todo} Level 1 features to generate (parallel, max_workers={config.MAX_WORKERS})...")
+
+    with ProcessPoolExecutor(max_workers=config.MAX_WORKERS) as pool:
+        futures = {pool.submit(generate_unary_feature_worker, args): args[2] for args in args_list}
+        for future in as_completed(futures):
+            new_id = futures[future]
             try:
-                # Apply operator
-                result = op_func(wide_df)
-
-                # Mask and convert to long format
-                masked = result.where(universe_mask)
-                long_result = masked.stack().reset_index()
-                long_result.columns = ["date", "ticker", "value"]
-                long_result = long_result.dropna(subset=["value"])
-                long_result["value"] = long_result["value"].astype("float32")
-
-                # Save to store
-                metadata = {
-                    "category": category,
-                    "level": 1,
-                    "formula": new_id,
-                    "params": {},
-                }
-                store.save_feature(new_id, long_result, metadata)
-                n_new += 1
-
+                result = future.result()
             except Exception as e:
-                print(f"    WARNING: Failed to generate {new_id}: {e}")
+                print(f"    WARNING: Future for {new_id} raised: {e}")
+                result = None
+
+            if result is None:
                 continue
 
-        # Free memory
-        del wide_df, long_df
+            store.save_feature(result["new_id"], result["df"], result["metadata"])
+            n_new += 1
 
-        if n_new % 50 == 0:
-            print(f"    Generated {n_new} Level 1 features...")
+            if n_new % 50 == 0:
+                print(f"    Generated {n_new} Level 1 features...")
 
     store.save_registry()
+
+    # Clean up tmp files
+    shutil.rmtree(tmp_dir, ignore_errors=True)
+
     return n_new
 
 
@@ -108,9 +105,10 @@ def generate_level2_features(
     top_features_for_ratio_to_mean: list[str] = None,
 ) -> int:
     """
-    Generate Level 2 features:
+    Generate Level 2 features using ProcessPoolExecutor for parallelism:
     1. Apply delta(20) to top_features_for_delta
-    2. Apply ratio and product to all pairs from top_features_for_binary
+    2. Apply ratio_to_mean to top_features_for_ratio_to_mean
+    3. Apply ratio and product to all pairs from top_features_for_binary
 
     Args:
         store: FeatureStore instance
@@ -122,157 +120,120 @@ def generate_level2_features(
     Returns:
         Number of new features generated.
     """
-    from research.discovery.operators import op_delta
+    from research.discovery._worker import (
+        generate_delta_feature_worker,
+        generate_ratio_to_mean_feature_worker,
+        generate_binary_feature_worker,
+    )
 
     n_new = 0
     registry = store.get_registry()
 
     print(f"  Generating Level 2 features (delta + binary)...")
 
-    # Phase 1: Delta operator on top features
+    # Write universe mask to a tmp Parquet file shared across workers
+    tmp_dir = Path(store.store_dir) / "tmp_gen_l2"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    universe_mask_path = str(tmp_dir / "universe_mask.parquet")
+    universe_mask.to_parquet(universe_mask_path, engine="pyarrow")
+
+    # --- Phase 1: Delta operator on top features ---
+    delta_args = []
     for feature_id in top_features_for_delta:
         if feature_id not in registry["features"]:
             continue
-
-        long_df = store.load_feature(feature_id)
-        wide_df = long_df.pivot_table(
-            index="date", columns="ticker", values="value"
-        )
         category = registry["features"][feature_id].get("category")
-
         for period in config.DELTA_PERIODS:
             new_id = f"delta{period}__{feature_id}"
-
             if store.has_feature(new_id):
                 continue
+            delta_args.append((feature_id, period, new_id, str(store.store_dir), universe_mask_path, category))
 
-            try:
-                result = op_delta(wide_df, period)
-
-                # Mask and convert to long format
-                masked = result.where(universe_mask)
-                long_result = masked.stack().reset_index()
-                long_result.columns = ["date", "ticker", "value"]
-                long_result = long_result.dropna(subset=["value"])
-                long_result["value"] = long_result["value"].astype("float32")
-
-                # Save to store
-                metadata = {
-                    "category": category,
-                    "level": 2,
-                    "formula": new_id,
-                    "params": {"period": period},
-                }
-                store.save_feature(new_id, long_result, metadata)
+    if delta_args:
+        print(f"    {len(delta_args)} delta features to generate (parallel)...")
+        with ProcessPoolExecutor(max_workers=config.MAX_WORKERS) as pool:
+            futures = {pool.submit(generate_delta_feature_worker, args): args[2] for args in delta_args}
+            for future in as_completed(futures):
+                new_id = futures[future]
+                try:
+                    result = future.result()
+                except Exception as e:
+                    print(f"    WARNING: Future for {new_id} raised: {e}")
+                    result = None
+                if result is None:
+                    continue
+                store.save_feature(result["new_id"], result["df"], result["metadata"])
                 n_new += 1
 
-            except Exception as e:
-                print(f"    WARNING: Failed to generate {new_id}: {e}")
-                continue
-
-        del wide_df, long_df
-
-    # Phase 1b: ratio_to_mean operator on top features
+    # --- Phase 1b: ratio_to_mean operator on top features ---
     if top_features_for_ratio_to_mean:
-        from research.discovery.operators import op_ratio_to_mean
-
+        rtm_args = []
         for feature_id in top_features_for_ratio_to_mean:
             if feature_id not in registry["features"]:
                 continue
-
-            long_df = store.load_feature(feature_id)
-            wide_df = long_df.pivot_table(
-                index="date", columns="ticker", values="value"
-            )
             category = registry["features"][feature_id].get("category")
-
             for period in config.RATIO_TO_MEAN_PERIODS:
                 new_id = f"ratio_to_mean{period}__{feature_id}"
-
                 if store.has_feature(new_id):
                     continue
+                rtm_args.append((feature_id, period, new_id, str(store.store_dir), universe_mask_path, category))
 
-                try:
-                    result = op_ratio_to_mean(wide_df, period)
-
-                    # Mask and convert to long format
-                    masked = result.where(universe_mask)
-                    long_result = masked.stack().reset_index()
-                    long_result.columns = ["date", "ticker", "value"]
-                    long_result = long_result.dropna(subset=["value"])
-                    long_result["value"] = long_result["value"].astype("float32")
-
-                    # Save to store
-                    metadata = {
-                        "category": category,
-                        "level": 2,
-                        "formula": new_id,
-                        "params": {"period": period},
-                    }
-                    store.save_feature(new_id, long_result, metadata)
+        if rtm_args:
+            print(f"    {len(rtm_args)} ratio_to_mean features to generate (parallel)...")
+            with ProcessPoolExecutor(max_workers=config.MAX_WORKERS) as pool:
+                futures = {pool.submit(generate_ratio_to_mean_feature_worker, args): args[2] for args in rtm_args}
+                for future in as_completed(futures):
+                    new_id = futures[future]
+                    try:
+                        result = future.result()
+                    except Exception as e:
+                        print(f"    WARNING: Future for {new_id} raised: {e}")
+                        result = None
+                    if result is None:
+                        continue
+                    store.save_feature(result["new_id"], result["df"], result["metadata"])
                     n_new += 1
 
-                except Exception as e:
-                    print(f"    WARNING: Failed to generate {new_id}: {e}")
-                    continue
-
-            del wide_df, long_df
-
-    # Phase 2: Binary operators on top feature pairs
+    # --- Phase 2: Binary operators on top feature pairs ---
+    binary_args = []
     for feat_a, feat_b in itertools.combinations(top_features_for_binary, 2):
         if feat_a not in registry["features"] or feat_b not in registry["features"]:
             continue
-
-        # Skip if both from same category (redundant)
         cat_a = registry["features"][feat_a].get("category")
         cat_b = registry["features"][feat_b].get("category")
         if cat_a == cat_b:
             continue
-
-        # Load both features
-        long_a = store.load_feature(feat_a)
-        long_b = store.load_feature(feat_b)
-
-        wide_a = long_a.pivot_table(index="date", columns="ticker", values="value")
-        wide_b = long_b.pivot_table(index="date", columns="ticker", values="value")
-
-        # Apply binary operators
-        for op_name, op_func in BINARY_OPS.items():
+        for op_name in BINARY_OPS:
             new_id = f"{op_name}__{feat_a}__{feat_b}"
-
             if store.has_feature(new_id):
                 continue
+            binary_args.append((feat_a, feat_b, op_name, new_id, str(store.store_dir), universe_mask_path))
 
-            try:
-                result = op_func(wide_a, wide_b)
-
-                # Mask and convert to long format
-                masked = result.where(universe_mask)
-                long_result = masked.stack().reset_index()
-                long_result.columns = ["date", "ticker", "value"]
-                long_result = long_result.dropna(subset=["value"])
-                long_result["value"] = long_result["value"].astype("float32")
-
-                # Save to store
-                metadata = {
-                    "category": "composite",
-                    "level": 2,
-                    "formula": new_id,
-                    "params": {},
-                }
-                store.save_feature(new_id, long_result, metadata)
+    if binary_args:
+        print(f"    {len(binary_args)} binary features to generate (parallel)...")
+        with ProcessPoolExecutor(max_workers=config.MAX_WORKERS) as pool:
+            futures = {pool.submit(generate_binary_feature_worker, args): args[3] for args in binary_args}
+            completed_binary = 0
+            for future in as_completed(futures):
+                new_id = futures[future]
+                try:
+                    result = future.result()
+                except Exception as e:
+                    print(f"    WARNING: Future for {new_id} raised: {e}")
+                    result = None
+                if result is None:
+                    continue
+                store.save_feature(result["new_id"], result["df"], result["metadata"])
                 n_new += 1
-
-            except Exception as e:
-                print(f"    WARNING: Failed to generate {new_id}: {e}")
-                continue
-
-        del wide_a, wide_b, long_a, long_b
-
-        if n_new % 50 == 0:
-            print(f"    Generated {n_new} Level 2 features...")
+                completed_binary += 1
+                if completed_binary % 50 == 0:
+                    print(f"    Generated {n_new} Level 2 features...")
 
     store.save_registry()
+
+    # Clean up tmp files
+    shutil.rmtree(tmp_dir, ignore_errors=True)
+
     return n_new
 
 
