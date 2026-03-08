@@ -2,6 +2,7 @@ use pyo3::prelude::*;
 use pyo3_arrow::PyRecordBatch;
 
 mod adjustments;
+mod correlation;
 mod cross_section;
 mod feature_eval;
 mod parser;
@@ -132,6 +133,7 @@ fn cotahist_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(feature_eval::compute_turnover_rs, m)?)?;
     m.add_function(wrap_pyfunction!(cross_section::cross_sectional_rank, m)?)?;
     m.add_function(wrap_pyfunction!(cross_section::cross_sectional_zscore, m)?)?;
+    m.add_function(wrap_pyfunction!(correlation::compute_pairwise_spearman, m)?)?;
     Ok(())
 }
 

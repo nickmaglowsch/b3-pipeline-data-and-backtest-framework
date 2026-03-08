@@ -10,6 +10,12 @@ import numpy as np
 from research.discovery import config
 from research.discovery.store import FeatureStore
 
+try:
+    import cotahist_rs as _rs
+    _RUST_CORR = True
+except ImportError:
+    _RUST_CORR = False
+
 
 def filter_nan_and_variance(
     store: FeatureStore,
@@ -131,7 +137,15 @@ def compute_feature_correlation_matrix(
 
     print(f"    Computing correlations for {len(valid_ids)} features on {len(sampled_dates)} dates...")
 
-    # Build matrix and compute Pearson correlation of rank vectors (= Spearman)
+    if _RUST_CORR and len(valid_ids) >= 2:
+        import pyarrow as pa
+        arrow_vectors = [pa.array(rank_data[fid], type=pa.float64()) for fid in valid_ids]
+        result_batch = _rs.compute_pairwise_spearman(arrow_vectors, valid_ids)
+        corr_df = result_batch.to_pandas().set_index("feature_id")
+        corr_df.index.name = None
+        return corr_df
+
+    # Python fallback: build rank matrix and use pandas .corr()
     rank_matrix = pd.DataFrame(rank_data)
     corr_matrix = rank_matrix.corr()
     return corr_matrix
