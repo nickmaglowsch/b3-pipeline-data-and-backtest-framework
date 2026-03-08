@@ -10,7 +10,21 @@ Usage:
     python -m b3_pipeline.cvm_main --start-year 2020            # From 2020
     python -m b3_pipeline.cvm_main --start-year 2023 --end-year 2023
     python -m b3_pipeline.cvm_main --rebuild                    # Drop and recreate tables
-    python -m b3_pipeline.cvm_main --skip-ratios                # Skip valuation ratio computation
+    python -m b3_pipeline.cvm_main --include-historical         # Also load CAD company registry
+
+Data coverage:
+    CVM's open data portal provides structured bulk financial data only from 2010 onward:
+    - DFP (annual):    2010+
+    - ITR (quarterly): 2011+
+    - FRE (shares):    2010+
+
+    Pre-2010 financial data (revenue, net income, equity) does NOT exist as structured
+    bulk CSV on dados.cvm.gov.br. The IPE dataset (2003-2009) contains individual PDF
+    documents per company, not parseable structured data.
+
+    --include-historical adds:
+    - CAD company register: listing/delisting dates for survivorship-bias correction
+    - IPE document index: company metadata and filing history (NOT financial statements)
 """
 from __future__ import annotations
 
@@ -596,9 +610,15 @@ def run_fundamentals_pipeline(
                 cnpj_ticker_map = cvm_storage.get_cvm_company_map(conn)
                 logger.info(f"Refreshed CNPJ → ticker map: {len(cnpj_ticker_map):,} companies")
 
-            # Step 12: IPE download, index, and parse
+            # Step 12: IPE download and index
+            # IPE (2003-2009) is a document filing index — each entry is a link to a PDF.
+            # It does NOT contain structured financial data (revenue, net income, etc.).
+            # We process it for two purposes only:
+            #   1. Index company CNPJs seen before 2010 (helps ticker mapping)
+            #   2. Store filing metadata in cvm_filings for audit/completeness
+            # Financial coverage remains 2010+ from DFP/ITR/FRE.
             logger.info("")
-            logger.info(f"Step 12/13: Downloading and processing IPE historical filings ({ipe_start}-{ipe_end})...")
+            logger.info(f"Step 12/13: Downloading and indexing IPE filing metadata ({ipe_start}-{ipe_end})...")
             total_ipe_filings = 0
             for year in range(ipe_start, ipe_end + 1):
                 try:
@@ -638,32 +658,14 @@ def run_fundamentals_pipeline(
 
             # Step 13: Re-run monthly snapshot for IPE rows
             logger.info("")
-            logger.info("Step 13/13: Re-propagating shares and rebuilding monthly snapshot for IPE rows...")
-            # Note: _propagate_ipe_shares() is not implemented (Path B from Task 05).
-            # IPE has no capital structure data — shares_outstanding stays NULL for IPE rows.
-            # Valuation ratios are computed dynamically at query time — no re-materialization needed.
+            logger.info("Step 13/13: Rebuilding monthly snapshot...")
+            # IPE adds no financial rows to fundamentals_pit, so monthly snapshot is
+            # unchanged by IPE processing. This step is kept for completeness in case
+            # future datasets add pre-2010 structured data.
             if not skip_monthly:
                 monthly_rows = materialize_fundamentals_monthly(conn)
                 logger.info(f"Monthly snapshot (post-IPE): {monthly_rows:,} rows materialized")
 
-            # Log IPE coverage stats
-            try:
-                cursor = conn.cursor()
-                cursor.execute("""
-                    SELECT
-                        COUNT(*) as total_ipe,
-                        COUNT(shares_outstanding) as ipe_with_shares
-                    FROM fundamentals_pit
-                    WHERE doc_type = 'IPE'
-                """)
-                ipe_row = cursor.fetchone()
-                if ipe_row:
-                    logger.info(
-                        f"IPE coverage: {ipe_row[0]:,} total rows, "
-                        f"{ipe_row[1]:,} with shares"
-                    )
-            except Exception:
-                pass
 
         end_time = datetime.now()
         duration = end_time - start_time
@@ -721,7 +723,12 @@ Examples:
     )
     arg_parser.add_argument(
         "--include-historical", action="store_true",
-        help="Download and process IPE (pre-2010) and CAD company register data",
+        help=(
+            "Download and process CAD company register (listing/delisting dates) and "
+            "IPE document index (2003-2009 company metadata). "
+            "NOTE: does NOT provide pre-2010 financial data — CVM's bulk structured "
+            "financials start at 2010. IPE documents are individual PDFs, not parseable CSVs."
+        ),
     )
     arg_parser.add_argument(
         "--verbose", "-v", action="store_true",
