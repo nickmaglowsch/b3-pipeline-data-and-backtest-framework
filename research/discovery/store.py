@@ -28,11 +28,14 @@ def sanitize_feature_id(name: str) -> str:
 def compute_data_hash(data: dict) -> str:
     """
     Compute a fingerprint of the source data.
-    Uses shape + date range of adj_close DataFrame.
+    Uses shape + date range of adj_close DataFrame plus fundamentals count.
     Returns a hex string.
     """
     adj = data["adj_close"]
-    key = f"{adj.shape}|{adj.index.min()}|{adj.index.max()}|{adj.columns.size}"
+    # Fundamentals fingerprint: count of non-NaN cells in f_net_income
+    f_ni = data.get("f_net_income")
+    fund_count = int(f_ni.count().sum()) if f_ni is not None and not f_ni.empty else 0
+    key = f"{adj.shape}|{adj.index.min()}|{adj.index.max()}|{adj.columns.size}|fund:{fund_count}"
     return hashlib.sha256(key.encode()).hexdigest()[:16]
 
 

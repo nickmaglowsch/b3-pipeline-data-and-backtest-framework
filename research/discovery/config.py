@@ -77,3 +77,7 @@ MIN_PRICE = parent_config.MIN_PRICE
 MIN_HISTORY_DAYS = parent_config.MIN_HISTORY_DAYS
 ADTV_WINDOW = parent_config.ADTV_WINDOW
 OUTPUT_DIR = parent_config.OUTPUT_DIR
+
+# ── Feature Flags ─────────────────────────────────────────────────────
+
+FUNDAMENTAL_SIGNALS_ENABLED = True  # Set False via --no-fundamentals CLI flag
