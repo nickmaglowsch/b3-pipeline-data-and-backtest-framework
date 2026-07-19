@@ -1,0 +1,18 @@
+name: LowVol
+description: >-
+  Low Volatility (unconditional, no regime filter). Selects lowest-volatility
+  stocks from the liquid universe, top decile. Always invested in equities.
+kind: rank_and_hold
+rebalance: ME
+warmup_pad: 1
+universe:
+  min_adtv: 1000000
+  min_price: 1.0
+signal:
+  factor: low_vol
+  lookback: 12
+  shift: 0
+selection:
+  top_pct: 0.10
+  min_names: 5
+weighting: equal

@@ -1,0 +1,15 @@
+name: BOVA11 / IVVB11 / CDI (thirds)
+description: >-
+  Passive baseline: equal thirds of BOVA11 (Ibovespa ETF), IVVB11 (S&P 500 in
+  BRL) and CDI (cash), rebalanced quarterly. Holds 100% CDI until both ETFs are
+  live. The index-beta bar every active strategy should clear.
+# The original class exposed no rebalance_freq, so it inherited the ME default
+# — reproduce that exactly. Flip to QE (its documented intent) if desired.
+kind: fixed_weight
+rebalance: ME
+park_in_cdi_until_live: true
+park_mode: all_or_nothing
+sleeves:
+  - {ticker: BOVA11.SA, weight: 0.3333333333333333}
+  - {ticker: IVVB11.SA, weight: 0.3333333333333333}
+  - {asset: CDI,        weight: 0.3333333333333333}

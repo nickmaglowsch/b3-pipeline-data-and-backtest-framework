@@ -1,0 +1,27 @@
+name: RegimeSwitching
+description: >-
+  Regime Switching. When IBOV is above its N-month moving average, hold the
+  top-decile MultiFactor composite; otherwise (or when too few names qualify)
+  hold 100% CDI.
+kind: rank_and_hold
+rebalance: ME
+warmup_pad: 2
+universe:
+  min_adtv: 1000000
+  min_price: 1.0
+signal:
+  factor: mf_composite
+  lookback: 12
+  apply_glitch: false
+selection:
+  top_pct: 0.10
+  min_names: 5
+weighting: equal
+regime:
+  add_ibov: true
+  park_when_too_few: true
+  inputs:
+    above: {flag: ibov_above, offset: 1}
+  rules:
+    - {above: true}
+    - {default: true, park: true}
