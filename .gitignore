@@ -13,6 +13,7 @@ tasks/
 b3_pipeline_rs/target/
 research/feature_store/
 __pycache__/
+.cache/
 *.log
 *.sqlite-shm
 *.sqlite-wal
