@@ -18,3 +18,5 @@ __pycache__/
 *.sqlite-wal
 backtests/output/
 backtests/*.png
+backtests/*.csv
+research/output/
