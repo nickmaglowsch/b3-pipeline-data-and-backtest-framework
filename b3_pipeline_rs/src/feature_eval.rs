@@ -98,12 +98,14 @@ fn compute_ic_for_row(
     let feat_vals: Vec<f64> = valid.iter().map(|&j| feature_row[j].unwrap()).collect();
     let fwd_vals: Vec<f64> = valid.iter().map(|&j| fwd_rank_row[j].unwrap()).collect();
 
-    // Rank feature values (cross-sectional rank for this date)
+    // Standard Spearman on complete pairs: re-rank BOTH sides over the
+    // intersection of valid tickers. fwd values are pre-ranked pct values;
+    // ranking is invariant under monotone transforms, so re-ranking them
+    // equals ranking the raw forward returns over the subset.
     let feat_ranks = rank_pct(&feat_vals);
-    // fwd_rank values are already ranked — use them directly
-    // (they were pre-ranked by the Python caller via pandas rank(axis=1, pct=True))
+    let fwd_ranks = rank_pct(&fwd_vals);
 
-    let ic = pearson_corr(&feat_ranks, &fwd_vals);
+    let ic = pearson_corr(&feat_ranks, &fwd_ranks);
     if ic.is_nan() {
         None
     } else {
@@ -335,9 +337,13 @@ pub fn compute_turnover_rs(py: Python<'_>, feature_batch: PyObject) -> PyResult<
     let (_, feat_matrix) = extract_wide_batch(&feat_rb)
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
 
+    Ok(compute_turnover_inner(&feat_matrix))
+}
+
+fn compute_turnover_inner(feat_matrix: &[Vec<Option<f64>>]) -> f64 {
     let n_rows = feat_matrix.len();
     if n_rows < 2 {
-        return Ok(1.0);
+        return 1.0;
     }
 
     // Compute ranked rows first
@@ -369,38 +375,31 @@ pub fn compute_turnover_rs(py: Python<'_>, feature_batch: PyObject) -> PyResult<
         .collect();
 
     // Compute day-to-day Pearson correlation of ranked rows (consecutive pairs)
-    // This mirrors the Python implementation using vectorized approach:
-    // for each consecutive pair, compute correlation between rank vectors (filling nulls with 0,
-    // demeaning, then computing Pearson — matching the pandas vectorized approach)
+    // using pairwise-valid deletion: only tickers with valid ranks on BOTH days
+    // enter the correlation (universe churn must not distort the statistic).
     let daily_corrs: Vec<Option<f64>> = (1..n_rows)
         .into_par_iter()
         .map(|i| {
             let r = &ranked_rows[i];
             let rs = &ranked_rows[i - 1];
-            let n_cols = r.len();
 
-            // Match Python: fill nulls with 0, demean, compute Pearson
-            // r_filled[j] = r[j].unwrap_or(0.0)
-            // rs_filled[j] = rs[j].unwrap_or(0.0)
-            let r_filled: Vec<f64> = r.iter().map(|opt| opt.unwrap_or(0.0)).collect();
-            let rs_filled: Vec<f64> = rs.iter().map(|opt| opt.unwrap_or(0.0)).collect();
+            let (xs, ys): (Vec<f64>, Vec<f64>) = r
+                .iter()
+                .zip(rs.iter())
+                .filter_map(|(a, b)| match (a, b) {
+                    (Some(x), Some(y)) => Some((*x, *y)),
+                    _ => None,
+                })
+                .unzip();
 
-            // Demean
-            let r_mean = r_filled.iter().sum::<f64>() / n_cols as f64;
-            let rs_mean = rs_filled.iter().sum::<f64>() / n_cols as f64;
-
-            let r_dm: Vec<f64> = r_filled.iter().map(|&v| v - r_mean).collect();
-            let rs_dm: Vec<f64> = rs_filled.iter().map(|&v| v - rs_mean).collect();
-
-            let num: f64 = r_dm.iter().zip(rs_dm.iter()).map(|(a, b)| a * b).sum();
-            let ss_r: f64 = r_dm.iter().map(|v| v * v).sum::<f64>().sqrt();
-            let ss_rs: f64 = rs_dm.iter().map(|v| v * v).sum::<f64>().sqrt();
-            let denom = ss_r * ss_rs;
-
-            if denom == 0.0 {
+            if xs.len() < 2 {
+                return None;
+            }
+            let c = pearson_corr(&xs, &ys);
+            if c.is_nan() {
                 None
             } else {
-                Some(num / denom)
+                Some(c)
             }
         })
         .collect();
@@ -408,11 +407,11 @@ pub fn compute_turnover_rs(py: Python<'_>, feature_batch: PyObject) -> PyResult<
     // Mean autocorrelation (dropping None values)
     let valid_corrs: Vec<f64> = daily_corrs.into_iter().flatten().collect();
     if valid_corrs.is_empty() {
-        return Ok(1.0);
+        return 1.0;
     }
     let mean_autocorr = valid_corrs.iter().sum::<f64>() / valid_corrs.len() as f64;
     // Return 1.0 - mean_autocorr (rounding to 4 decimal places is done in Python)
-    Ok(1.0 - mean_autocorr)
+    1.0 - mean_autocorr
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -517,10 +516,10 @@ mod tests {
     }
 
     #[test]
-    fn test_pearson_corr_all_same_returns_zero() {
+    fn test_pearson_corr_zero_variance_is_nan() {
         let x = [1.0, 1.0, 1.0];
         let y = [2.0, 3.0, 4.0];
-        assert_eq!(pearson_corr(&x, &y), 0.0);
+        assert!(pearson_corr(&x, &y).is_nan());
     }
 
     // ── compute_ic_series_inner tests ─────────────────────────────────────────
@@ -643,69 +642,94 @@ mod tests {
         // Same values every day → rank autocorrelation = 1 → turnover ≈ 0
         let n_tickers = 15;
         let n_dates = 30;
-        let dates: Vec<String> = (0..n_dates)
-            .map(|i| format!("2020-01-{:02}", i + 2))
-            .collect();
-        let date_refs: Vec<&str> = dates.iter().map(|s| s.as_str()).collect();
-
         let constant_row: Vec<Option<f64>> = (0..n_tickers).map(|j| Some(j as f64)).collect();
         let data = vec![constant_row; n_dates];
 
-        let batch = make_wide_batch(&date_refs, &data);
-
-        // Extract and call the internal logic
-        let (_, feat_matrix) = extract_wide_batch(&batch).unwrap();
-        let n_rows = feat_matrix.len();
-
-        let ranked_rows: Vec<Vec<Option<f64>>> = feat_matrix
-            .iter()
-            .map(|row| {
-                let valid: Vec<(usize, f64)> = row
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(j, opt)| opt.map(|v| (j, v)))
-                    .collect();
-                if valid.is_empty() {
-                    return vec![None; row.len()];
-                }
-                let vals: Vec<f64> = valid.iter().map(|(_, v)| *v).collect();
-                let ranks = rank_pct(&vals);
-                let mut ranked = vec![None; row.len()];
-                for (k, (j, _)) in valid.iter().enumerate() {
-                    ranked[*j] = Some(ranks[k]);
-                }
-                ranked
-            })
-            .collect();
-
-        let daily_corrs: Vec<Option<f64>> = (1..n_rows)
-            .map(|i| {
-                let r = &ranked_rows[i];
-                let rs = &ranked_rows[i - 1];
-                let n_cols = r.len();
-                let r_filled: Vec<f64> = r.iter().map(|opt| opt.unwrap_or(0.0)).collect();
-                let rs_filled: Vec<f64> = rs.iter().map(|opt| opt.unwrap_or(0.0)).collect();
-                let r_mean = r_filled.iter().sum::<f64>() / n_cols as f64;
-                let rs_mean = rs_filled.iter().sum::<f64>() / n_cols as f64;
-                let r_dm: Vec<f64> = r_filled.iter().map(|&v| v - r_mean).collect();
-                let rs_dm: Vec<f64> = rs_filled.iter().map(|&v| v - rs_mean).collect();
-                let num: f64 = r_dm.iter().zip(rs_dm.iter()).map(|(a, b)| a * b).sum();
-                let ss_r = r_dm.iter().map(|v| v * v).sum::<f64>().sqrt();
-                let ss_rs = rs_dm.iter().map(|v| v * v).sum::<f64>().sqrt();
-                let denom = ss_r * ss_rs;
-                if denom == 0.0 {
-                    None
-                } else {
-                    Some(num / denom)
-                }
-            })
-            .collect();
-
-        let valid_corrs: Vec<f64> = daily_corrs.into_iter().flatten().collect();
-        assert!(!valid_corrs.is_empty());
-        let mean_autocorr = valid_corrs.iter().sum::<f64>() / valid_corrs.len() as f64;
-        let turnover = 1.0 - mean_autocorr;
+        let turnover = compute_turnover_inner(&data);
         assert!(turnover < 0.05, "Constant feature turnover should be < 0.05, got {}", turnover);
+    }
+
+    #[test]
+    fn test_turnover_pairwise_ignores_universe_churn() {
+        // Fixed cross-sectional ordering, but universe membership alternates:
+        // even days tickers 0..10 valid, odd days tickers 5..15 valid.
+        // Pairwise-valid deletion → surviving tickers keep their relative order
+        // → autocorrelation 1 → turnover ≈ 0. (Zero-filling missing ranks
+        // fabricated turnover here.)
+        let n_tickers = 15;
+        let n_dates = 30;
+        let data: Vec<Vec<Option<f64>>> = (0..n_dates)
+            .map(|i| {
+                (0..n_tickers)
+                    .map(|j| {
+                        let in_universe = if i % 2 == 0 { j < 10 } else { j >= 5 };
+                        if in_universe { Some(j as f64) } else { None }
+                    })
+                    .collect()
+            })
+            .collect();
+
+        let turnover = compute_turnover_inner(&data);
+        assert!(
+            turnover.abs() < 0.05,
+            "Churning universe with stable ordering should have turnover ~0, got {}",
+            turnover
+        );
+    }
+
+    #[test]
+    fn test_ic_reranks_fwd_over_intersection() {
+        // 12 tickers; feature missing in the middle (ticker 5), fwd valid for all,
+        // pre-ranked over all 12. Both series are monotone in ticker index, so
+        // Spearman on complete pairs (re-ranking BOTH over the intersection)
+        // must be exactly 1.0. Using the pre-ranked fwd values directly (with a
+        // gap at the missing ticker) would give corr < 1.
+        let n_tickers = 12;
+        let dates = vec!["2020-01-02"];
+        let feat_row: Vec<Option<f64>> = (0..n_tickers)
+            .map(|j| if j == 5 { None } else { Some(j as f64) })
+            .collect();
+        let fwd_row: Vec<Option<f64>> = (0..n_tickers)
+            .map(|j| Some((j + 1) as f64 / n_tickers as f64))
+            .collect();
+
+        let feat_rb = make_wide_batch(&dates, &[feat_row]);
+        let fwd_rb = make_wide_batch(&dates, &[fwd_row]);
+
+        let result = compute_ic_series_inner(&feat_rb, &fwd_rb, 10).unwrap();
+        let ic_arr = result
+            .column_by_name("ic")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        assert!(!ic_arr.is_null(0));
+        let ic = ic_arr.value(0);
+        assert!((ic - 1.0).abs() < 1e-12, "Expected IC exactly 1.0, got {}", ic);
+    }
+
+    #[test]
+    fn test_ic_zero_variance_feature_produces_null() {
+        // Constant feature across all tickers → zero variance → null IC
+        // (matches the pandas path, which yields NaN and drops the date).
+        let n_tickers = 15;
+        let dates = vec!["2020-01-02"];
+        let feat_data = vec![vec![Some(7.0); n_tickers]];
+        let fwd_data = vec![(0..n_tickers)
+            .map(|j| Some((j + 1) as f64 / n_tickers as f64))
+            .collect()];
+
+        let feat_rb = make_wide_batch(&dates, &feat_data);
+        let fwd_rb = make_wide_batch(&dates, &fwd_data);
+
+        let result = compute_ic_series_inner(&feat_rb, &fwd_rb, 10).unwrap();
+        let ic_arr = result
+            .column_by_name("ic")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        assert!(ic_arr.is_null(0), "Zero-variance feature must produce null IC");
     }
 
     #[test]

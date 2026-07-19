@@ -240,6 +240,48 @@ def test_compute_ic_series_fast_precomputed_fwd_rank_same_result():
     pd.testing.assert_series_equal(ic_without, ic_with, check_names=False)
 
 
+def test_rust_python_ic_parity_mismatched_tickers_and_missingness(monkeypatch):
+    """Rust and Python IC paths must agree when the feature's ticker set differs
+    from the forward-return ticker set (extra + missing columns), when there is
+    asymmetric within-column missingness, and on zero-variance dates."""
+    import research.discovery.evaluator as ev
+
+    if not ev._RUST_EVAL:
+        pytest.skip("cotahist_rs not available")
+
+    rng = np.random.default_rng(3)
+    n_dates = 40
+    dates = pd.date_range("2020-01-02", periods=n_dates, freq="B")
+    fwd_tickers = [f"T{i:02d}" for i in range(15)]
+    # Feature is missing T13/T14 and has extra tickers XX/YY, in different order
+    feat_tickers = ["YY"] + [f"T{i:02d}" for i in range(13)] + ["XX"]
+
+    feature = pd.DataFrame(
+        rng.standard_normal((n_dates, len(feat_tickers))), index=dates, columns=feat_tickers
+    )
+    fwd_ret = pd.DataFrame(
+        rng.standard_normal((n_dates, len(fwd_tickers))), index=dates, columns=fwd_tickers
+    )
+    # Asymmetric missingness within shared tickers
+    feature.iloc[::3, 2] = np.nan
+    fwd_ret.iloc[::4, 5] = np.nan
+    # Zero-variance date: feature constant across all tickers → both paths drop it
+    feature.iloc[10, :] = 5.0
+
+    all_cols = sorted(set(feat_tickers) | set(fwd_tickers))
+    mask = pd.DataFrame(True, index=dates, columns=all_cols)
+    fwd_rank = fwd_ret.where(mask).rank(axis=1, pct=True)
+
+    ic_rust = ev.compute_ic_series_fast(feature, None, mask, fwd_rank_precomputed=fwd_rank)
+
+    monkeypatch.setattr(ev, "_RUST_EVAL", False)
+    ic_py = ev.compute_ic_series_fast(feature, None, mask, fwd_rank_precomputed=fwd_rank)
+
+    assert ic_rust.isna().equals(ic_py.isna())
+    assert pd.isna(ic_py.loc[dates[10]])  # zero-variance date dropped by both
+    pd.testing.assert_series_equal(ic_rust, ic_py, check_names=False, atol=1e-12, rtol=1e-9)
+
+
 def test_ic_computation_snapshot():
     """Regression guard: mean IC on fixed synthetic data must not change."""
     feature = _make_wide(n_dates=50, n_tickers=20, seed=42)
@@ -294,6 +336,21 @@ def test_compute_turnover_shuffled_ranks_has_high_turnover():
     turnover = compute_turnover(df, mask)
     # Independent random data → autocorr ~ 0 → turnover ~ 1
     assert turnover > 0.80
+
+
+def test_compute_turnover_pairwise_ignores_universe_churn():
+    """Stable cross-sectional ordering with churning universe membership must
+    have turnover ~0: only tickers valid on BOTH days enter the correlation."""
+    dates = pd.date_range("2020-01-02", periods=30, freq="B")
+    tickers = [f"T{i:02d}" for i in range(15)]
+    # Fixed ordering every day
+    df = pd.DataFrame(np.tile(np.arange(15.0), (30, 1)), index=dates, columns=tickers)
+    mask = pd.DataFrame(False, index=dates, columns=tickers)
+    # Even days: tickers 0..9 in universe; odd days: tickers 5..14
+    mask.iloc[::2, :10] = True
+    mask.iloc[1::2, 5:] = True
+    turnover = compute_turnover(df, mask)
+    assert abs(turnover) < 0.05, f"churn distorted turnover: {turnover}"
 
 
 def test_compute_decay_returns_dict_keyed_by_lags():

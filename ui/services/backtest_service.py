@@ -6,6 +6,7 @@ Designed to be called inside a JobRunner thread.
 """
 from __future__ import annotations
 
+import os
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -20,6 +21,7 @@ DB_PATH = PROJECT_ROOT / "b3_market_data.sqlite"
 @st.cache_data(ttl=3600)
 def _get_shared_data_cached(
     db_path: str,
+    db_mtime: float,
     start: str,
     end: str,
     freq: str,
@@ -28,7 +30,8 @@ def _get_shared_data_cached(
     """
     Cache the shared data dict in Streamlit's data cache.
     Uses cache_data (not cache_resource) to ensure callers get independent copies.
-    Key: (db_path, start, end, freq, include_fundamentals).
+    Key: (db_path, db_mtime, start, end, freq, include_fundamentals) —
+    db_mtime invalidates the cache after a pipeline rebuild touches the DB.
     """
     from backtests.core.shared_data import build_shared_data
     return build_shared_data(db_path, start, end, freq, include_fundamentals=include_fundamentals)
@@ -71,13 +74,10 @@ def run_backtest(strategy_name: str, params: dict) -> dict:
     print(f"[backtest_service] Params: start={start}, end={end}, freq={freq}")
     print(f"[backtest_service] include_fundamentals={needs_funds}")
 
-    # Load shared data (cached in Streamlit resource cache)
-    try:
-        shared = _get_shared_data_cached(str(DB_PATH), start, end, freq, include_fundamentals=needs_funds)
-    except Exception as e:
-        print(f"[backtest_service] Cache miss or error, rebuilding: {e}")
-        from backtests.core.shared_data import build_shared_data
-        shared = build_shared_data(str(DB_PATH), start, end, freq, include_fundamentals=needs_funds)
+    # Load shared data (cached in Streamlit data cache, keyed on DB mtime)
+    shared = _get_shared_data_cached(
+        str(DB_PATH), os.path.getmtime(DB_PATH), start, end, freq, include_fundamentals=needs_funds
+    )
 
     print(f"[backtest_service] Generating signals for {strategy_name}...")
     ret_matrix, target_weights = strategy.generate_signals(shared, params)
@@ -103,11 +103,12 @@ def run_backtest(strategy_name: str, params: dict) -> dict:
     at_ret = value_to_ret(at_val)
     pt_ret = value_to_ret(pt_val)
 
+    ppy = {"ME": 12, "QE": 4, "W-FRI": 52}.get(freq, 12)
     metrics = [
-        build_metrics(pt_ret, f"{strategy_name} (Pre-Tax)"),
-        build_metrics(at_ret, f"{strategy_name} (After-Tax)"),
-        build_metrics(ibov_ret.loc[common], "IBOV"),
-        build_metrics(cdi_ret.reindex(common).fillna(0), "CDI"),
+        build_metrics(pt_ret, f"{strategy_name} (Pre-Tax)", ppy),
+        build_metrics(at_ret, f"{strategy_name} (After-Tax)", ppy),
+        build_metrics(ibov_ret.loc[common], "IBOV", ppy),
+        build_metrics(cdi_ret.reindex(common).fillna(0), "CDI", ppy),
     ]
 
     sharpe_val = metrics[1].get('Sharpe', 'N/A')

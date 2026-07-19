@@ -84,32 +84,12 @@ def test_pe_ratio_formula(sample_data):
         sample_data["f_net_income"],
         sample_data["adj_close"],
     )
-    # market_cap = 30.0 * (13_000_000 / 1000) = 30 * 13000 = 390_000
+    # Shares in raw units (post 2026-07-17 FRE fix), financials in thousands BRL:
+    # market_cap = 30.0 * 13_000_000 = 390_000_000
     # net_income_brl = 1_000_000 * 1000 = 1_000_000_000
-    # PE = 390_000 / 1_000_000_000... wait
-    # Scaling: shares in thousands → actual shares = 13_000_000 * 1000 = 13B
-    # No: f_shares is stored as "thousands" → actual = 13_000_000 / 1000 = 13_000 shares? That seems small.
-    # Per task spec: market_cap = adj_close * (f_shares / 1000)
-    # = 30 * (13_000_000 / 1000) = 30 * 13000 = 390_000 BRL
-    # net_income_brl = f_net_income * 1000 = 1_000_000 * 1000 = 1_000_000_000
-    # PE = 390_000 / 1_000_000_000 = 0.00039 ... that doesn't match the spec's 0.39
-    # The spec says: PE = 0.39 and formula gives 390_000_000 / 1_000_000_000
-    # which implies market_cap = 30 * 13_000_000 = 390_000_000 (no /1000 on shares)
-    # But spec says: market_cap = adj_close * (f_shares / 1000)
-    # Actually: 30 * (13_000_000 / 1000) * 1000 = 30 * 13_000_000 / 1 ???
-    # Re-reading: PE = market_cap / (f_net_income × 1000)
-    # market_cap = adj_close * (f_shares / 1000)
-    # = 30 * (13_000_000 / 1000) = 30 * 13_000 = 390_000
-    # net_income_brl = 1_000_000 * 1000 = 1_000_000_000
-    # PE = 390_000 / 1_000_000_000 = 0.00039 — but spec says 0.39
-    # The spec test says: (30.0 * 13_000_000 / 1000) / (1_000_000 * 1000) = 390_000 / 1_000_000_000 = 0.00039
-    # but also writes "(30 * 13000) / 1_000_000_000 = 390_000_000 / 1_000_000_000 = 0.39"
-    # The spec has an arithmetic error. (30 * 13000) = 390_000, not 390_000_000.
-    # Let's just use the formula verbatim and check the actual value.
+    # PE = 390_000_000 / 1_000_000_000 = 0.39
     val = result.loc["2023-01-31", "PETR3"]
-    # market_cap = 30 * (13_000_000 / 1000) = 30 * 13000 = 390_000
-    # pe = 390_000 / (1_000_000 * 1000) = 390_000 / 1_000_000_000 = 3.9e-4
-    expected = (30.0 * 13_000_000 / 1000) / (1_000_000 * 1000)
+    expected = (30.0 * 13_000_000) / (1_000_000 * 1000)
     assert abs(val - expected) < 1e-8, f"PE mismatch: got {val}, expected {expected}"
 
 

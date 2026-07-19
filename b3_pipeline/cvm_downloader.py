@@ -117,6 +117,14 @@ def download_fre_file(year: int, force: bool = False) -> Optional[Path]:
     return _download_file(url, filepath, force=force)
 
 
+def download_fca_file(year: int, force: bool = False) -> Optional[Path]:
+    """Download an FCA (Formulário Cadastral) ZIP file for the given year."""
+    filename = f"fca_cia_aberta_{year}.zip"
+    filepath = config.CVM_DATA_DIR / filename
+    url = f"{config.CVM_FCA_BASE_URL}{filename}"
+    return _download_file(url, filepath, force=force)
+
+
 def download_all_cvm_files(
     start_year: int = None,
     end_year: int = None,

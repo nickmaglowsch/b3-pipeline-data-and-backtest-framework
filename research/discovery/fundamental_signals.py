@@ -9,7 +9,11 @@ import numpy as np
 import pandas as pd
 
 
-_SHARES_SCALE = 1_000.0
+# Shares are stored in RAW UNITS since the 2026-07-17 FRE parser fix (the old
+# "1000x too large" observations were Capital Autorizado rows, not a units
+# convention). Financial statement metrics remain in THOUSANDS of BRL.
+_SHARES_SCALE = 1.0
+_FIN_SCALE = 1_000.0
 
 
 # ---------------------------------------------------------------------------
@@ -25,11 +29,11 @@ def compute_fund_pe_ratio(
     """
     P/E ratio.
     market_cap = adj_close * (f_shares / _SHARES_SCALE)
-    P/E = market_cap / (f_net_income * _SHARES_SCALE)
+    P/E = market_cap / (f_net_income * _FIN_SCALE)
     NaN where net_income <= 0.
     """
     market_cap = adj_close * (f_shares / _SHARES_SCALE)
-    ni_brl = f_net_income * _SHARES_SCALE
+    ni_brl = f_net_income * _FIN_SCALE
     # Zero/negative net income → NaN
     ni_brl = ni_brl.where(ni_brl > 0)
     return market_cap / ni_brl
@@ -46,7 +50,7 @@ def compute_fund_earnings_yield(
     NaN where market_cap <= 0.
     """
     market_cap = adj_close * (f_shares / _SHARES_SCALE)
-    ni_brl = f_net_income * _SHARES_SCALE
+    ni_brl = f_net_income * _FIN_SCALE
     ni_brl = ni_brl.where(ni_brl > 0)
     pe = market_cap / ni_brl
     mc_safe = market_cap.where(market_cap > 0)
@@ -61,11 +65,11 @@ def compute_fund_pb_ratio(
     """
     P/B ratio.
     market_cap = adj_close * (f_shares / _SHARES_SCALE)
-    P/B = market_cap / (f_equity * _SHARES_SCALE)
+    P/B = market_cap / (f_equity * _FIN_SCALE)
     NaN where equity <= 0.
     """
     market_cap = adj_close * (f_shares / _SHARES_SCALE)
-    equity_brl = f_equity * _SHARES_SCALE
+    equity_brl = f_equity * _FIN_SCALE
     equity_brl = equity_brl.where(equity_brl > 0)
     return market_cap / equity_brl
 
@@ -78,13 +82,13 @@ def compute_fund_ev_ebitda(
 ) -> pd.DataFrame:
     """
     EV/EBITDA.
-    EV = market_cap + f_net_debt * _SHARES_SCALE
-    EV/EBITDA = EV / (f_ebitda * _SHARES_SCALE)
+    EV = market_cap + f_net_debt * _FIN_SCALE
+    EV/EBITDA = EV / (f_ebitda * _FIN_SCALE)
     NaN where ebitda <= 0.
     """
     market_cap = adj_close * (f_shares / _SHARES_SCALE)
-    net_debt_brl = f_net_debt * _SHARES_SCALE
-    ebitda_brl = f_ebitda * _SHARES_SCALE
+    net_debt_brl = f_net_debt * _FIN_SCALE
+    ebitda_brl = f_ebitda * _FIN_SCALE
     ev = market_cap + net_debt_brl
     ebitda_brl = ebitda_brl.where(ebitda_brl > 0)
     return ev / ebitda_brl

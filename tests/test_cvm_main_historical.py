@@ -76,6 +76,8 @@ def test_run_pipeline_without_historical_skips_ipe_steps():
          patch("b3_pipeline.cvm_main.cvm_downloader.download_dfp_file", return_value=None), \
          patch("b3_pipeline.cvm_main.cvm_downloader.download_itr_file", return_value=None), \
          patch("b3_pipeline.cvm_main.cvm_downloader.download_fre_file", return_value=None), \
+         patch("b3_pipeline.cvm_main.cvm_downloader.download_fca_file", return_value=None), \
+         patch("b3_pipeline.cvm_main.cvm_storage.populate_tickers_from_company_tickers_pit", return_value=0), \
          patch("b3_pipeline.cvm_main._fetch_ticker_mappings", return_value=0), \
          patch("b3_pipeline.cvm_main.cvm_storage.get_cvm_company_map", return_value={}), \
          patch("b3_pipeline.cvm_main.cvm_storage.get_fundamentals_stats", return_value={
@@ -85,6 +87,7 @@ def test_run_pipeline_without_historical_skips_ipe_steps():
          patch("b3_pipeline.cvm_main.cvm_storage.populate_tickers_from_cvm_companies", return_value=0), \
          patch("b3_pipeline.cvm_main.cvm_storage.populate_company_isin_map", return_value=0), \
          patch("b3_pipeline.cvm_main._propagate_fre_shares"), \
+         patch("b3_pipeline.cvm_main.compute_net_income_ttm", return_value=0), \
          patch("b3_pipeline.cvm_main.materialize_fundamentals_monthly", return_value=0), \
          patch("b3_pipeline.cad_downloader.download_cad_file") as mock_cad_dl, \
          patch("b3_pipeline.ipe_downloader.download_ipe_file") as mock_ipe_dl:
@@ -113,6 +116,8 @@ def test_run_pipeline_with_historical_calls_cad_download():
          patch("b3_pipeline.cvm_main.cvm_downloader.download_dfp_file", return_value=None), \
          patch("b3_pipeline.cvm_main.cvm_downloader.download_itr_file", return_value=None), \
          patch("b3_pipeline.cvm_main.cvm_downloader.download_fre_file", return_value=None), \
+         patch("b3_pipeline.cvm_main.cvm_downloader.download_fca_file", return_value=None), \
+         patch("b3_pipeline.cvm_main.cvm_storage.populate_tickers_from_company_tickers_pit", return_value=0), \
          patch("b3_pipeline.cvm_main._fetch_ticker_mappings", return_value=0), \
          patch("b3_pipeline.cvm_main.cvm_storage.get_cvm_company_map", return_value={}), \
          patch("b3_pipeline.cvm_main.cvm_storage.get_fundamentals_stats", return_value={
@@ -122,6 +127,7 @@ def test_run_pipeline_with_historical_calls_cad_download():
          patch("b3_pipeline.cvm_main.cvm_storage.populate_tickers_from_cvm_companies", return_value=0), \
          patch("b3_pipeline.cvm_main.cvm_storage.populate_company_isin_map", return_value=0), \
          patch("b3_pipeline.cvm_main._propagate_fre_shares"), \
+         patch("b3_pipeline.cvm_main.compute_net_income_ttm", return_value=0), \
          patch("b3_pipeline.cvm_main.materialize_fundamentals_monthly", return_value=0), \
          patch("b3_pipeline.cad_downloader.download_cad_file", return_value=None) as mock_cad_dl, \
          patch("b3_pipeline.ipe_downloader.download_ipe_file", return_value=None), \
@@ -148,6 +154,8 @@ def test_run_pipeline_with_historical_calls_ipe_download_for_range():
          patch("b3_pipeline.cvm_main.cvm_downloader.download_dfp_file", return_value=None), \
          patch("b3_pipeline.cvm_main.cvm_downloader.download_itr_file", return_value=None), \
          patch("b3_pipeline.cvm_main.cvm_downloader.download_fre_file", return_value=None), \
+         patch("b3_pipeline.cvm_main.cvm_downloader.download_fca_file", return_value=None), \
+         patch("b3_pipeline.cvm_main.cvm_storage.populate_tickers_from_company_tickers_pit", return_value=0), \
          patch("b3_pipeline.cvm_main._fetch_ticker_mappings", return_value=0), \
          patch("b3_pipeline.cvm_main.cvm_storage.get_cvm_company_map", return_value={}), \
          patch("b3_pipeline.cvm_main.cvm_storage.get_fundamentals_stats", return_value={
@@ -157,6 +165,7 @@ def test_run_pipeline_with_historical_calls_ipe_download_for_range():
          patch("b3_pipeline.cvm_main.cvm_storage.populate_tickers_from_cvm_companies", return_value=0), \
          patch("b3_pipeline.cvm_main.cvm_storage.populate_company_isin_map", return_value=0), \
          patch("b3_pipeline.cvm_main._propagate_fre_shares"), \
+         patch("b3_pipeline.cvm_main.compute_net_income_ttm", return_value=0), \
          patch("b3_pipeline.cvm_main.materialize_fundamentals_monthly", return_value=0), \
          patch("b3_pipeline.cad_downloader.download_cad_file", return_value=None), \
          patch("b3_pipeline.ipe_downloader.download_ipe_file", return_value=None) as mock_ipe_dl, \
@@ -187,6 +196,8 @@ def test_run_pipeline_ipe_year_range_default():
          patch("b3_pipeline.cvm_main.cvm_downloader.download_dfp_file", return_value=None), \
          patch("b3_pipeline.cvm_main.cvm_downloader.download_itr_file", return_value=None), \
          patch("b3_pipeline.cvm_main.cvm_downloader.download_fre_file", return_value=None), \
+         patch("b3_pipeline.cvm_main.cvm_downloader.download_fca_file", return_value=None), \
+         patch("b3_pipeline.cvm_main.cvm_storage.populate_tickers_from_company_tickers_pit", return_value=0), \
          patch("b3_pipeline.cvm_main._fetch_ticker_mappings", return_value=0), \
          patch("b3_pipeline.cvm_main.cvm_storage.get_cvm_company_map", return_value={}), \
          patch("b3_pipeline.cvm_main.cvm_storage.get_fundamentals_stats", return_value={
@@ -196,6 +207,7 @@ def test_run_pipeline_ipe_year_range_default():
          patch("b3_pipeline.cvm_main.cvm_storage.populate_tickers_from_cvm_companies", return_value=0), \
          patch("b3_pipeline.cvm_main.cvm_storage.populate_company_isin_map", return_value=0), \
          patch("b3_pipeline.cvm_main._propagate_fre_shares"), \
+         patch("b3_pipeline.cvm_main.compute_net_income_ttm", return_value=0), \
          patch("b3_pipeline.cvm_main.materialize_fundamentals_monthly", return_value=0), \
          patch("b3_pipeline.cad_downloader.download_cad_file", return_value=None), \
          patch("b3_pipeline.ipe_downloader.download_ipe_file", return_value=None) as mock_ipe_dl, \
@@ -261,6 +273,8 @@ def test_run_pipeline_historical_upserts_filings(tmp_path):
          patch("b3_pipeline.cvm_main.cvm_downloader.download_dfp_file", return_value=None), \
          patch("b3_pipeline.cvm_main.cvm_downloader.download_itr_file", return_value=None), \
          patch("b3_pipeline.cvm_main.cvm_downloader.download_fre_file", return_value=None), \
+         patch("b3_pipeline.cvm_main.cvm_downloader.download_fca_file", return_value=None), \
+         patch("b3_pipeline.cvm_main.cvm_storage.populate_tickers_from_company_tickers_pit", return_value=0), \
          patch("b3_pipeline.cvm_main._fetch_ticker_mappings", return_value=0), \
          patch("b3_pipeline.cvm_main.cvm_storage.get_cvm_company_map", return_value={}), \
          patch("b3_pipeline.cvm_main.cvm_storage.get_fundamentals_stats", return_value={
@@ -270,6 +284,7 @@ def test_run_pipeline_historical_upserts_filings(tmp_path):
          patch("b3_pipeline.cvm_main.cvm_storage.populate_tickers_from_cvm_companies", return_value=0), \
          patch("b3_pipeline.cvm_main.cvm_storage.populate_company_isin_map", return_value=0), \
          patch("b3_pipeline.cvm_main._propagate_fre_shares"), \
+         patch("b3_pipeline.cvm_main.compute_net_income_ttm", return_value=0), \
          patch("b3_pipeline.cvm_main.materialize_fundamentals_monthly", return_value=0), \
          patch("b3_pipeline.cad_downloader.download_cad_file", return_value=None), \
          patch("b3_pipeline.ipe_downloader.download_ipe_file", side_effect=ipe_download_side_effect), \

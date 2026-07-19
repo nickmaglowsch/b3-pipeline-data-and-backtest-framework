@@ -2,10 +2,106 @@
 Core utilities for backtesting with B3 data.
 """
 
+import glob
 import sqlite3
+from pathlib import Path
+
+import numpy as np
 import pandas as pd
 import yfinance as yf
 from datetime import datetime
+
+
+def load_sector_pit(fca_dir, db_path) -> pd.DataFrame:
+    """
+    Load point-in-time CVM sector classification joined to tickers.
+
+    Reads every FCA geral CSV (survivorship-free — includes delisted companies)
+    from `fca_dir` and maps CNPJ -> ticker via company_tickers_pit. Returns
+    long-format [ticker, ref_date, sector]. Returns an empty frame if FCA data
+    is unavailable.
+    """
+    from b3_pipeline.fca_parser import parse_fca_sectors
+
+    zips = sorted(glob.glob(str(Path(fca_dir) / "fca_cia_aberta_*.zip")))
+    if not zips:
+        return pd.DataFrame(columns=["ticker", "ref_date", "sector"])
+
+    frames = []
+    for zp in zips:
+        try:
+            frames.append(parse_fca_sectors(zp))
+        except Exception:
+            continue
+    if not frames:
+        return pd.DataFrame(columns=["ticker", "ref_date", "sector"])
+    sectors = pd.concat(frames, ignore_index=True)
+
+    with sqlite3.connect(str(db_path)) as conn:
+        cmap = pd.read_sql_query(
+            "SELECT DISTINCT cnpj, ticker FROM company_tickers_pit", conn
+        )
+    out = sectors.merge(cmap, on="cnpj", how="inner")
+    out["ref_date"] = pd.to_datetime(out["ref_date"], errors="coerce")
+    return out[["ticker", "ref_date", "sector"]].dropna(subset=["ticker", "ref_date"])
+
+
+def sector_membership(sector_pit: pd.DataFrame, keywords: list) -> pd.DataFrame:
+    """
+    Given long-format PIT sector records [ticker, ref_date, sector] and a list of
+    sector keywords (case-insensitive substring match), return [ticker,
+    effective_date] — one row per FCA filing where the sector matched. A ticker
+    is eligible at rebalance date t if any of its effective_date <= t.
+    """
+    if sector_pit.empty:
+        return pd.DataFrame(columns=["ticker", "effective_date"])
+    kw = [k.lower() for k in keywords]
+    mask = sector_pit["sector"].str.lower().apply(lambda s: any(k in s for k in kw))
+    hits = sector_pit[mask]
+    return hits[["ticker", "ref_date"]].rename(columns={"ref_date": "effective_date"})
+
+
+def sector_membership_asof(
+    sector_pit: pd.DataFrame, keywords: list, dates: pd.DatetimeIndex
+) -> pd.DataFrame:
+    """
+    As-of sector eligibility: for each date in `dates`, a ticker is eligible iff
+    its LATEST filing with ref_date <= date matches one of `keywords`
+    (case-insensitive substring). Unlike sector_membership ("ever classified"),
+    a later reclassification out of the sector revokes eligibility.
+
+    Returns a boolean DataFrame indexed by `dates` with ticker columns
+    (False before a ticker's first filing).
+    """
+    if sector_pit.empty or len(dates) == 0:
+        return pd.DataFrame(index=dates)
+    kw = [k.lower() for k in keywords]
+    sp = sector_pit.copy()
+    sp["match"] = (
+        sp["sector"].str.lower().apply(lambda s: any(k in s for k in kw)).astype(float)
+    )
+    wide = (
+        sp.sort_values("ref_date")
+        .pivot_table(index="ref_date", columns="ticker", values="match", aggfunc="last")
+    )
+    wide = wide.reindex(wide.index.union(dates)).ffill().reindex(dates)
+    return wide.notna() & (wide > 0)
+
+
+def _cast_str_cols(batch):
+    """Cast large_string/string_view columns to utf8 (StringArray) for Rust.
+
+    pandas 3.x arrow-backed str dtype converts to large_string, but the
+    cotahist_rs extension downcasts to arrow-rs StringArray (utf8).
+    """
+    import pyarrow as pa
+    for idx in range(batch.num_columns):
+        col = batch.column(idx)
+        if pa.types.is_large_string(col.type) or pa.types.is_string_view(col.type):
+            batch = batch.set_column(
+                idx, batch.schema.field(idx).name, col.cast(pa.utf8())
+            )
+    return batch
 
 
 def _pivot_and_ffill_rs(df: "pd.DataFrame"):
@@ -25,13 +121,14 @@ def _pivot_and_ffill_rs(df: "pd.DataFrame"):
     df_for_rust = df[["date", "ticker", "close", "adj_close", "fin_volume"]].copy()
     df_for_rust["date"] = df_for_rust["date"].dt.strftime("%Y-%m-%d")
 
-    long_batch = pa.RecordBatch.from_pandas(df_for_rust, preserve_index=False)
+    long_batch = _cast_str_cols(pa.RecordBatch.from_pandas(df_for_rust, preserve_index=False))
 
     adj_close_batch, close_px_batch, fin_vol_batch = cotahist_rs.pivot_and_ffill(long_batch)
 
     def _to_wide_df(batch):
         wide = batch.to_pandas()
-        wide["date"] = pd.to_datetime(wide["date"])
+        # pandas 3 parses date strings as datetime64[us]; keep the [ns] contract
+        wide["date"] = pd.to_datetime(wide["date"]).astype("datetime64[ns]")
         wide = wide.set_index("date")
         wide.columns.name = "ticker"
         return wide
@@ -142,11 +239,10 @@ def load_b3_data(
 
     df["date"] = pd.to_datetime(df["date"])
 
-    # Calculate daily financial volume in BRL.
-    # In our DB, the `volume` column comes from COTAHIST VOLTOT (Financial Volume),
-    # but it is parsed as an integer with 2 implied decimal places.
-    # Therefore, true financial volume = volume / 100
-    df["fin_volume"] = df["volume"] / 100.0
+    # Daily financial volume in BRL.
+    # The parser already divides COTAHIST VOLTOT's 2 implied decimals,
+    # so the DB `volume` column is stored in reais (verified: PETR4 ~1e9/day).
+    df["fin_volume"] = df["volume"].astype(float)
 
     # Attempt Rust pivot+ffill (5-15x faster)
     rust_result = _pivot_and_ffill_rs(df)
@@ -233,7 +329,8 @@ def load_b3_hlc_data(
         df = pd.read_sql_query(query, conn, params=[start, end])
 
     df["date"] = pd.to_datetime(df["date"])
-    df["fin_volume"] = df["volume"] / 100.0
+    # DB `volume` is already in reais (parser handles VOLTOT's implied decimals)
+    df["fin_volume"] = df["volume"].astype(float)
 
     print("🔄  Pivoting HLC data to wide format...")
     adj_close = df.pivot(index="date", columns="ticker", values="adj_close")
@@ -286,17 +383,25 @@ def download_cdi_daily(start: str, end: str) -> pd.Series:
 
         url = f"https://api.bcb.gov.br/dados/serie/bcdata.sgs.12/dados?formato=json&dataInicial={s_str}&dataFinal={e_str}"
 
-        try:
-            response = requests.get(url)
-            data = response.json()
-            if data:
-                df = pd.DataFrame(data)
-                df["data"] = pd.to_datetime(df["data"], format="%d/%m/%Y")
-                df["valor"] = pd.to_numeric(df["valor"]) / 100.0
-                df.set_index("data", inplace=True)
-                series.append(df["valor"])
-        except Exception as e:
-            print(f"Warning: Failed to fetch CDI chunk {s_str} to {e_str}: {e}")
+        # BCB throttles intermittently and returns non-JSON — a silently missing
+        # chunk makes every CDI-holding backtest earn 0% cash for years, so retry.
+        for attempt in range(3):
+            try:
+                response = requests.get(url, timeout=30)
+                data = response.json()
+                if data:
+                    df = pd.DataFrame(data)
+                    df["data"] = pd.to_datetime(df["data"], format="%d/%m/%Y")
+                    df["valor"] = pd.to_numeric(df["valor"]) / 100.0
+                    df.set_index("data", inplace=True)
+                    series.append(df["valor"])
+                break
+            except Exception as e:
+                if attempt == 2:
+                    print(f"Warning: Failed to fetch CDI chunk {s_str} to {e_str}: {e}")
+                else:
+                    import time
+                    time.sleep(2 * (attempt + 1))
 
         current_start = current_end + relativedelta(days=1)
 
@@ -318,6 +423,7 @@ def download_cdi_daily(start: str, end: str) -> pd.Series:
 _FUNDAMENTALS_METRICS = [
     "revenue",
     "net_income",
+    "net_income_ttm",
     "ebitda",
     "total_assets",
     "equity",
@@ -350,6 +456,7 @@ def load_fundamentals_pit(
     start: str,
     end: str,
     freq: str = "ME",
+    staleness_days: int = 400,
 ) -> pd.DataFrame:
     """
     Load point-in-time fundamentals for a single metric.
@@ -364,6 +471,10 @@ def load_fundamentals_pit(
         start:    Start date string.
         end:      End date string.
         freq:     Rebalance calendar frequency (default 'ME' = month-end).
+        staleness_days: Values whose source filing is older than this many days
+                  become NaN instead of forward-filling forever (mirrors the
+                  400-day cut in sp500_b3.pit_snapshot), so delisted companies
+                  don't carry years-stale fundamentals.
 
     Returns:
         Wide DataFrame: DatetimeIndex (rebalance dates) × ticker columns.
@@ -417,7 +528,21 @@ def load_fundamentals_pit(
     # then slice to only the rebalance calendar dates within [start, end].
     rebal_dates = _get_rebalance_dates(db_path, start, end, freq)
     extended_index = wide.index.union(rebal_dates).sort_values()
-    wide = wide.reindex(extended_index).ffill()
+    wide = wide.reindex(extended_index)
+
+    # Track the filing date behind each forward-filled cell so we can blank
+    # values once they exceed the staleness cutoff.
+    obs_date = pd.DataFrame(
+        np.where(wide.notna(), wide.index.values[:, None], np.datetime64("NaT")),
+        index=wide.index,
+        columns=wide.columns,
+    )
+    wide = wide.ffill()
+    obs_date = obs_date.ffill()
+    stale = (wide.index.values[:, None] - obs_date.values) > np.timedelta64(
+        staleness_days, "D"
+    )
+    wide = wide.mask(stale)
 
     # Slice to only the rebalance calendar dates within the requested window
     wide = wide.reindex(rebal_dates)
@@ -533,20 +658,16 @@ def load_all_fundamentals_monthly(
 
 # ── Dynamic ratio helpers (pure pandas, no DB access) ─────────────────────────
 #
-# Investigation finding (2026-03-07): CVM capital_social FRE files report
-# Quantidade_Total_Acoes in raw units, but the values in the database were found
-# to be 1000x too large relative to actual share counts (e.g. CIEL stored as
-# 6,000,000,000,000 vs actual ~6,000,000,000; VSPT stored as 210,197,643,696,260
-# vs actual ~210,197,643,696). Root cause: CVM reports some share counts in
-# thousands of shares, not raw units. The stored shares_outstanding values are
-# therefore effectively in units that are 1000x smaller than expected.
-#
-# Fix: divide shares_outstanding by SHARES_SCALE (1000) in all three helpers
-# before computing market cap. This converts stored values back to correct units.
-# All ratio formulas assume: prices in BRL, financial metrics in thousands BRL,
-# shares_outstanding as stored (i.e. divide by 1000 to get raw unit count).
+# History: a 2026-03-07 investigation observed some stored share counts 1000x+
+# too large (CIEL 6e12, VSPT 2.1e14) and concluded CVM reports shares in
+# thousands, adding a /1000 correction here. The 2026-07-17 FRE parser fix
+# found the real root cause: the parser was keeping arbitrary Tipo_Capital rows
+# ("Capital Autorizado" = issuance ceiling, or fat-fingered duplicate entries)
+# instead of "Capital Integralizado". shares_outstanding is now stored in RAW
+# UNITS, so no scaling is applied. Formulas assume: prices in BRL, financial
+# metrics in thousands BRL, shares in raw units.
 
-_SHARES_SCALE = 1_000.0  # shares_outstanding in DB is 1000x the actual raw unit count
+_SHARES_SCALE = 1.0  # shares_outstanding stored in raw units (see history above)
 
 
 def compute_pe_ratio_dynamic(

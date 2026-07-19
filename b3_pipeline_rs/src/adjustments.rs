@@ -138,6 +138,12 @@ fn scan_isin(
         let prev_row = sorted_indices[idx - 1];
         let curr_row = sorted_indices[idx];
 
+        // Skip null closes: reading .value() on a null slot returns whatever is
+        // in the buffer and could fabricate a phantom split.
+        if arrays.closes.is_null(prev_row) || arrays.closes.is_null(curr_row) {
+            continue;
+        }
+
         let prev_close = arrays.closes.value(prev_row);
         let curr_close = arrays.closes.value(curr_row);
 
@@ -502,8 +508,10 @@ pub fn compute_split_adjustment_factors_rs(
             let mut updates = Vec::with_capacity(row_indices.len());
             for &row in row_indices.iter() {
                 let price_date = date_arr.value(row);
-                // searchsorted left: find first index where split_dates[idx] >= price_date
-                let idx = split_dates.partition_point(|&d| d < price_date);
+                // searchsorted right: first index where split_dates[idx] > price_date.
+                // The ex_date itself is excluded: the raw price already trades ex
+                // (halved) ON the ex_date, so the factor applies only to earlier dates.
+                let idx = split_dates.partition_point(|&d| d <= price_date);
                 let factor = suffix[idx];
                 updates.push((row, factor));
             }
@@ -511,19 +519,11 @@ pub fn compute_split_adjustment_factors_rs(
         })
         .collect();
 
-    // Initialise output arrays with input values
-    let mut adj_open: Vec<f64> = (0..n_rows).map(|i| open_arr.value(i)).collect();
-    let mut adj_high: Vec<f64> = (0..n_rows).map(|i| high_arr.value(i)).collect();
-    let mut adj_low: Vec<f64> = (0..n_rows).map(|i| low_arr.value(i)).collect();
-    let mut adj_close: Vec<f64> = (0..n_rows).map(|i| close_arr.value(i)).collect();
-
-    // Apply factor updates
+    // Per-row cumulative split factor (1.0 = no adjustment)
+    let mut factors = vec![1.0_f64; n_rows];
     for updates in factor_updates {
         for (row, factor) in updates {
-            adj_open[row] = open_arr.value(row) * factor;
-            adj_high[row] = high_arr.value(row) * factor;
-            adj_low[row] = low_arr.value(row) * factor;
-            adj_close[row] = close_arr.value(row) * factor;
+            factors[row] = factor;
         }
     }
 
@@ -531,18 +531,17 @@ pub fn compute_split_adjustment_factors_rs(
     let mut output_columns: Vec<ArrayRef> = prices_rb.columns().to_vec();
     let mut schema_fields: Vec<Field> = prices_rb.schema().fields().iter().map(|f| (**f).clone()).collect();
 
-    // Build 4 new Float64 arrays
+    // Build 4 new Float64 arrays, propagating nulls (a null input price must
+    // stay null — emitting 0.0×factor would fabricate -100% returns downstream)
     let mut open_builder = Float64Builder::with_capacity(n_rows);
     let mut high_builder = Float64Builder::with_capacity(n_rows);
     let mut low_builder = Float64Builder::with_capacity(n_rows);
     let mut close_builder = Float64Builder::with_capacity(n_rows);
 
-    for i in 0..n_rows {
-        open_builder.append_value(adj_open[i]);
-        high_builder.append_value(adj_high[i]);
-        low_builder.append_value(adj_low[i]);
-        close_builder.append_value(adj_close[i]);
-    }
+    append_adjusted(&open_arr, &factors, &mut open_builder);
+    append_adjusted(&high_arr, &factors, &mut high_builder);
+    append_adjusted(&low_arr, &factors, &mut low_builder);
+    append_adjusted(&close_arr, &factors, &mut close_builder);
 
     schema_fields.push(Field::new("split_adj_open", DataType::Float64, true));
     schema_fields.push(Field::new("split_adj_high", DataType::Float64, true));
@@ -559,6 +558,17 @@ pub fn compute_split_adjustment_factors_rs(
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("RecordBatch: {}", e)))?;
 
     PyRecordBatch::new(batch).to_pyarrow(py)
+}
+
+/// Append `arr[i] * factors[i]` to the builder, propagating nulls.
+fn append_adjusted(arr: &Float64Array, factors: &[f64], builder: &mut Float64Builder) {
+    for i in 0..arr.len() {
+        if arr.is_null(i) {
+            builder.append_null();
+        } else {
+            builder.append_value(arr.value(i) * factors[i]);
+        }
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -730,7 +740,7 @@ mod tests {
         let split_factors = vec![0.5, 0.5];
         let suffix = suffix_product(&split_factors);
         let price_date = 50_i32;
-        let idx = split_dates.partition_point(|&d| d < price_date);
+        let idx = split_dates.partition_point(|&d| d <= price_date);
         assert_eq!(idx, 0);
         assert!((suffix[idx] - 0.25).abs() < 1e-12);
     }
@@ -741,7 +751,7 @@ mod tests {
         let split_factors = vec![0.5, 0.5];
         let suffix = suffix_product(&split_factors);
         let price_date = 300_i32;
-        let idx = split_dates.partition_point(|&d| d < price_date);
+        let idx = split_dates.partition_point(|&d| d <= price_date);
         assert_eq!(idx, 2);
         assert!((suffix[idx] - 1.0).abs() < 1e-12);
     }
@@ -752,8 +762,68 @@ mod tests {
         let split_factors = vec![0.5, 0.5];
         let suffix = suffix_product(&split_factors);
         let price_date = 150_i32;
-        let idx = split_dates.partition_point(|&d| d < price_date);
+        let idx = split_dates.partition_point(|&d| d <= price_date);
         assert_eq!(idx, 1);
         assert!((suffix[idx] - 0.5).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_searchsorted_on_ex_date_excluded_from_adjustment() {
+        // Production convention: the raw price already trades ex ON the ex_date,
+        // so the price dated exactly at the split gets the post-split factor.
+        let split_dates = vec![100_i32, 200_i32];
+        let split_factors = vec![0.5, 0.5];
+        let suffix = suffix_product(&split_factors);
+        let price_date = 100_i32;
+        let idx = split_dates.partition_point(|&d| d <= price_date);
+        assert_eq!(idx, 1);
+        assert!((suffix[idx] - 0.5).abs() < 1e-12);
+    }
+
+    // ── null-handling tests ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_null_close_does_not_fabricate_split() {
+        // Middle close is null but the buffer behind it holds a stale 50.0 —
+        // detection must skip null slots instead of seeing a phantom 2:1 split.
+        use arrow::buffer::{NullBuffer, ScalarBuffer};
+
+        let mut isin_b = StringBuilder::new();
+        let mut date_b = arrow::array::Date32Builder::new();
+        for d in [18628, 18629, 18630] {
+            isin_b.append_value("BRTESTX");
+            date_b.append_value(d);
+        }
+        let closes = Float64Array::new(
+            ScalarBuffer::from(vec![100.0, 50.0, 100.0]),
+            Some(NullBuffer::from(vec![true, false, true])),
+        );
+        let arrays = PricesArrays {
+            isin_codes: isin_b.finish(),
+            dates: date_b.finish(),
+            closes,
+            quotation_factors: None,
+        };
+        let splits = scan_isin("BRTESTX", &[0, 1, 2], &arrays, &HashSet::new(), false, 1.8, 0.55);
+        assert!(splits.is_empty(), "null close fabricated a split: {:?}", splits.len());
+    }
+
+    #[test]
+    fn test_append_adjusted_propagates_nulls() {
+        use arrow::buffer::{NullBuffer, ScalarBuffer};
+
+        // Stale 20.0 behind the null slot must come out as null, not 20.0*factor
+        let arr = Float64Array::new(
+            ScalarBuffer::from(vec![10.0, 20.0, 30.0]),
+            Some(NullBuffer::from(vec![true, false, true])),
+        );
+        let factors = vec![0.5, 0.5, 1.0];
+        let mut builder = Float64Builder::new();
+        append_adjusted(&arr, &factors, &mut builder);
+        let out = builder.finish();
+
+        assert!((out.value(0) - 5.0).abs() < 1e-12);
+        assert!(out.is_null(1), "null input price must stay null");
+        assert!((out.value(2) - 30.0).abs() < 1e-12);
     }
 }

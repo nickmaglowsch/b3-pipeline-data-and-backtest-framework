@@ -12,3 +12,9 @@ tasks/
 .claude/auth.local.md
 b3_pipeline_rs/target/
 research/feature_store/
+__pycache__/
+*.log
+*.sqlite-shm
+*.sqlite-wal
+backtests/output/
+backtests/*.png

@@ -88,14 +88,12 @@ class TestComputeSplitAdjustmentFactors:
         result = compute_split_adjustment_factors(prices, splits)
         result = result.sort_values("date").reset_index(drop=True)
 
-        # np.searchsorted(split_dates, price_date, side='left'):
-        # for 2020-01-02: index=0 -> suffix[0]=0.5 -> adjusted
-        # for 2020-01-03: index=0 -> suffix[0]=0.5 -> adjusted
-        # for 2020-01-06 (== ex_date): index=0 -> suffix[0]=0.5 -> adjusted
-        # All three dates land on suffix[0] because searchsorted 'left' includes the ex_date
+        # The raw price already trades ex (halved) ON the ex_date, so the factor
+        # applies only to dates strictly before it. The adjusted series must be
+        # flat (no fake -50% on the ex_date).
         assert abs(result.loc[0, "split_adj_close"] - 50.0) < 1e-9  # 100 * 0.5
         assert abs(result.loc[1, "split_adj_close"] - 50.0) < 1e-9  # 100 * 0.5
-        assert abs(result.loc[2, "split_adj_close"] - 25.0) < 1e-9  # 50 * 0.5
+        assert abs(result.loc[2, "split_adj_close"] - 50.0) < 1e-9  # 50 * 1.0 (ex_date not adjusted)
 
     def test_two_splits_suffix_product(self):
         """Two 2:1 splits produce suffix product 0.25 before both, 0.5 between them."""

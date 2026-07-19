@@ -61,6 +61,39 @@ def _cast_date_col(batch, col_name: str):
     return batch.set_column(idx, col_name, new_col)
 
 
+def _df_to_batch(df):
+    """DataFrame -> single Arrow RecordBatch, tolerating chunked columns.
+
+    pandas 3 arrow-backed frames built via pd.concat have multi-chunk columns,
+    which RecordBatch.from_pandas rejects ("Cannot convert ChunkedArray").
+    Round-trip through Table.combine_chunks instead.
+    """
+    import pyarrow as pa
+    table = pa.Table.from_pandas(df, preserve_index=False).combine_chunks()
+    batches = table.to_batches()
+    if batches:
+        return batches[0]
+    return pa.RecordBatch.from_pydict(
+        {f.name: pa.array([], type=f.type) for f in table.schema}
+    )
+
+
+def _cast_str_cols(batch):
+    """Cast large_string/string_view columns to utf8 (StringArray) for Rust.
+
+    pandas 3.x arrow-backed str dtype converts to large_string, but the
+    cotahist_rs extension downcasts to arrow-rs StringArray (utf8).
+    """
+    import pyarrow as pa
+    for idx in range(batch.num_columns):
+        col = batch.column(idx)
+        if pa.types.is_large_string(col.type) or pa.types.is_string_view(col.type):
+            batch = batch.set_column(
+                idx, batch.schema.field(idx).name, col.cast(pa.utf8())
+            )
+    return batch
+
+
 def convert_stock_actions_to_splits(stock_actions: pd.DataFrame) -> pd.DataFrame:
     """
     Convert B3 stock actions to the format needed for split adjustments.
@@ -166,14 +199,11 @@ def _compute_split_adjustment_rs(
     splits_copy = splits.copy()
     splits_copy["ex_date"] = pd.to_datetime(splits_copy["ex_date"], errors="coerce").dt.normalize()
 
-    prices_batch_raw = pa.RecordBatch.from_pandas(prices_copy, preserve_index=False)
-    prices_batch = _cast_date_col(prices_batch_raw, "date")
+    prices_batch_raw = _df_to_batch(prices_copy)
+    prices_batch = _cast_str_cols(_cast_date_col(prices_batch_raw, "date"))
 
-    splits_batch_raw = pa.RecordBatch.from_pandas(
-        splits_copy[["isin_code", "ex_date", "split_factor"]],
-        preserve_index=False,
-    )
-    splits_batch = _cast_date_col(splits_batch_raw, "ex_date")
+    splits_batch_raw = _df_to_batch(splits_copy[["isin_code", "ex_date", "split_factor"]])
+    splits_batch = _cast_str_cols(_cast_date_col(splits_batch_raw, "ex_date"))
 
     result_batch = cotahist_rs.compute_split_adjustment(prices_batch, splits_batch)
     return result_batch.to_pandas()
@@ -253,10 +283,11 @@ def compute_split_adjustment_factors(
             raw = split_factors[i] * suffix[i + 1]
             suffix[i] = max(_MIN_CUMULATIVE_FACTOR, min(_MAX_CUMULATIVE_FACTOR, raw))
 
-        # For each price date, find first split index where split_date >= price_date
-        # np.searchsorted(split_dates, price_date, side='left') gives that index
+        # For each price date, find first split index where split_date > price_date.
+        # side='right' excludes the ex_date itself: the raw price already trades
+        # ex (halved) ON the ex_date, so the factor applies only to earlier dates.
         price_dates = isin_prices["_date_ts"].values.astype("datetime64[ns]")
-        indices = np.searchsorted(split_dates, price_dates, side="left")
+        indices = np.searchsorted(split_dates, price_dates, side="right")
         factors = suffix[indices]
 
         # Four vectorized column writes per ISIN (not per row)
@@ -371,8 +402,20 @@ def compute_dividend_adjustment_factors(
             if prev_close <= 0:
                 continue
 
+            if div_amount >= 0.90 * prev_close:
+                # A distribution >= ~price cannot be represented multiplicatively
+                # (factor <= 0.1 crushes all prior history toward zero, creating
+                # fake +30x "returns" at the ex-date). Skip and keep price-based
+                # history for this event (e.g. BRPR3's R$19 payout on a R$5 stock).
+                logger.warning(
+                    f"Skipping pathological dividend for {isin_code} on "
+                    f"{pd.Timestamp(ex_date).date()}: value={div_amount} vs "
+                    f"prev_close={prev_close} (>=90% of price)"
+                )
+                continue
+
             factor = 1.0 - (div_amount / prev_close)
-            factor = max(0.0, min(1.0, factor))
+            factor = min(1.0, factor)
 
             div_factors.append({"ex_date": ex_date, "factor": factor})
 
@@ -435,16 +478,14 @@ def _detect_splits_rs(
     price_cols = ["isin_code", "date", "close"]
     if "quotation_factor" in prices_copy.columns:
         price_cols.append("quotation_factor")
-    prices_batch_raw = pa.RecordBatch.from_pandas(prices_copy[price_cols], preserve_index=False)
+    prices_batch_raw = _df_to_batch(prices_copy[price_cols])
     # Cast date column from Timestamp[ns] to Date32 (days since epoch) as Rust expects
-    prices_arrow = _cast_date_col(prices_batch_raw, "date")
+    prices_arrow = _cast_str_cols(_cast_date_col(prices_batch_raw, "date"))
 
     existing_cols = ["isin_code", "ex_date"]
     if not existing_copy.empty:
-        ex_batch_raw = pa.RecordBatch.from_pandas(
-            existing_copy[existing_cols], preserve_index=False
-        )
-        existing_arrow = _cast_date_col(ex_batch_raw, "ex_date")
+        ex_batch_raw = _df_to_batch(existing_copy[existing_cols])
+        existing_arrow = _cast_str_cols(_cast_date_col(ex_batch_raw, "ex_date"))
     else:
         existing_arrow = pa.RecordBatch.from_pydict(
             {"isin_code": pa.array([], type=pa.utf8()),
@@ -789,6 +830,143 @@ def filter_fatcot_redundant_splits(
     return stock_actions
 
 
+def validate_split_actions_against_prices(
+    stock_actions: pd.DataFrame,
+    prices: pd.DataFrame,
+    tolerance: float = 0.35,
+    date_window: int = 7,
+) -> pd.DataFrame:
+    """
+    Validate B3 API split-type actions against observed raw price ratios.
+
+    B3's corporate-actions API occasionally reports factors that contradict the
+    COTAHIST price series (e.g. a "1-for-100 reverse split" on a date where the
+    quoted price did not move, or a 1:2 split labeled as a 1-for-40 reverse
+    split). Applying such factors corrupts adj_close with fake ±99% jumps.
+
+    COTAHIST prices are treated as the source of truth. For each B3-source
+    SPLIT/REVERSE_SPLIT/BONUS action, compare the expected before/after close
+    ratio implied by the factor with the observed ratio around the ex_date:
+
+    - match within tolerance      -> keep as-is
+    - observed ratio ~= 1         -> drop (phantom action; prices never moved)
+    - observed matches a different
+      ratio                       -> replace factor with the observed ratio
+                                     (snapped to the nearest simple ratio when
+                                     within 5%), source='B3_CORRECTED'
+
+    Args:
+        stock_actions: stock actions (isin_code, ex_date, action_type, factor, source).
+        prices: per-share price data (isin_code, date, close).
+        tolerance: relative tolerance between observed and expected ratio.
+        date_window: max calendar days to search for closes around the ex_date.
+
+    Returns:
+        stock_actions with phantom rows dropped and wrong factors corrected.
+    """
+    if stock_actions.empty or prices.empty:
+        return stock_actions
+
+    split_types = {
+        config.EVENT_TYPE_STOCK_SPLIT,
+        config.EVENT_TYPE_REVERSE_SPLIT,
+        config.EVENT_TYPE_BONUS_SHARES,
+    }
+    check_mask = (stock_actions["source"] == "B3") & stock_actions[
+        "action_type"
+    ].isin(split_types)
+    if not check_mask.any():
+        return stock_actions
+
+    prices_by_isin = {
+        isin: grp.sort_values("date")
+        for isin, grp in prices[["isin_code", "date", "close"]]
+        .assign(date=lambda d: pd.to_datetime(d["date"]))
+        .groupby("isin_code")
+    }
+
+    def _snap(ratio: float) -> float:
+        """Snap a ratio to the nearest n or 1/n (n integer) when within 5%."""
+        if ratio >= 1.5:
+            n = round(ratio)
+            return float(n) if n > 0 and abs(n - ratio) / ratio < 0.05 else ratio
+        if 0 < ratio <= 1 / 1.5:
+            n = round(1.0 / ratio)
+            snapped = 1.0 / n if n > 0 else ratio
+            return snapped if abs(snapped - ratio) / ratio < 0.05 else ratio
+        return ratio
+
+    result = stock_actions.copy()
+    drop_idx = []
+    n_corrected = 0
+
+    for idx, row in stock_actions[check_mask].iterrows():
+        grp = prices_by_isin.get(row["isin_code"])
+        if grp is None or len(grp) < 2:
+            continue
+        ex_date = pd.to_datetime(row["ex_date"])
+        before = grp[
+            (grp["date"] < ex_date)
+            & (grp["date"] >= ex_date - pd.Timedelta(days=date_window))
+        ]
+        after = grp[
+            (grp["date"] >= ex_date)
+            & (grp["date"] <= ex_date + pd.Timedelta(days=date_window))
+        ]
+        if before.empty or after.empty:
+            continue
+        close_before = before.iloc[-1]["close"]
+        close_after = after.iloc[0]["close"]
+        if close_before <= 0 or close_after <= 0:
+            continue
+        observed = close_before / close_after
+
+        factor = row["factor"]
+        if row["action_type"] == config.EVENT_TYPE_BONUS_SHARES:
+            expected = 1.0 + factor / 100.0
+        else:
+            expected = factor  # SPLIT: N>1; REVERSE_SPLIT: f<1 — both before/after
+        if expected <= 0:
+            continue
+
+        log_tol = np.log(1.0 + tolerance)
+        if abs(np.log(observed / expected)) <= log_tol:
+            continue  # factor matches reality
+        if abs(np.log(observed)) <= log_tol:
+            # Price never jumped: the action is phantom for COTAHIST prices
+            drop_idx.append(idx)
+            logger.warning(
+                f"Dropping phantom {row['action_type']} for {row['isin_code']} on "
+                f"{row['ex_date']}: B3 factor={factor} but observed price ratio="
+                f"{observed:.3f} (no jump)"
+            )
+            continue
+        # Something happened, but not what B3 says — trust the prices
+        corrected = _snap(observed)
+        result.loc[idx, "factor"] = corrected
+        result.loc[idx, "action_type"] = (
+            config.EVENT_TYPE_STOCK_SPLIT
+            if corrected > 1
+            else config.EVENT_TYPE_REVERSE_SPLIT
+        )
+        result.loc[idx, "source"] = "B3_CORRECTED"
+        n_corrected += 1
+        logger.warning(
+            f"Correcting {row['action_type']} for {row['isin_code']} on "
+            f"{row['ex_date']}: B3 factor={factor} (expected ratio {expected:.3f}) "
+            f"but observed price ratio={observed:.3f} -> factor={corrected:.4f}"
+        )
+
+    if drop_idx:
+        result = result.drop(index=drop_idx).reset_index(drop=True)
+    if drop_idx or n_corrected:
+        logger.info(
+            f"Split validation: dropped {len(drop_idx)} phantom, corrected "
+            f"{n_corrected} mismatched actions against observed prices"
+        )
+    return result
+
+
 def compute_all_adjustments(
     prices: pd.DataFrame,
     corporate_actions: pd.DataFrame,
@@ -803,12 +981,18 @@ def compute_all_adjustments(
         stock_actions: Stock actions DataFrame (splits, reverse splits, bonuses)
 
     Returns:
-        Tuple of (adjusted_prices, splits)
+        Tuple of (adjusted_prices, splits, validated_stock_actions).
+        validated_stock_actions is the input with fatcot-redundant/phantom rows
+        dropped and mismatched factors corrected — callers should persist it so
+        downstream consumers (e.g. share-count adjustment) see the same truth.
     """
     logger.info("Starting adjustment computation...")
 
     # Filter out B3 API splits that are redundant with fatcot transitions
     stock_actions = filter_fatcot_redundant_splits(stock_actions, prices)
+
+    # Drop/correct B3 API actions that contradict observed COTAHIST price ratios
+    stock_actions = validate_split_actions_against_prices(stock_actions, prices)
 
     splits = convert_stock_actions_to_splits(stock_actions)
     logger.info(f"Converted {len(stock_actions)} stock actions to {len(splits)} splits")
@@ -835,4 +1019,4 @@ def compute_all_adjustments(
 
     logger.info("Adjustment computation complete")
 
-    return prices, splits
+    return prices, splits, stock_actions

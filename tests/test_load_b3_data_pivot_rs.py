@@ -158,8 +158,8 @@ class TestPivotAndFfillRsVsPython:
         assert "PETR3" in adj_close.columns
         assert "VALE3" in adj_close.columns
         assert len(adj_close.index) == 2
-        # fin_vol should be volume / 100.0 = 10_000.0
-        assert abs(fin_vol.loc["2020-01-02", "PETR3"] - 10_000.0) < 1e-6
+        # DB volume is stored in reais (parser handles VOLTOT's implied decimals)
+        assert abs(fin_vol.loc["2020-01-02", "PETR3"] - 1_000_000.0) < 1e-6
 
     def test_date_index_is_datetime64(self):
         df = _make_long_df([

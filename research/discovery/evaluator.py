@@ -41,9 +41,14 @@ def _compute_ic_series_rust(
 
     # Align to common dates — fundamentals features may cover a different date range
     common_idx = feature_wide.index.intersection(fwd_rank_wide.index).intersection(universe_mask.index)
-    feature_wide = feature_wide.loc[common_idx]
-    fwd_rank_wide = fwd_rank_wide.loc[common_idx]
-    universe_mask = universe_mask.loc[common_idx]
+    # Align to common tickers too: the Rust side pairs columns by POSITION, so
+    # both frames must share an identical column index. Only intersection
+    # columns can ever be valid in both (matches the Python fallback's
+    # label-aligned broadcasting).
+    common_cols = feature_wide.columns.intersection(fwd_rank_wide.columns)
+    feature_wide = feature_wide.loc[common_idx, common_cols]
+    fwd_rank_wide = fwd_rank_wide.loc[common_idx, common_cols]
+    universe_mask = universe_mask.loc[common_idx].reindex(columns=common_cols, fill_value=False)
 
     feat_masked = feature_wide.where(universe_mask).astype("float64")
     fwd_masked = fwd_rank_wide.where(universe_mask)
@@ -57,6 +62,13 @@ def _compute_ic_series_rust(
 
     feat_batch = pa.RecordBatch.from_pandas(feat_reset, preserve_index=False)
     fwd_batch = pa.RecordBatch.from_pandas(fwd_reset, preserve_index=False)
+    # pandas 3.x str dtype → large_string; Rust needs utf8 (StringArray)
+    for _i in range(feat_batch.num_columns):
+        if pa.types.is_large_string(feat_batch.column(_i).type):
+            feat_batch = feat_batch.set_column(_i, feat_batch.schema.field(_i).name, feat_batch.column(_i).cast(pa.utf8()))
+    for _i in range(fwd_batch.num_columns):
+        if pa.types.is_large_string(fwd_batch.column(_i).type):
+            fwd_batch = fwd_batch.set_column(_i, fwd_batch.schema.field(_i).name, fwd_batch.column(_i).cast(pa.utf8()))
     result_batch = _rs.compute_ic_series(feat_batch, fwd_batch, min_valid_stocks=10)
     result_df = result_batch.to_pandas().set_index("date")
     result_df.index = pd.to_datetime(result_df.index)
@@ -92,25 +104,26 @@ def compute_ic_series_fast(
     # Python fallback (also used when fwd_rank_precomputed is None)
     # Use precomputed forward return ranks if available
     if fwd_rank_precomputed is not None:
-        fwd_rank = fwd_rank_precomputed
+        fwd = fwd_rank_precomputed
         # Align to common dates (fundamentals may span a different date range)
-        common_idx = feature_wide.index.intersection(fwd_rank.index).intersection(universe_mask.index)
+        common_idx = feature_wide.index.intersection(fwd.index).intersection(universe_mask.index)
         feature_wide = feature_wide.loc[common_idx]
-        fwd_rank = fwd_rank.loc[common_idx]
+        fwd = fwd.loc[common_idx]
         universe_mask = universe_mask.loc[common_idx]
     else:
         fwd = forward_return_wide.where(universe_mask)
-        fwd_rank = fwd.rank(axis=1, pct=True)
 
     feat = feature_wide.where(universe_mask)
-    feat_rank = feat.rank(axis=1, pct=True)
 
-    # Mask both to only include positions where both have valid data
-    both_valid = feat_rank.notna() & fwd_rank.notna()
+    # Spearman on complete pairs: rank BOTH sides over the tickers valid in
+    # both frames on each date (matches the Rust intersection re-rank).
+    # Re-ranking pre-ranked fwd values is equivalent to ranking the raw
+    # returns — ranks are invariant under monotone transforms.
+    both_valid = feat.notna() & fwd.notna()
     n = both_valid.sum(axis=1)
 
-    feat_masked = feat_rank.where(both_valid)
-    fwd_masked = fwd_rank.where(both_valid)
+    feat_masked = feat.where(both_valid).rank(axis=1, pct=True)
+    fwd_masked = fwd.where(both_valid).rank(axis=1, pct=True)
 
     # Demean ranks for correlation calculation
     feat_dm = feat_masked.sub(feat_masked.mean(axis=1), axis=0).fillna(0)
@@ -218,9 +231,11 @@ def compute_turnover(feature_wide: pd.DataFrame, universe_mask: pd.DataFrame) ->
     # Compute row-wise correlation between consecutive dates
     ranks_shifted = ranks.shift(1)
 
-    # Vectorized correlation
-    r = ranks.fillna(0)
-    rs = ranks_shifted.fillna(0)
+    # Pairwise-valid deletion: only tickers with valid ranks on BOTH days
+    # (zero-filling missing ranks distorts the statistic when the universe churns)
+    both_valid = ranks.notna() & ranks_shifted.notna()
+    r = ranks.where(both_valid)
+    rs = ranks_shifted.where(both_valid)
     r_dm = r.sub(r.mean(axis=1), axis=0)
     rs_dm = rs.sub(rs.mean(axis=1), axis=0)
 

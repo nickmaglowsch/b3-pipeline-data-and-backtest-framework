@@ -81,8 +81,8 @@ class TestLoadB3DataPivot:
         assert "PETR3" in adj_close.columns
         assert "VALE3" in adj_close.columns
 
-    def test_fin_vol_scaled_by_100(self, tmp_path):
-        """fin_vol values equal raw volume / 100.0."""
+    def test_fin_vol_in_reais(self, tmp_path):
+        """fin_vol equals the DB volume as-is (stored in reais by the parser)."""
         db_path = _setup_db(tmp_path)
         conn = sqlite3.connect(db_path)
         _insert_price(conn, "PETR3", "2020-01-02", volume=100_000)
@@ -92,7 +92,7 @@ class TestLoadB3DataPivot:
 
         assert "PETR3" in fin_vol.columns
         val = fin_vol.loc[pd.Timestamp("2020-01-02"), "PETR3"]
-        assert abs(val - 1000.0) < 1e-9  # 100_000 / 100.0
+        assert abs(val - 100_000.0) < 1e-9
 
     def test_forward_fill_closes_gaps(self, tmp_path):
         """adj_close and close_px are forward-filled across date gaps."""

@@ -9,9 +9,15 @@ from typing import Dict, Tuple
 
 
 def _apply_returns(
-    positions: dict, ret_row: pd.Series, max_ret: float = 1.0, min_ret: float = -0.90
+    positions: dict, ret_row: pd.Series, max_ret: float = 5.0, min_ret: float = -0.90
 ) -> None:
-    """Apply returns to all open positions with clipping for safety against artifacts."""
+    """Apply returns to all open positions with clipping for safety against artifacts.
+
+    max_ret is a last-resort guard against data artifacts (e.g. unadjusted
+    reverse splits showing as +N00%); genuine multi-hundred-percent periods
+    below +500% pass through uncapped. Glitch filtering proper belongs
+    upstream (has_glitch / split detection).
+    """
     for t, pos in positions.items():
         if t not in ret_row.index:
             r = 0.0
@@ -226,11 +232,13 @@ def _execute_rebalance(
     # To keep it mathematically simple: we scale all buys down slightly so we don't over-leverage to pay taxes.
     total_buy_cash = sum(v for v in buys.values() if v > 0)
     buy_adjustment_factor = 1.0
-    if total_buy_cash > 0 and cash_drag > 0:
+    residual_drag = 0.0
+    if cash_drag > 0:
         if cash_drag < total_buy_cash:
             buy_adjustment_factor = (total_buy_cash - cash_drag) / total_buy_cash
         else:
             buy_adjustment_factor = 0.0  # Taxes wiped out all buy liquidity
+            residual_drag = cash_drag - total_buy_cash
 
     for t, buy_amount in buys.items():
         actual_deploy = buy_amount * buy_adjustment_factor
@@ -239,6 +247,16 @@ def _execute_rebalance(
         else:
             positions[t]["cost_basis"] += actual_deploy
             positions[t]["current_value"] += actual_deploy
+
+    # Any drag not absorbed by scaling down buys must still be paid — deduct it
+    # from NAV via a proportional reduction across the final positions
+    # (previously the excess silently vanished).
+    if residual_drag > 0:
+        nav_after = sum(p["current_value"] for p in positions.values())
+        if nav_after > 0:
+            scale = max(0.0, 1.0 - residual_drag / nav_after)
+            for p in positions.values():
+                p["current_value"] *= scale
 
     turnover_pct = turnover_cash / max(portfolio_nav, 1.0)
 
@@ -288,10 +306,9 @@ def run_simulation(
         # Target weights should have been calculated using data from i-1 (no lookahead)
         t_weights = target_weights.iloc[i].fillna(0.0)
 
-        # If target weights sum to 0, it means we sit in cash (or the strategy hasn't started yet)
-        if t_weights.abs().sum() == 0:
-            if not initialized:
-                continue
+        # Before inception, an all-zero row means the strategy hasn't started yet
+        if t_weights.abs().sum() == 0 and not initialized:
+            continue
 
         ret_row = returns_matrix.iloc[i]
 
@@ -299,14 +316,16 @@ def run_simulation(
         if not initialized:
             for t, w in t_weights.items():
                 if w != 0:
-                    alloc = initial_capital * w
+                    # Charge slippage on the initial deployment (turnover = 1.0)
+                    alloc = initial_capital * w * (1.0 - slippage)
                     pt_pos[t] = {"cost_basis": alloc, "current_value": alloc}
                     at_pos[t] = {"cost_basis": alloc, "current_value": alloc}
 
             initialized = True
 
-            pretax_values.append(initial_capital)
-            aftertax_values.append(initial_capital)
+            nav0 = sum(p["current_value"] for p in pt_pos.values())
+            pretax_values.append(nav0)
+            aftertax_values.append(nav0)
             tax_paid_list.append(0.0)
             loss_cf_list.append(0.0)
             turnover_list.append(1.0)
@@ -323,6 +342,20 @@ def run_simulation(
         if pt_nav <= 0 or at_nav <= 0:
             print(f"\n💀 MARGIN CALL! Portfolio went bankrupt on {date.date()}")
             break
+
+        # After inception, an all-zero target row means "no valid targets this
+        # period" — hold current positions. Rebalancing to zero would liquidate
+        # everything, and since sale proceeds aren't tracked as cash
+        # (NAV = sum of position values), NAV would collapse to 0 and fake a
+        # margin call on the next step.
+        if t_weights.abs().sum() == 0:
+            pretax_values.append(pt_nav)
+            aftertax_values.append(at_nav)
+            tax_paid_list.append(0.0)
+            loss_cf_list.append(loss_carryforward)
+            turnover_list.append(0.0)
+            dates.append(date)
+            continue
 
         # ── Step 2: Strict Rebalance (Pre-Tax Ledger: Zero Tax) ──
         _, _, pt_drag, _ = _execute_rebalance(

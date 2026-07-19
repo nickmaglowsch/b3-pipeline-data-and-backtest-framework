@@ -21,7 +21,13 @@ def _wide_to_batch(df: pd.DataFrame):
     # The reset_index column name may be None or the index name; rename to "date"
     tmp = tmp.rename(columns={tmp.columns[0]: "date"})
     tmp["date"] = tmp["date"].astype(str)
-    return pa.RecordBatch.from_pandas(tmp, preserve_index=False)
+    batch = pa.RecordBatch.from_pandas(tmp, preserve_index=False)
+    # pandas 3.x str dtype → large_string; Rust needs utf8 (StringArray)
+    for idx in range(batch.num_columns):
+        col = batch.column(idx)
+        if pa.types.is_large_string(col.type) or pa.types.is_string_view(col.type):
+            batch = batch.set_column(idx, batch.schema.field(idx).name, col.cast(pa.utf8()))
+    return batch
 
 
 def _batch_to_wide(batch, original_df: pd.DataFrame) -> pd.DataFrame:

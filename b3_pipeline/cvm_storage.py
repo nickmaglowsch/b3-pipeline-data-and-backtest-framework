@@ -118,6 +118,64 @@ def populate_tickers_from_cvm_companies(conn: sqlite3.Connection) -> int:
     return result.rowcount
 
 
+def upsert_company_tickers_pit(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
+    """Batch upsert company_tickers_pit rows (from the FCA valor_mobiliario dataset).
+
+    Uses INSERT OR REPLACE keyed on (cnpj, ticker, start_date) so later FCA
+    yearly files refresh end_date/market for the same listing.
+    Returns the number of rows processed.
+    """
+    if df is None or df.empty:
+        return 0
+    sql = """
+        INSERT OR REPLACE INTO company_tickers_pit
+            (cnpj, ticker, ticker_root, market, start_date, end_date, source)
+        VALUES (:cnpj, :ticker, :ticker_root, :market, :start_date, :end_date, :source)
+    """
+    # Normalise NaN -> None for SQLite
+    records = df.astype(object).where(pd.notna(df), None).to_dict("records")
+    conn.executemany(sql, records)
+    conn.commit()
+    logger.info(f"Upserted {len(records):,} company_tickers_pit rows")
+    return len(records)
+
+
+def populate_tickers_from_company_tickers_pit(conn: sqlite3.Connection) -> int:
+    """Fill cvm_companies.ticker/ticker_root from company_tickers_pit.
+
+    Only touches companies with no ticker yet — i.e. companies the B3 API
+    missed because they were delisted before today. Uses the 4-char ticker
+    root (the join-key invariant used against price tickers' first 4 chars),
+    preferring the most recently started listing.
+    Returns the number of rows updated.
+    """
+    result = conn.execute(
+        """
+        UPDATE cvm_companies
+        SET ticker = (
+                SELECT ct.ticker_root FROM company_tickers_pit ct
+                WHERE ct.cnpj = cvm_companies.cnpj AND ct.ticker_root IS NOT NULL
+                ORDER BY ct.start_date DESC
+                LIMIT 1
+            ),
+            ticker_root = (
+                SELECT ct.ticker_root FROM company_tickers_pit ct
+                WHERE ct.cnpj = cvm_companies.cnpj AND ct.ticker_root IS NOT NULL
+                ORDER BY ct.start_date DESC
+                LIMIT 1
+            ),
+            updated_at = CURRENT_TIMESTAMP
+        WHERE cvm_companies.ticker IS NULL
+          AND EXISTS (
+              SELECT 1 FROM company_tickers_pit ct
+              WHERE ct.cnpj = cvm_companies.cnpj AND ct.ticker_root IS NOT NULL
+          )
+        """
+    )
+    conn.commit()
+    return result.rowcount
+
+
 def upsert_cvm_filing(
     conn: sqlite3.Connection,
     filing_id: str,
@@ -163,12 +221,12 @@ def upsert_fundamentals_pit(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
             filing_id, cnpj, ticker, period_end, filing_date, filing_version,
             doc_type, fiscal_year, quarter,
             revenue, net_income, ebitda, total_assets, equity, net_debt,
-            shares_outstanding
+            shares_outstanding, shares_on, shares_pn, net_income_ttm
         ) VALUES (
             :filing_id, :cnpj, :ticker, :period_end, :filing_date, :filing_version,
             :doc_type, :fiscal_year, :quarter,
             :revenue, :net_income, :ebitda, :total_assets, :equity, :net_debt,
-            :shares_outstanding
+            :shares_outstanding, :shares_on, :shares_pn, :net_income_ttm
         )
     """
 
@@ -176,7 +234,7 @@ def upsert_fundamentals_pit(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
     optional_cols = [
         "ticker", "fiscal_year", "quarter",
         "revenue", "net_income", "ebitda", "total_assets", "equity", "net_debt",
-        "shares_outstanding",
+        "shares_outstanding", "shares_on", "shares_pn", "net_income_ttm",
     ]
     for col in optional_cols:
         if col not in df.columns:
@@ -332,7 +390,7 @@ def get_cvm_company_map(conn: sqlite3.Connection) -> dict:
 def get_ticker_to_cnpj_map(conn: sqlite3.Connection) -> dict:
     """Return {ticker_root: cnpj} reverse lookup."""
     cursor = conn.cursor()
-    cursor.execute("SELECT ticker, cnpj FROM cvm_companies WHERE ticker IS NOT NULL")
+    cursor.execute("SELECT ticker_root, cnpj FROM cvm_companies WHERE ticker_root IS NOT NULL")
     return {row[0]: row[1] for row in cursor.fetchall()}
 
 
@@ -350,18 +408,18 @@ def upsert_fundamentals_monthly(conn: sqlite3.Connection, df: pd.DataFrame) -> i
         INSERT OR REPLACE INTO fundamentals_monthly (
             month_end, ticker,
             revenue, net_income, ebitda, total_assets, equity, net_debt,
-            shares_outstanding
+            shares_outstanding, net_income_ttm
         ) VALUES (
             :month_end, :ticker,
             :revenue, :net_income, :ebitda, :total_assets, :equity, :net_debt,
-            :shares_outstanding
+            :shares_outstanding, :net_income_ttm
         )
     """
 
     # Fill optional columns not present in df with None
     optional_cols = [
         "revenue", "net_income", "ebitda", "total_assets", "equity", "net_debt",
-        "shares_outstanding",
+        "shares_outstanding", "net_income_ttm",
     ]
     for col in optional_cols:
         if col not in df.columns:

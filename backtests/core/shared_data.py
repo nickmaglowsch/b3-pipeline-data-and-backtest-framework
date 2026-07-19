@@ -8,6 +8,7 @@ but is exposed as a standalone function for use by the UI backtest service.
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -16,6 +17,7 @@ from backtests.core.data import (
     load_b3_data, load_b3_hlc_data, download_benchmark, download_cdi_daily,
     load_all_fundamentals, load_all_fundamentals_monthly,
     compute_pe_ratio_dynamic, compute_pb_ratio_dynamic, compute_ev_ebitda_dynamic,
+    load_sector_pit,
 )
 from backtests.core.mean_rev_helpers import compute_mean_rev_features
 
@@ -24,11 +26,13 @@ logger = logging.getLogger(__name__)
 # Common split ratios (N:1 forward splits)
 _SPLIT_RATIOS = [2, 3, 4, 5, 8, 10]
 _SPLIT_TOLERANCE = 0.04  # 4% tolerance for ratio matching
+_VOLUME_SPIKE = 3.0      # event-day BRL volume >= 3x trailing median => crash, not split
 
 
 def _detect_and_fix_unrecorded_splits(
     adj_close: pd.DataFrame,
     close_px: pd.DataFrame,
+    fin_vol: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """
     Detect stock splits that were not adjusted by the pipeline and correct adj_close.
@@ -45,7 +49,15 @@ def _detect_and_fix_unrecorded_splits(
     3. Correct adj_close by dividing all pre-split prices by the split ratio.
 
     This is conservative: only fires when both adjusted and raw prices show identical
-    split-like patterns (confirming no adjustment was applied).
+    split-like patterns (confirming no adjustment was applied), the following days
+    stay in the new price regime (one-day data glitches revert), and — when volume
+    data is available — the event day traded at normal financial volume (a real
+    crash prints anomalous volume; a split keeps BRL volume ~flat since
+    price/N x shares*N cancels).
+
+    # ponytail: a calm-volume, persistent overnight repricing landing within the
+    # ratio tolerance of an exact 1/N still gets rewritten; the real fix is
+    # cross-checking recorded corporate actions in the DB around the event date.
     """
     corrected = adj_close.copy()
     total_fixes = 0
@@ -53,6 +65,12 @@ def _detect_and_fix_unrecorded_splits(
     for col in corrected.columns:
         adj_s = corrected[col].dropna()
         raw_s = close_px[col].reindex(adj_s.index).dropna()
+
+        vol_s = None
+        vol_med = None
+        if fin_vol is not None and col in fin_vol.columns:
+            vol_s = fin_vol[col]
+            vol_med = vol_s.rolling(20, min_periods=5).median().shift(1)
 
         common_idx = adj_s.index.intersection(raw_s.index)
         if len(common_idx) < 2:
@@ -80,16 +98,47 @@ def _detect_and_fix_unrecorded_splits(
             if abs(ar - rr) / max(abs(rr), 0.001) > 0.05:
                 continue
 
-            # Check forward splits: ratio ≈ 1/N
+            # Check forward splits: ratio ≈ 1/N; reverse splits: ratio ≈ N
+            match = None
             for n in _SPLIT_RATIOS:
                 target = 1.0 / n
                 if abs(ar - target) / target < _SPLIT_TOLERANCE:
-                    split_events.append((adj_ratio.index[i], n, "forward"))
+                    match = (n, "forward")
                     break
-                # Check reverse splits: ratio ≈ N
                 if abs(ar - float(n)) / n < _SPLIT_TOLERANCE:
-                    split_events.append((adj_ratio.index[i], n, "reverse"))
+                    match = (n, "reverse")
                     break
+            if match is None:
+                continue
+
+            dt = adj_ratio.index[i]
+            pos = i + 1  # position of the event day in raw_s
+
+            # Persistence: the following days must stay in the new regime, and
+            # the preceding days must have been in the old regime. A one-day
+            # data error fails one of the two (either it reverts the next day,
+            # or the "old level" was itself the single glitch day) — rewriting
+            # all prior history off a glitch would be catastrophic.
+            nxt = raw_s.iloc[pos + 1 : pos + 6]
+            if len(nxt):
+                lvl = float(nxt.median()) / float(raw_s.iloc[pos])
+                if not (0.6 <= lvl <= 1.5):
+                    continue
+            prv = raw_s.iloc[max(0, pos - 6) : pos - 1]
+            if len(prv):
+                lvl_prv = float(prv.median()) / float(raw_s.iloc[pos - 1])
+                if not (0.6 <= lvl_prv <= 1.5):
+                    continue
+
+            # Volume corroboration: a real crash/repricing prints anomalous
+            # financial volume; a genuine split trades near normal BRL volume.
+            if vol_med is not None:
+                v = vol_s.get(dt)
+                m = vol_med.get(dt)
+                if pd.notna(v) and pd.notna(m) and m > 0 and float(v) >= _VOLUME_SPIKE * float(m):
+                    continue
+
+            split_events.append((dt, match[0], match[1]))
 
         if not split_events:
             continue
@@ -146,7 +195,7 @@ def build_shared_data(
     ibov_px = download_benchmark("^BVSP", start, end)
 
     # ── 1b. Fix unrecorded splits ────────────────────────────────────────────
-    adj_close = _detect_and_fix_unrecorded_splits(adj_close, close_px)
+    adj_close = _detect_and_fix_unrecorded_splits(adj_close, close_px, fin_vol)
 
     # ── 2. Resample ───────────────────────────────────────────────────────────
     ibov_ret = ibov_px.resample(freq).last().pct_change().dropna()
@@ -276,6 +325,17 @@ def build_shared_data(
         # ── survivorship bias filter flag ─────────────────────────────────────
         "filter_delisted": filter_delisted,
     }
+
+    # ── Point-in-time CVM sector classification (survivorship-free, from FCA) ──
+    # Long-format [ticker, ref_date, sector]. Sourced from the FCA zips alongside
+    # the DB (data/cvm). Any strategy can filter its universe by sector via
+    # backtests.core.data.sector_membership. Degrades to empty if unavailable.
+    try:
+        fca_dir = Path(db_path).resolve().parent / "data" / "cvm"
+        shared["sector_pit"] = load_sector_pit(fca_dir, db_path)
+    except Exception as e:
+        logger.warning(f"Could not load PIT sector data: {e}")
+        shared["sector_pit"] = pd.DataFrame(columns=["ticker", "ref_date", "sector"])
 
     # ── Optional: CVM fundamentals (PIT-aligned to rebalance calendar) ────────
     # When include_fundamentals=True, loads all 10 metric DataFrames from

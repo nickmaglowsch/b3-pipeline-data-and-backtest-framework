@@ -36,9 +36,10 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from typing import Optional
 
+import numpy as np
 import pandas as pd
 
-from . import b3_corporate_actions, config, cvm_downloader, cvm_parser, cvm_storage, storage
+from . import b3_corporate_actions, config, cvm_downloader, cvm_parser, cvm_storage, fca_parser, storage
 
 logging.basicConfig(
     level=logging.INFO,
@@ -122,7 +123,7 @@ def materialize_fundamentals_monthly(conn: sqlite3.Connection) -> int:
     # Load all fundamentals_pit rows with a matched ticker
     raw_metrics = [
         "revenue", "net_income", "ebitda", "total_assets", "equity",
-        "net_debt", "shares_outstanding",
+        "net_debt", "shares_outstanding", "net_income_ttm",
     ]
     metrics_sql = ", ".join(f"f.{m}" for m in raw_metrics)
     cursor.execute(f"""
@@ -142,20 +143,34 @@ def materialize_fundamentals_monthly(conn: sqlite3.Connection) -> int:
 
     # Pivot each metric to wide format (filing_date x ticker), then forward-fill to month-ends
     metric_dfs = {}
+    max_staleness = np.timedelta64(config.FUNDAMENTALS_MAX_STALENESS_DAYS, "D")
     for metric in raw_metrics:
         sub = pit_df[["filing_date", "ticker", metric]].dropna(subset=[metric])
         if sub.empty:
             metric_dfs[metric] = pd.DataFrame(index=month_ends, dtype=float)
             continue
-        wide = sub.pivot_table(
+        wide_raw = sub.pivot_table(
             index="filing_date", columns="ticker", values=metric, aggfunc="last"
         )
-        wide.index = pd.to_datetime(wide.index)
-        wide.columns.name = None
-        extended_idx = wide.index.union(month_ends).sort_values()
-        wide = wide.reindex(extended_idx).ffill()
-        wide = wide.reindex(month_ends)
-        metric_dfs[metric] = wide
+        wide_raw.index = pd.to_datetime(wide_raw.index)
+        wide_raw.columns.name = None
+        extended_idx = wide_raw.index.union(month_ends).sort_values()
+        wide = wide_raw.reindex(extended_idx).ffill().reindex(month_ends)
+        # Staleness cutoff: track the source filing_date of each forward-filled
+        # cell and expire values older than FUNDAMENTALS_MAX_STALENESS_DAYS —
+        # a company that stopped filing must not keep its last values forever.
+        src = pd.DataFrame(
+            np.where(
+                wide_raw.notna().to_numpy(),
+                np.broadcast_to(wide_raw.index.values[:, None], wide_raw.shape),
+                np.datetime64("NaT", "ns"),
+            ),
+            index=wide_raw.index,
+            columns=wide_raw.columns,
+        )
+        src = src.reindex(extended_idx).ffill().reindex(month_ends)
+        age = month_ends.values[:, None] - src.to_numpy(dtype="datetime64[ns]")
+        metric_dfs[metric] = wide.mask(age > max_staleness)
 
     # Build ticker_root -> best_ticker map via cvm_companies cnpj -> root -> adtv_map
     cursor.execute("SELECT cnpj, ticker FROM cvm_companies WHERE ticker IS NOT NULL")
@@ -173,16 +188,19 @@ def materialize_fundamentals_monthly(conn: sqlite3.Connection) -> int:
     # ── Vectorized build: stack each metric into (month_end, ticker_root) series ──
     stacked = []
     for metric, mdf in metric_dfs.items():
-        s = mdf.stack()  # drops NaN; index=(month_end, ticker_root)
+        s = mdf.stack()  # index=(month_end, ticker_root)
         s.name = metric
         stacked.append(s)
 
     combined = pd.concat(stacked, axis=1)  # outer join keeps any pair with ≥1 metric
+    # pandas 3 stack() keeps NaN — drop (month_end, ticker) pairs with no data
+    # at all (e.g. months past the staleness cutoff).
+    combined = combined.dropna(how="all")
     combined.index.names = ["month_end", "ticker_root"]
     combined = combined.reset_index()
 
     # Ensure all raw metric columns exist (some may be absent if no data)
-    for metric in ["revenue", "net_income", "ebitda", "total_assets", "equity", "net_debt", "shares_outstanding"]:
+    for metric in raw_metrics:
         if metric not in combined.columns:
             combined[metric] = float("nan")
 
@@ -192,7 +210,7 @@ def materialize_fundamentals_monthly(conn: sqlite3.Connection) -> int:
     # Ratio columns (pe_ratio, pb_ratio, ev_ebitda) intentionally excluded — compute dynamically at query time
     output_cols = [
         "month_end", "ticker", "revenue", "net_income", "ebitda", "total_assets",
-        "equity", "net_debt", "shares_outstanding",
+        "equity", "net_debt", "shares_outstanding", "net_income_ttm",
     ]
     result_df = combined[output_cols].copy()
 
@@ -200,6 +218,86 @@ def materialize_fundamentals_monthly(conn: sqlite3.Connection) -> int:
     n = cvm_storage.upsert_fundamentals_monthly(conn, result_df)
     logger.info(f"Materialized {n:,} fundamentals_monthly rows")
     return n
+
+
+def compute_net_income_ttm(conn: sqlite3.Connection) -> int:
+    """Compute trailing-twelve-months net income into fundamentals_pit.net_income_ttm.
+
+    ITR net_income is stored as a YTD value (see cvm_parser._select_ytd_rows), so:
+      - DFP row (fiscal year Y):  TTM = net_income (the annual value).
+      - ITR row (quarter q of Y): TTM = YTD(Y, q) + Annual(Y-1) - YTD(Y-1, q).
+        If Annual(Y-1) or YTD(Y-1, q) is missing, TTM stays NULL (never fabricated).
+
+    Uses the latest filing_version per (cnpj, doc_type, period_end); older
+    versions keep NULL. Prior-period components are selected point-in-time:
+    only versions whose filing_date <= the current row's filing_date are used,
+    so a later restatement never leaks into a TTM stamped with an earlier
+    PIT date. Returns the number of rows updated.
+    """
+    df = pd.read_sql_query(
+        """
+        SELECT filing_id, cnpj, doc_type, fiscal_year, quarter,
+               period_end, filing_date, filing_version, net_income
+        FROM fundamentals_pit
+        WHERE doc_type IN ('DFP', 'ITR')
+        """,
+        conn,
+    )
+    conn.execute("UPDATE fundamentals_pit SET net_income_ttm = NULL")
+    if df.empty:
+        conn.commit()
+        return 0
+
+    df = df.sort_values(["cnpj", "doc_type", "period_end", "filing_version"])
+    latest = df.drop_duplicates(subset=["cnpj", "doc_type", "period_end"], keep="last")
+
+    # As-of lookups built from ALL versions, sorted by (filing_date, filing_version):
+    # the component in effect at date D is the last entry with filing_date <= D.
+    annual: dict = {}  # (cnpj, fiscal_year) -> [(filing_date, net_income), ...]
+    ytd: dict = {}     # (cnpj, fiscal_year, quarter) -> [(filing_date, net_income), ...]
+    for r in df.sort_values(["filing_date", "filing_version"]).itertuples():
+        if pd.isna(r.net_income) or pd.isna(r.fiscal_year) or not r.filing_date:
+            continue
+        fy = int(r.fiscal_year)
+        if r.doc_type == "DFP":
+            annual.setdefault((r.cnpj, fy), []).append((r.filing_date, float(r.net_income)))
+        elif not pd.isna(r.quarter):
+            ytd.setdefault((r.cnpj, fy, int(r.quarter)), []).append(
+                (r.filing_date, float(r.net_income))
+            )
+
+    def _asof(entries, filing_date):
+        best = None
+        for fd, value in entries or []:
+            if not filing_date or fd <= filing_date:
+                best = value
+            else:
+                break
+        return best
+
+    updates = []
+    for r in latest.itertuples():
+        if pd.isna(r.net_income) or pd.isna(r.fiscal_year):
+            continue
+        fy = int(r.fiscal_year)
+        if r.doc_type == "DFP":
+            updates.append((float(r.net_income), r.filing_id))
+        else:
+            if pd.isna(r.quarter):
+                continue
+            prior_annual = _asof(annual.get((r.cnpj, fy - 1)), r.filing_date)
+            prior_ytd = _asof(ytd.get((r.cnpj, fy - 1, int(r.quarter))), r.filing_date)
+            if prior_annual is None or prior_ytd is None:
+                continue
+            updates.append((float(r.net_income) + prior_annual - prior_ytd, r.filing_id))
+
+    if updates:
+        conn.executemany(
+            "UPDATE fundamentals_pit SET net_income_ttm = ? WHERE filing_id = ?", updates
+        )
+    conn.commit()
+    logger.info(f"Computed net_income_ttm for {len(updates):,} fundamentals_pit rows")
+    return len(updates)
 
 
 def _propagate_fre_shares(conn: sqlite3.Connection) -> None:
@@ -211,8 +309,8 @@ def _propagate_fre_shares(conn: sqlite3.Connection) -> None:
     """
     conn.execute("""
         UPDATE fundamentals_pit
-        SET shares_outstanding = (
-            SELECT fre.shares_outstanding
+        SET (shares_outstanding, shares_on, shares_pn) = (
+            SELECT fre.shares_outstanding, fre.shares_on, fre.shares_pn
             FROM fundamentals_pit fre
             WHERE fre.cnpj = fundamentals_pit.cnpj
               AND fre.doc_type = 'FRE'
@@ -478,6 +576,24 @@ def run_fundamentals_pipeline(
         else:
             logger.info("Step 5c/10: Skipping ticker fetch (--skip-ticker-fetch)")
 
+        # Step 5d: Ingest FCA valor_mobiliario for point-in-time ticker mapping.
+        # FCA covers delisted companies the B3 API misses (survivorship fix).
+        logger.info("")
+        logger.info("Step 5d/10: Ingesting FCA valor_mobiliario (PIT ticker map)...")
+        fca_rows = 0
+        for year in years:
+            try:
+                fca_path = cvm_downloader.download_fca_file(year, force_download)
+                if fca_path is None:
+                    continue
+                fca_df = fca_parser.parse_fca_zip(fca_path)
+                fca_rows += cvm_storage.upsert_company_tickers_pit(conn, fca_df)
+            except Exception as e:
+                logger.warning(f"FCA {year}: failed to process — {e}")
+        logger.info(f"company_tickers_pit: {fca_rows:,} rows upserted")
+        fca_filled = cvm_storage.populate_tickers_from_company_tickers_pit(conn)
+        logger.info(f"FCA ticker fill (delisted companies): {fca_filled:,} cvm_companies rows updated")
+
         # Load CNPJ → ticker map (built from cvm_companies table populated above
         # or by a prior B3 pipeline run).
         cnpj_ticker_map = cvm_storage.get_cvm_company_map(conn)
@@ -553,6 +669,9 @@ def run_fundamentals_pipeline(
         logger.info("Populating company_isin_map for precise ISIN-based price lookup...")
         isin_map_rows = cvm_storage.populate_company_isin_map(conn)
         logger.info(f"company_isin_map: {isin_map_rows:,} rows inserted/replaced")
+
+        logger.info("Computing net_income_ttm (trailing twelve months)...")
+        compute_net_income_ttm(conn)
 
         # Step 9
         logger.info("")

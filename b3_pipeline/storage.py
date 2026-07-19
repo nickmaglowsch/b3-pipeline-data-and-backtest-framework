@@ -144,6 +144,13 @@ CREATE TABLE IF NOT EXISTS fundamentals_pit (
     equity REAL,
     net_debt REAL,
     shares_outstanding REAL,
+    -- Per-class share counts from FRE capital_social (ON / all preferred
+    -- classes). NULL for pre-FRE sources (IAN/DM).
+    shares_on REAL,
+    shares_pn REAL,
+    -- Trailing-twelve-months net income, computed post-parse (NULL when the
+    -- prior-year values needed for the TTM sum are missing).
+    net_income_ttm REAL,
     -- Ratio columns (pe_ratio, pb_ratio, ev_ebitda) intentionally excluded — compute dynamically at query time
     FOREIGN KEY (filing_id) REFERENCES cvm_filings(filing_id)
 );
@@ -181,10 +188,29 @@ CREATE TABLE IF NOT EXISTS fundamentals_monthly (
     equity REAL,
     net_debt REAL,
     shares_outstanding REAL,
+    net_income_ttm REAL,
     -- Ratio columns (pe_ratio, pb_ratio, ev_ebitda) intentionally excluded — compute dynamically at query time
     PRIMARY KEY (month_end, ticker)
 );
 """
+
+# Point-in-time CNPJ -> ticker mapping from the CVM FCA valor_mobiliario dataset.
+# Unlike the B3 API (currently listed companies only), FCA covers companies that
+# have since delisted — closing the survivorship hole in ticker mapping.
+SCHEMA_COMPANY_TICKERS_PIT = """
+CREATE TABLE IF NOT EXISTS company_tickers_pit (
+    cnpj TEXT NOT NULL,
+    ticker TEXT NOT NULL,
+    ticker_root TEXT,
+    market TEXT,
+    start_date DATE,
+    end_date DATE,
+    source TEXT DEFAULT 'FCA',
+    PRIMARY KEY (cnpj, ticker, start_date)
+);
+"""
+
+INDEX_COMPANY_TICKERS_PIT_ROOT = "CREATE INDEX IF NOT EXISTS idx_company_tickers_pit_root ON company_tickers_pit(ticker_root);"
 
 INDEX_FUNDAMENTALS_MONTHLY_TICKER = "CREATE INDEX IF NOT EXISTS idx_fundamentals_monthly_ticker ON fundamentals_monthly(ticker);"
 INDEX_FUNDAMENTALS_MONTHLY_MONTH_END = "CREATE INDEX IF NOT EXISTS idx_fundamentals_monthly_month_end ON fundamentals_monthly(month_end);"
@@ -233,6 +259,7 @@ def init_db(conn: sqlite3.Connection, rebuild: bool = False, cvm_only: bool = Fa
             cursor.execute("DROP TABLE IF EXISTS fundamentals_pit")
             cursor.execute("DROP TABLE IF EXISTS cvm_filings")
             cursor.execute("DROP TABLE IF EXISTS company_isin_map")
+            cursor.execute("DROP TABLE IF EXISTS company_tickers_pit")
             cursor.execute("DROP TABLE IF EXISTS cvm_companies")
         else:
             logger.warning(
@@ -244,6 +271,7 @@ def init_db(conn: sqlite3.Connection, rebuild: bool = False, cvm_only: bool = Fa
             cursor.execute("DROP TABLE IF EXISTS fundamentals_pit")
             cursor.execute("DROP TABLE IF EXISTS cvm_filings")
             cursor.execute("DROP TABLE IF EXISTS company_isin_map")
+            cursor.execute("DROP TABLE IF EXISTS company_tickers_pit")
             cursor.execute("DROP TABLE IF EXISTS cvm_companies")
             # Drop original tables
             cursor.execute("DROP TABLE IF EXISTS prices")
@@ -268,6 +296,8 @@ def init_db(conn: sqlite3.Connection, rebuild: bool = False, cvm_only: bool = Fa
     cursor.execute(SCHEMA_CVM_FILINGS)
     cursor.execute(SCHEMA_FUNDAMENTALS_PIT)
     cursor.execute(SCHEMA_COMPANY_ISIN_MAP)
+    cursor.execute(SCHEMA_COMPANY_TICKERS_PIT)
+    cursor.execute(INDEX_COMPANY_TICKERS_PIT_ROOT)
     cursor.execute(INDEX_CVM_COMPANIES_TICKER)
     cursor.execute(INDEX_CVM_FILINGS_CNPJ)
     cursor.execute(INDEX_CVM_FILINGS_PERIOD)
@@ -338,6 +368,28 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
     cursor.execute(SCHEMA_FUNDAMENTALS_MONTHLY)
     cursor.execute(INDEX_FUNDAMENTALS_MONTHLY_TICKER)
     cursor.execute(INDEX_FUNDAMENTALS_MONTHLY_MONTH_END)
+
+    # company_tickers_pit: created via SCHEMA_COMPANY_TICKERS_PIT above; ensure
+    # it exists for DBs initialized before the FCA ingestion was added.
+    cursor.execute(SCHEMA_COMPANY_TICKERS_PIT)
+    cursor.execute(INDEX_COMPANY_TICKERS_PIT_ROOT)
+
+    # Add net_income_ttm to fundamentals_pit / fundamentals_monthly if missing
+    # (DBs created before the TTM computation was added).
+    for table in ("fundamentals_pit", "fundamentals_monthly"):
+        cursor.execute(f"PRAGMA table_info({table})")
+        cols = {row[1] for row in cursor.fetchall()}
+        if cols and "net_income_ttm" not in cols:
+            logger.info(f"Migrating: adding net_income_ttm column to {table}")
+            cursor.execute(f"ALTER TABLE {table} ADD COLUMN net_income_ttm REAL")
+
+    # Add per-class share counts to fundamentals_pit if missing
+    cursor.execute("PRAGMA table_info(fundamentals_pit)")
+    pit_cols = {row[1] for row in cursor.fetchall()}
+    for col in ("shares_on", "shares_pn"):
+        if pit_cols and col not in pit_cols:
+            logger.info(f"Migrating: adding {col} column to fundamentals_pit")
+            cursor.execute(f"ALTER TABLE fundamentals_pit ADD COLUMN {col} REAL")
 
 
 def _prepare_date(val) -> Optional[str]:
@@ -499,6 +551,28 @@ def upsert_stock_actions(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
 
     logger.info(f"Upserted {len(records):,} stock action records")
     return len(records)
+
+
+def replace_stock_actions(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
+    """Replace the full stock_actions table with a validated action set.
+
+    Used after adjustment-time validation drops phantom rows / corrects factors,
+    so all consumers (share-count adjustment, backtests) read the same truth.
+
+    Delete + insert run in a single transaction (the commit inside
+    upsert_stock_actions covers both), so a crash mid-way cannot leave the
+    table permanently empty.
+    """
+    try:
+        conn.execute("DELETE FROM stock_actions")
+        if df.empty:
+            logger.warning("replace_stock_actions: validated set is empty")
+            conn.commit()
+            return 0
+        return upsert_stock_actions(conn, df)
+    except Exception:
+        conn.rollback()
+        raise
 
 
 def update_adjusted_columns(conn: sqlite3.Connection, df: pd.DataFrame) -> int:

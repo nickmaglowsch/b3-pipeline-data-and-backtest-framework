@@ -41,8 +41,8 @@ pub fn rank_pct(values: &[f64]) -> Vec<f64> {
 
 /// Compute Pearson correlation of two equal-length slices.
 ///
-/// Returns `f64::NAN` if either slice is empty.
-/// Returns `0.0` if denominator is zero (all-identical values).
+/// Returns `f64::NAN` if either slice is empty or if the denominator is zero
+/// (zero variance in either input) — matching pandas, which yields NaN there.
 pub fn pearson_corr(x: &[f64], y: &[f64]) -> f64 {
     let n = x.len();
     if n == 0 {
@@ -65,7 +65,7 @@ pub fn pearson_corr(x: &[f64], y: &[f64]) -> f64 {
     }
     let denom = ss_x.sqrt() * ss_y.sqrt();
     if denom == 0.0 {
-        0.0
+        f64::NAN
     } else {
         num / denom
     }
@@ -122,9 +122,10 @@ mod tests {
     }
 
     #[test]
-    fn test_pearson_corr_all_same_returns_zero() {
+    fn test_pearson_corr_zero_variance_is_nan() {
+        // Zero variance in x → NaN (pandas drops such dates as NaN)
         let x = [1.0, 1.0, 1.0];
         let y = [2.0, 3.0, 4.0];
-        assert_eq!(pearson_corr(&x, &y), 0.0);
+        assert!(pearson_corr(&x, &y).is_nan());
     }
 }

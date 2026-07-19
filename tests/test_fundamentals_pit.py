@@ -234,6 +234,40 @@ def test_load_fundamentals_pit_forward_fills(tmp_path):
     )
 
 
+def test_load_fundamentals_pit_staleness_cutoff(tmp_path):
+    """Forward-fill must stop after 400 days — delisted companies otherwise
+    carry years-stale fundamentals forever."""
+    from backtests.core.data import load_fundamentals_pit
+
+    db_path = str(tmp_path / "test.sqlite")
+    conn = sqlite3.connect(db_path)
+    storage.init_db(conn)
+
+    dates = pd.date_range("2020-01-01", "2021-12-31", freq="ME")
+    for dt in dates:
+        conn.execute(
+            "INSERT OR REPLACE INTO prices (ticker, isin_code, date, open, high, low, close, volume) "
+            "VALUES ('PETR3', 'UNKNOWN', ?, 30, 30, 30, 30, 0)",
+            (dt.strftime("%Y-%m-%d"),),
+        )
+    # Single filing, then the company goes silent (e.g. delisted)
+    conn.execute("""
+        INSERT INTO fundamentals_pit
+          (filing_id, cnpj, ticker, period_end, filing_date, filing_version, doc_type, revenue)
+        VALUES ('f1', '33000167000101', 'PETR', '2019-12-31', '2020-01-31', 1, 'DFP', 1000.0)
+    """)
+    conn.commit()
+    conn.close()
+
+    wide = load_fundamentals_pit(db_path, "revenue", "2020-01-01", "2021-12-31", freq="ME")
+    petr = wide["PETR"]
+
+    # 2021-02-28 is 394 days after the filing — still fresh
+    assert petr.loc[pd.Timestamp("2021-02-28")] == pytest.approx(1000.0)
+    # 2021-03-31 is 425 days after — stale, must be NaN
+    assert pd.isna(petr.loc[pd.Timestamp("2021-03-31")])
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Task 03: Fix filing_date >= start bug
 # ──────────────────────────────────────────────────────────────────────────────

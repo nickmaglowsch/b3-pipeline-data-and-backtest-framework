@@ -224,9 +224,11 @@ def test_materialize_monthly_basic_snapshot(mem_conn):
 
 
 def test_materialize_monthly_forward_fills_financials(mem_conn):
-    """net_income at later month-ends is forward-filled from the January filing."""
+    """net_income at later month-ends (within the staleness window) is
+    forward-filled from the January filing. Values older than
+    config.FUNDAMENTALS_MAX_STALENESS_DAYS are expired, so query a month-end
+    inside the window rather than the latest one."""
     from b3_pipeline.cvm_main import materialize_fundamentals_monthly
-    import datetime as dt
 
     _setup_petr_company(mem_conn)
     filing_date = "2023-01-15"
@@ -245,8 +247,9 @@ def test_materialize_monthly_forward_fills_financials(mem_conn):
 
     cursor = mem_conn.cursor()
     # Without prices, ADTV map is empty → ticker falls back to root "PETR"
+    # 2023-12-31 is ~350 days after the filing — still within the 400-day window.
     cursor.execute(
-        "SELECT net_income FROM fundamentals_monthly WHERE ticker=? ORDER BY month_end DESC LIMIT 1",
+        "SELECT net_income FROM fundamentals_monthly WHERE ticker=? AND month_end='2023-12-31'",
         ("PETR",),
     )
     row = cursor.fetchone()
@@ -292,7 +295,9 @@ def test_materialize_monthly_raw_financials_stored_without_price(mem_conn):
 
 
 def test_materialize_monthly_forward_fills_equity(mem_conn):
-    """equity is forward-filled from the original filing into all subsequent month-ends."""
+    """equity is forward-filled from the original filing into subsequent
+    month-ends within the staleness window (stale values are expired after
+    config.FUNDAMENTALS_MAX_STALENESS_DAYS)."""
     from b3_pipeline.cvm_main import materialize_fundamentals_monthly
 
     _setup_petr_company(mem_conn)
@@ -311,8 +316,9 @@ def test_materialize_monthly_forward_fills_equity(mem_conn):
 
     cursor = mem_conn.cursor()
     # Without prices, ADTV map is empty → ticker falls back to root "PETR"
+    # 2023-12-31 is within 400 days of the 2023-01-15 filing.
     cursor.execute(
-        "SELECT equity FROM fundamentals_monthly WHERE ticker=? ORDER BY month_end DESC LIMIT 1",
+        "SELECT equity FROM fundamentals_monthly WHERE ticker=? AND month_end='2023-12-31'",
         ("PETR",),
     )
     row = cursor.fetchone()
@@ -490,14 +496,14 @@ def test_compute_pe_ratio_dynamic_basic():
 
     idx = [pd.Timestamp("2023-01-31")]
     cols = ["PETR"]
-    # shares_outstanding as stored in DB (1000x raw units; divide by 1000 in helper)
-    shares = pd.DataFrame([[10_000_000_000.0]], index=idx, columns=cols)
+    # shares_outstanding in raw units (post 2026-07-17 FRE parser fix)
+    shares = pd.DataFrame([[10_000_000.0]], index=idx, columns=cols)
     net_income = pd.DataFrame([[1000.0]], index=idx, columns=cols)  # thousands BRL
     prices = pd.DataFrame([[30.0]], index=idx, columns=cols)
 
     result = compute_pe_ratio_dynamic(shares, net_income, prices)
 
-    # (30 * 10_000_000_000 / 1000) / (1000 * 1000) = (30 * 10_000_000) / 1_000_000 = 300.0
+    # (30 * 10_000_000) / (1000 * 1000) = 300.0
     assert result.iloc[0, 0] == pytest.approx(300.0)
 
 
@@ -507,7 +513,7 @@ def test_compute_pe_ratio_dynamic_null_for_negative_income():
 
     idx = [pd.Timestamp("2023-01-31")]
     cols = ["PETR"]
-    shares = pd.DataFrame([[10_000_000_000.0]], index=idx, columns=cols)
+    shares = pd.DataFrame([[10_000_000.0]], index=idx, columns=cols)
     net_income = pd.DataFrame([[-500.0]], index=idx, columns=cols)
     prices = pd.DataFrame([[30.0]], index=idx, columns=cols)
 
@@ -522,14 +528,14 @@ def test_compute_pb_ratio_dynamic_basic():
 
     idx = [pd.Timestamp("2023-01-31")]
     cols = ["PETR"]
-    # shares_outstanding as stored in DB (1000x raw units; divide by 1000 in helper)
-    shares = pd.DataFrame([[10_000_000_000.0]], index=idx, columns=cols)
+    # shares_outstanding in raw units (post 2026-07-17 FRE parser fix)
+    shares = pd.DataFrame([[10_000_000.0]], index=idx, columns=cols)
     equity = pd.DataFrame([[5000.0]], index=idx, columns=cols)  # thousands BRL
     prices = pd.DataFrame([[30.0]], index=idx, columns=cols)
 
     result = compute_pb_ratio_dynamic(shares, equity, prices)
 
-    # (30 * 10_000_000_000 / 1000) / (5000 * 1000) = 300_000_000 / 5_000_000 = 60.0
+    # (30 * 10_000_000) / (5000 * 1000) = 300_000_000 / 5_000_000 = 60.0
     assert result.iloc[0, 0] == pytest.approx(60.0)
 
 
@@ -539,14 +545,14 @@ def test_compute_ev_ebitda_dynamic_basic():
 
     idx = [pd.Timestamp("2023-01-31")]
     cols = ["PETR"]
-    # shares_outstanding as stored in DB (1000x raw units; divide by 1000 in helper)
-    shares = pd.DataFrame([[10_000_000_000.0]], index=idx, columns=cols)
+    # shares_outstanding in raw units (post 2026-07-17 FRE parser fix)
+    shares = pd.DataFrame([[10_000_000.0]], index=idx, columns=cols)
     ebitda = pd.DataFrame([[2000.0]], index=idx, columns=cols)   # thousands BRL
     net_debt = pd.DataFrame([[1000.0]], index=idx, columns=cols)  # thousands BRL
     prices = pd.DataFrame([[30.0]], index=idx, columns=cols)
 
     result = compute_ev_ebitda_dynamic(shares, ebitda, net_debt, prices)
 
-    # ev = 30 * (10_000_000_000 / 1000) + 1000 * 1000 = 300_000_000 + 1_000_000 = 301_000_000
+    # ev = 30 * 10_000_000 + 1000 * 1000 = 301_000_000
     # ev_ebitda = 301_000_000 / (2000 * 1000) = 150.5
     assert result.iloc[0, 0] == pytest.approx(150.5)

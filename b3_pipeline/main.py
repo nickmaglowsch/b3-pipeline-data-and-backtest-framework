@@ -118,8 +118,6 @@ def run_pipeline(
         logger.info("Step 5/9: Upserting raw prices to database...")
         storage.upsert_prices(conn, prices)
 
-        corporate_actions = None
-        stock_actions = None
         if not skip_corporate_actions:
             logger.info("")
             logger.info("Step 6/9: Fetching corporate actions from B3...")
@@ -151,18 +149,17 @@ def run_pipeline(
         else:
             logger.info("")
             logger.info("Step 6/9: Skipping corporate actions fetch...")
-            corporate_actions = storage.get_all_corporate_actions(conn)
-            stock_actions = storage.get_all_stock_actions(conn)
 
         logger.info("")
         logger.info("Step 7/10: Loading prices and detecting missing splits...")
 
         prices_from_db = storage.get_all_prices(conn)
 
-        if corporate_actions is None or corporate_actions.empty:
-            corporate_actions = storage.get_all_corporate_actions(conn)
-        if stock_actions is None or stock_actions.empty:
-            stock_actions = storage.get_all_stock_actions(conn)
+        # Always reload the FULL action tables from the DB: this run's fetch may
+        # have failed for some companies, and adjustments must still include
+        # their previously stored dividends/splits.
+        corporate_actions = storage.get_all_corporate_actions(conn)
+        stock_actions = storage.get_all_stock_actions(conn)
 
         logger.info("Detecting missing splits from price data...")
         detected_splits = adjustments.detect_splits_from_prices(
@@ -180,12 +177,16 @@ def run_pipeline(
         else:
             logger.info("No new splits detected from price data")
 
-        adjusted_prices, splits = adjustments.compute_all_adjustments(
+        adjusted_prices, splits, validated_actions = adjustments.compute_all_adjustments(
             prices_from_db, corporate_actions, stock_actions
         )
 
         if not splits.empty:
             storage.upsert_detected_splits(conn, splits)
+
+        # Persist the validated action set (phantom rows dropped, factors
+        # corrected against prices) so share-count consumers see the same truth
+        storage.replace_stock_actions(conn, validated_actions)
 
         logger.info("")
         logger.info("Step 8/10: Computing adjustments...")

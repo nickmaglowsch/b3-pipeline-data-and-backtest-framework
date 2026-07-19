@@ -311,6 +311,118 @@ def test_parse_fre_zip_extracts_shares():
     )
 
 
+def _cap_row(tipo, total, ord_, pref, aut_date, versao="1"):
+    return {
+        "CNPJ_Companhia": "33.000.167/0001-01",
+        "Data_Referencia": "2023-12-31",
+        "DT_RECEB": "2024-02-10",
+        "Versao": versao,
+        "Tipo_Capital": tipo,
+        "Data_Autorizacao_Aprovacao": aut_date,
+        "Quantidade_Total_Acoes": str(total),
+        "Quantidade_Acoes_Ordinarias": str(ord_),
+        "Quantidade_Acoes_Preferenciais": str(pref),
+    }
+
+
+def test_parse_fre_zip_ignores_capital_autorizado():
+    """Regression: COCE/ITUB stored 'Capital Autorizado' (an issuance ceiling,
+    e.g. 300bn shares) instead of the paid-in count. Integralizado must win."""
+    rows = [
+        _cap_row("Capital Emitido", 77_855_299, 48_067_937, 29_787_362, "2017-04-01"),
+        _cap_row("Capital Subscrito", 77_855_299, 48_067_937, 29_787_362, "2017-04-01"),
+        _cap_row("Capital Integralizado", 77_855_299, 48_067_937, 29_787_362, "2017-04-01"),
+        _cap_row("Capital Autorizado", 300_000_000_000, 100_000_000_000, 200_000_000_000, "2017-04-01"),
+    ]
+    _, fund = parse_fre_zip(_make_fake_fre_zip(rows), {"33000167000101": "PETR"})
+    assert len(fund) == 1
+    assert fund["shares_outstanding"].iloc[0] == pytest.approx(77_855_299.0)
+    assert fund["shares_on"].iloc[0] == pytest.approx(48_067_937.0)
+    assert fund["shares_pn"].iloc[0] == pytest.approx(29_787_362.0)
+
+
+def test_parse_fre_zip_duplicate_integralizado_latest_authorization_wins():
+    """Regression: TELB filed its capital twice in one FRE — the stale entry
+    fat-fingered x10000. The row with the latest authorization date is current."""
+    rows = [
+        _cap_row("Capital Integralizado", 1_096_989_129_010, 886_959_131_950,
+                 210_029_997_060, "2009-02-19", versao="19"),
+        _cap_row("Capital Integralizado", 109_698_912, 88_695_913,
+                 21_002_999, "2010-12-03", versao="19"),
+    ]
+    _, fund = parse_fre_zip(_make_fake_fre_zip(rows), {"33000167000101": "TELB"})
+    assert len(fund) == 1
+    assert fund["shares_outstanding"].iloc[0] == pytest.approx(109_698_912.0)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 9. Chart-of-accounts drift: EBIT by description, bank chart → NULLs
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _dre_row(cd, ds, val, cnpj="33.000.167/0001-01"):
+    return {
+        "CNPJ_CIA": cnpj,
+        "DT_REFER": "2023-12-31",
+        "DT_RECEB": "2024-03-15",
+        "VERSAO": "1",
+        "ORDEM_EXERC": "ÚLTIMO",
+        "CD_CONTA": cd,
+        "DS_CONTA": ds,
+        "VL_CONTA": str(val),
+    }
+
+
+def test_corporate_ebitda_selected_by_description_at_3_05():
+    """Corporate chart: EBIT line sits at 3.05."""
+    dre = [
+        _dre_row("3.01", "Receita de Venda de Bens e/ou Serviços", 32503601),
+        _dre_row("3.05", "Resultado Antes do Resultado Financeiro e dos Tributos", 6462125),
+    ]
+    _, fund = parse_dfp_zip(_make_fake_dfp_zip(dre, BASE_BPA, BASE_BPP), {})
+    assert fund["ebitda"].iloc[0] == pytest.approx(6_462_125.0)
+
+
+def test_insurer_chart_ebitda_at_3_07():
+    """Insurer chart (BBSE): same EBIT description but at code 3.07."""
+    dre = [
+        _dre_row("3.01", "Receitas das Atividades Seguradoras/Resseguradoras", 0),
+        _dre_row("3.07", "Resultado Antes do Resultado Financeiro e dos Tributos", 8905767),
+        _dre_row("3.13", "Lucro/Prejuízo Consolidado do Período", 7947203),
+    ]
+    _, fund = parse_dfp_zip(_make_fake_dfp_zip(dre, BASE_BPA, BASE_BPP), {})
+    assert fund["ebitda"].iloc[0] == pytest.approx(8_905_767.0)
+    assert fund["net_income"].iloc[0] == pytest.approx(7_947_203.0)
+
+
+def test_bank_chart_ebitda_and_net_debt_are_null():
+    """Bank chart (ITUB): 3.05 is PRE-TAX income, not EBIT — must not be stored
+    as ebitda. Banks also report none of the cash/debt accounts, so net_debt
+    must be NULL, not a fake 0."""
+    dre = [
+        _dre_row("3.01", "Receitas da Intermediação Financeira", 313221000),
+        _dre_row("3.05", "Resultado Antes dos Tributos sobre o Lucro", 39700000),
+        _dre_row("3.09", "Lucro/Prejuízo Consolidado do Período", 33877000),
+    ]
+    bpa = [dict(BASE_BPA[0])]  # only account "1" — banks have no 1.01.01
+    bpp = [{
+        "CNPJ_CIA": "33.000.167/0001-01",
+        "DT_REFER": "2023-12-31",
+        "DT_RECEB": "2024-03-15",
+        "VERSAO": "1",
+        "ORDEM_EXERC": "ÚLTIMO",
+        "CD_CONTA": "2.08",
+        "DS_CONTA": "Patrimônio Líquido Consolidado",
+        "VL_CONTA": "218224000",
+    }]
+    _, fund = parse_dfp_zip(_make_fake_dfp_zip(dre, bpa, bpp), {})
+    row = fund.iloc[0]
+    assert row["revenue"] == pytest.approx(313_221_000.0)
+    assert row["net_income"] == pytest.approx(33_877_000.0)
+    assert row["equity"] == pytest.approx(218_224_000.0)
+    assert pd.isna(row.get("ebitda")), f"bank ebitda must be NULL, got {row.get('ebitda')}"
+    assert pd.isna(row["net_debt"]), f"bank net_debt must be NULL, got {row['net_debt']}"
+
+
 def test_parse_fre_zip_zero_shares_stored_as_null():
     """A row with all share count columns = 0 must produce shares_outstanding = NaN."""
     import math
