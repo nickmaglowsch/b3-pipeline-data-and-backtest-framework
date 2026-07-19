@@ -270,6 +270,12 @@ Then open http://localhost:8501 in your browser.
 
 ### Strategy Plugin System
 
+> **Building a simple "rank a factor / hold fixed sleeves and rebalance" portfolio?**
+> You don't need Python — write a YAML spec in `backtests/strategies/specs/`.
+> See **[docs/config_strategies.md](docs/config_strategies.md)** (the data/spec-driven
+> guide for humans and AI agents). Write a `StrategyBase` subclass (below) only for
+> bespoke logic the config engines don't cover.
+
 Strategies are registered via a plugin architecture. Each strategy extends `StrategyBase` and is auto-discovered from `backtests/strategies/`. To add a new strategy:
 
 ```python
