@@ -73,17 +73,16 @@ universe:
   min_price: 1.0
   smallcap_below_median: false   # keep only below-median-ADTV names (small caps)
 
-# --- pick ONE of `signal:` or `composite:` ---
 signal:
-  factor: low_vol          # named signal | shared_data key | store:<feature_id>
-  lookback: 12             # periods; drives both the factor and the warmup
-  shift: 0                 # extra lag in periods (signal-specific default)
+  # The factor is DATA. Reference a named signal from signals.yaml...
+  factor: low_vol          # name in signals.yaml | shared_data key | store:<feature_id>
+  lookback: 12             # periods; passed into the expression and drives the warmup
   apply_glitch: true       # NaN-out flagged bad prints (has_glitch) before ranking
   range: [1.0, 30.0]       # optional: keep only signal values within [lo, hi]
-
-composite:                 # rank-average several factors (each ranked cross-sectionally)
-  - {factor: momentum, lookback: 12, shift: 1, weight: 0.5}
-  - {factor: low_vol,  lookback: 12, shift: 1, weight: 0.5}
+  # ...or inline an expression directly (a "composite" is just an expr with rank()):
+  # expr: "0.5*rank(mask_glitch(roll_sum(shift(log_ret,1),lookback)))
+  #        + 0.5*rank(mask_glitch(-roll_std(shift(ret,1),lookback)))"
+  # apply_glitch: false    # set false when the expr masks glitches itself
 
 selection:
   top_pct: 0.10            # fraction of eligible universe... OR:
@@ -119,32 +118,53 @@ fully-invested blend make them sum to 1.
 
 ---
 
-## Factor catalog — what `factor:` can reference
+## Signals are data — the expression language
 
-`resolve_factor` accepts three forms (all return a wide date×ticker frame,
-higher = better):
+A factor is a **string expression** (the signal DSL, `backtests/core/signal_dsl.py`)
+that evaluates to a wide date×ticker frame, **higher = better**. You never write
+Python to add a factor.
 
-1. **Named signal** from `SIGNAL_LIBRARY` (`config_strategy.py`):
+`resolve_factor` accepts, in precedence order:
 
-   | name | meaning | notes |
-   |------|---------|-------|
-   | `momentum` | Σ log-returns over `lookback` | default `shift: 1` |
-   | `low_vol` | −rolling std of returns over `lookback` | default `shift: 0` |
-   | `sharpe_mom` | momentum ÷ vol (risk-adjusted), both `shift:1` | |
-   | `blended_vol` | −(0.5·vol_60d + 0.5·vol_20d) | uses precomputed vol keys |
+1. An inline `expr:` in the spec's `signal:` block.
+2. A **named signal** — a key in `backtests/strategies/signals.yaml`, which is
+   itself just an `expr` + default params (this replaced the old code library):
 
-2. **A bare `shared_data` key** — any precomputed frame from
-   `build_shared_data`, e.g. `mf_composite`, `f_pe_ratio_dyn`, `f_pb_ratio_dyn`.
-   (Fundamentals `f_*` keys require `needs_fundamentals: true`.)
+   ```yaml
+   momentum:   {expr: "roll_sum(shift(log_ret, 1), lookback)", lookback: 12}
+   low_vol:    {expr: "-roll_std(ret, lookback)", lookback: 12}
+   sharpe_mom: {expr: "roll_sum(shift(log_ret,1),lookback) / roll_std(shift(ret,1),lookback)", lookback: 12}
+   blended_vol:{expr: "-(0.5*vol_60d + 0.5*vol_20d)"}
+   ```
 
-3. **`store:<feature_id>`** — a factor from the research IC factor store
-   (`research/discovery`), e.g. `factor: store:ratio__High_low_range_20d__Win_rate_120d`.
-   It's loaded from parquet and as-of-aligned to the rebalance calendar. Browse
-   available IDs in `research/output/feature_catalog.json`.
+3. `store:<feature_id>` — a factor from the research IC store (`research/discovery`),
+   e.g. `factor: store:ratio__High_low_range_20d__Win_rate_120d`. Loaded from
+   parquet and as-of-aligned to the rebalance calendar. IDs live in
+   `research/output/feature_catalog.json`. Also callable inside an expr: `store("id")`.
+4. A bare **`shared_data` key** — any precomputed frame (`mf_composite`,
+   `f_pe_ratio_dyn`, …). Fundamentals `f_*` keys need `needs_fundamentals: true`.
 
-Convention: signals are **higher = better** so selection is always "top". Express
-a low-P/E strategy as an earnings-yield (higher = cheaper), a low-vol strategy as
-negated volatility, etc.
+### Primitive vocabulary (what an `expr` may call)
+
+Names resolve to `shared_data` frames (`ret`, `log_ret`, `adj_close`, `raw_close`,
+`adtv`, `close_px`, `fin_vol`, `vol_60d`, `vol_20d`, `atr_m`, `mf_composite`,
+`f_*` …) or numeric params (`lookback`). Operators: `+ - * / **` and unary `-`.
+
+| group | functions |
+|-------|-----------|
+| time-series | `shift(x,n)`, `roll_sum/mean/std/var/min/max/median/skew/kurt(x,w)`, `pct_change(x,w)`, `diff(x,n)`, `ewm_mean(x,span)`, `ewm_std(x,span)` |
+| elementwise | `log(x)`, `sign(x)`, `abs(x)`, `clip(x,lo,hi)` |
+| cross-sectional | `rank(x)` (pct, per date), `zscore(x)`, `demean(x)` |
+| data-quality | `mask_glitch(x)` (NaN-out `has_glitch` cells) |
+| store | `store("feature_id")` |
+
+The evaluator is **safe**: expressions are parsed with `ast` and only this
+whitelist runs — no attribute access, subscripts, lambdas, or arbitrary calls,
+so a spec can never execute code.
+
+Convention: **higher = better**. Express low-P/E as an earnings-yield, low-vol as
+negated volatility, etc. A "composite" is just an expr:
+`0.5*rank(momentum_expr) + 0.5*rank(lowvol_expr)`.
 
 ---
 
@@ -191,23 +211,22 @@ Common regime flags in `shared_data`: `is_easing`, `above_ma200`, `ibov_above`,
 
 ---
 
-## Adding a new named signal (the only time you write Python)
+## Adding a new signal (no Python)
 
-If your factor isn't a `shared_data` key or store feature, add a one-liner to
-`SIGNAL_LIBRARY` in `backtests/core/config_strategy.py`:
+Add a line to `backtests/strategies/signals.yaml`:
 
-```python
-def _sig_my_factor(shared: dict, cfg: dict) -> pd.DataFrame:
-    lb = int(cfg.get("lookback", 12))
-    return shared["log_ret"].shift(1).rolling(lb).sum() / shared["adtv"]  # higher = better
-
-SIGNAL_LIBRARY = {
-    ...,
-    "my_factor": _sig_my_factor,
-}
+```yaml
+my_factor:
+  expr: "roll_sum(shift(log_ret, 1), lookback) / adtv"   # higher = better
+  lookback: 12
 ```
 
-Then reference it: `signal: {factor: my_factor, lookback: 12}`.
+Then reference it: `signal: {factor: my_factor, lookback: 12}` — or skip the
+name and inline the same `expr:` directly in the strategy spec.
+
+You only touch Python for a genuinely new *primitive* (a rolling/cross-sectional
+op that can't be composed from the vocabulary above) — add it to the function
+table in `backtests/core/signal_dsl.py`. That's rare; factors are data.
 
 ---
 
@@ -229,11 +248,14 @@ Then reference it: `signal: {factor: my_factor, lookback: 12}`.
 
 - **YAML ints have no underscores.** Write `1000000`, not `1_000_000` (YAML
   parses the latter as a string).
-- **Warmup / shift.** The loop starts at `max_lookback + warmup_pad`
-  (default pad 1). A signal with `shift: 1` consumes one extra row — use
-  `warmup_pad: 2` to match a `range(lookback+2, ...)` original.
+- **Warmup / shift.** The loop starts at `signal.lookback + warmup_pad`
+  (default pad 1). An expression that shifts one extra row (`shift(...,1)`)
+  consumes a row — use `warmup_pad: 2` to match a `range(lookback+2, ...)` original.
 - **`apply_glitch`.** Defaults true (NaN-out flagged prints before ranking). Set
-  `false` when the factor is already clean/pre-masked (e.g. `mf_composite`).
+  `false` when the factor is already clean/pre-masked (`mf_composite`) or when the
+  `expr` masks each leg itself with `mask_glitch(...)` (see `multifactor.yaml`).
+- **`rank()` uses pandas semantics** (`rank(axis=1, pct=True)`), not the Rust
+  cross-sectional op, so folded composites stay bit-identical to the old ones.
 - **Parking modes differ.** `per_sleeve` parks each dead ETF's weight in CDI
   individually; `all_or_nothing` holds 100% CDI until every ETF is live.
 - **Regime input offsets.** `offset: 0` reads the flag at the current row `i`;
