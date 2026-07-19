@@ -20,9 +20,13 @@ strategy is expressed as ``earnings_yield`` (higher yield = cheaper), etc.
 """
 from __future__ import annotations
 
+import functools
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 
+from backtests.core import signal_dsl
 from backtests.core.strategy_base import (
     StrategyBase, ParameterSpec,
     COMMON_START_DATE, COMMON_END_DATE, COMMON_INITIAL_CAPITAL,
@@ -30,60 +34,56 @@ from backtests.core.strategy_base import (
 )
 
 
-# ── Signal library ────────────────────────────────────────────────────────────
-# Each fn(shared_data, cfg) -> wide DataFrame, higher = better. `cfg` is the
-# signal's own spec dict (holds lookback, shift, ...). Formulas are lifted
-# verbatim from the strategy each replaces (referenced in comments).
+# ── Signals as data ───────────────────────────────────────────────────────────
+# A factor is a string expression (the signal DSL, see signal_dsl.py) over
+# shared_data frames. Named signals live in backtests/strategies/signals.yaml;
+# specs may also inline an `expr:`. resolve_factor / _build_signal wire it in.
 
-def _sig_momentum(shared: dict, cfg: dict) -> pd.DataFrame:
-    lb = int(cfg.get("lookback", 12))
-    sh = int(cfg.get("shift", 1))
-    return shared["log_ret"].shift(sh).rolling(lb).sum()          # smallcap_momentum.py:63
-
-
-def _sig_low_vol(shared: dict, cfg: dict) -> pd.DataFrame:
-    lb = int(cfg.get("lookback", 12))
-    sh = int(cfg.get("shift", 0))
-    return -shared["ret"].shift(sh).rolling(lb).std()             # low_volatility.py:57
+@functools.lru_cache(maxsize=1)
+def _signal_defs() -> dict:
+    """Load the named-signal definitions from backtests/strategies/signals.yaml
+    (factor name -> {expr, <default params>})."""
+    import yaml
+    path = Path(__file__).resolve().parent.parent / "strategies" / "signals.yaml"
+    return yaml.safe_load(path.read_text()) or {}
 
 
-def _sig_sharpe_mom(shared: dict, cfg: dict) -> pd.DataFrame:
-    lb = int(cfg.get("lookback", 12))
-    mom = shared["log_ret"].shift(1).rolling(lb).sum()
-    vol = shared["ret"].shift(1).rolling(lb).std()
-    return mom / vol                                             # momentum_sharpe.py:57-59
+def _eval_expr(expr: str, scalars: dict, shared: dict) -> pd.DataFrame:
+    """Evaluate a signal expression in a namespace of shared_data frames plus any
+    numeric scalars (lookback, etc.)."""
+    ns = dict(shared)
+    ns.update({k: v for k, v in scalars.items() if isinstance(v, (int, float))})
+    return signal_dsl.evaluate(expr, ns)
 
 
-def _sig_blended_vol(shared: dict, cfg: dict) -> pd.DataFrame:
-    ret = shared["ret"]
-    vol_60d = shared.get("vol_60d", ret.rolling(5).std())
-    vol_20d = shared.get("vol_20d", ret.rolling(2).std())
-    return -(0.5 * vol_60d + 0.5 * vol_20d)                      # adaptive_low_vol.py:82-85
+def resolve_factor(cfg: dict, shared: dict, params: dict | None = None) -> pd.DataFrame:
+    """Resolve one factor cfg to a wide (higher=better) frame. In precedence:
 
+    1. an inline ``expr:`` string (the signal DSL);
+    2. a named signal from ``signals.yaml`` (also a DSL ``expr``);
+    3. ``store:<feature_id>`` — the research/discovery IC factor store;
+    4. a bare ``shared_data`` key (e.g. ``mf_composite``, ``f_pe_ratio_dyn``).
 
-SIGNAL_LIBRARY = {
-    "momentum": _sig_momentum,
-    "low_vol": _sig_low_vol,
-    "sharpe_mom": _sig_sharpe_mom,
-    "blended_vol": _sig_blended_vol,
-}
-
-
-def resolve_factor(cfg: dict, shared: dict) -> pd.DataFrame:
-    """Resolve one factor cfg {factor: <ref>, ...} to a wide (higher=better) df.
-
-    ``factor`` is either a named signal, a bare ``shared_data`` key, or
-    ``store:<feature_id>`` for the research/discovery IC factor store.
+    ``params`` (UI/default values) override the signal's own defaults, so a
+    ``lookback`` slider flows into the expression.
     """
-    ref = cfg["factor"]
-    if ref in SIGNAL_LIBRARY:
-        return SIGNAL_LIBRARY[ref](shared, cfg)
-    if ref.startswith("store:"):
+    scalars = {**cfg, **(params or {})}
+    if "expr" in cfg:
+        return _eval_expr(cfg["expr"], scalars, shared)
+
+    ref = cfg.get("factor")
+    defs = _signal_defs()
+    if ref in defs:
+        entry = defs[ref]
+        merged = {**entry, **scalars}       # spec/params override the signal's defaults
+        return _eval_expr(entry["expr"], merged, shared)
+    if isinstance(ref, str) and ref.startswith("store:"):
         return _load_store_feature(ref[len("store:"):], shared)
     if ref in shared:
         return shared[ref]
     raise KeyError(
-        f"Unknown factor {ref!r}: not a named signal, shared_data key, or store:<id>"
+        f"Unknown factor {ref!r}: not an expr, a name in signals.yaml, "
+        f"a shared_data key, or store:<id>"
     )
 
 
@@ -100,36 +100,17 @@ def _load_store_feature(feature_id: str, shared: dict) -> pd.DataFrame:
 
 
 def _build_signal(spec: dict, params: dict, shared: dict) -> tuple[pd.DataFrame, int]:
-    """Return (signal_df, max_lookback). Single factor -> raw signal; composite
-    -> rank-averaged (matches multifactor.py:69)."""
-    glitch = shared.get("has_glitch")
-
-    def _mask_glitch(df: pd.DataFrame) -> pd.DataFrame:
-        if glitch is not None:
-            df = df.copy()
-            df[glitch == 1] = np.nan
-        return df
-
-    if "composite" in spec:
-        parts = spec["composite"]
-        composite = None
-        max_lb = 0
-        for p in parts:
-            cfg = {**p, "lookback": params.get("lookback", p.get("lookback", 12))}
-            max_lb = max(max_lb, int(cfg.get("lookback", 0)))
-            sig = resolve_factor(cfg, shared)
-            if p.get("apply_glitch", True):
-                sig = _mask_glitch(sig)
-            ranked = sig.rank(axis=1, pct=True) * float(p.get("weight", 1.0))
-            composite = ranked if composite is None else composite + ranked
-        return composite, max_lb
-
+    """Return (signal_df, lookback). The signal is a single factor/expression;
+    composite blends are just an ``expr`` using ``rank()``/``zscore()`` (see
+    specs/multifactor.yaml)."""
     cfg = {**spec["signal"]}
-    cfg["lookback"] = params.get("lookback", cfg.get("lookback", 12))
-    sig = resolve_factor(cfg, shared)
+    cfg["lookback"] = params.get("lookback", cfg.get("lookback", 0))
+    sig = resolve_factor(cfg, shared, params)
     if cfg.get("apply_glitch", True):
-        sig = _mask_glitch(sig)
-    return sig, int(cfg.get("lookback", 0))
+        glitch = shared.get("has_glitch")
+        if glitch is not None:
+            sig = sig.where(glitch != 1)
+    return sig, int(cfg.get("lookback", 0) or 0)
 
 
 def _eval_regime(regime: dict, shared: dict, i: int):

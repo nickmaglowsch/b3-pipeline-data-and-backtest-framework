@@ -1,0 +1,21 @@
+# Named signals as DATA (interpreted by backtests/core/signal_dsl.py).
+# Each entry: an `expr` over shared_data frames + a default `lookback`.
+# Convention: higher = better (selection always takes the top). Reference one
+# from a strategy spec with `signal: {factor: <name>, lookback: N}`, or inline
+# an `expr:` directly in the spec. Add a new factor by adding a line here — no
+# Python. See docs/config_strategies.md for the primitive catalogue.
+
+momentum:
+  expr: "roll_sum(shift(log_ret, 1), lookback)"
+  lookback: 12
+
+low_vol:
+  expr: "-roll_std(ret, lookback)"
+  lookback: 12
+
+sharpe_mom:
+  expr: "roll_sum(shift(log_ret, 1), lookback) / roll_std(shift(ret, 1), lookback)"
+  lookback: 12
+
+blended_vol:
+  expr: "-(0.5 * vol_60d + 0.5 * vol_20d)"

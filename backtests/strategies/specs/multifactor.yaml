@@ -8,9 +8,14 @@ warmup_pad: 2
 universe:
   min_adtv: 1000000
   min_price: 1.0
-composite:
-  - {factor: momentum, lookback: 12, shift: 1, weight: 0.5}
-  - {factor: low_vol,  lookback: 12, shift: 1, weight: 0.5}
+signal:
+  # 0.5 * rank(momentum) + 0.5 * rank(low-vol), each leg glitch-masked before
+  # ranking (both legs use shift 1). Folded from the old composite: block.
+  expr: >-
+    0.5 * rank(mask_glitch(roll_sum(shift(log_ret, 1), lookback)))
+    + 0.5 * rank(mask_glitch(-roll_std(shift(ret, 1), lookback)))
+  lookback: 12
+  apply_glitch: false   # glitch handled per-leg inside the expr
 selection:
   top_pct: 0.10
   min_names: 5
