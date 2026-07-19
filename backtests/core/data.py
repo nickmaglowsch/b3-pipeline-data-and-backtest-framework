@@ -3,13 +3,64 @@ Core utilities for backtesting with B3 data.
 """
 
 import glob
+import hashlib
+import os
 import sqlite3
+import time
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import yfinance as yf
 from datetime import datetime
+
+
+# ── Disk+memory cache for external market series (benchmarks, CDI) ────────────
+# Every backtest run (and every UI re-run) used to refetch IBOV/ETFs from Yahoo
+# and CDI from BCB. A past [start, end] window is effectively immutable, so we
+# cache by (kind, *args). Mirrors the pickle+24h-TTL pattern already used in
+# research/data_loader.py, but keyed by args so it serves all callers.
+_CACHE_DIR = Path(__file__).resolve().parents[2] / ".cache" / "market_data"
+_CACHE_TTL_SECONDS = 86400  # 24h: refreshes an open-ended `end` (=today) once a day
+_MEM_CACHE: dict = {}
+
+
+def _fetch_cached(kind: str, key_parts: tuple, fetch):
+    """Return a cached series or call ``fetch()`` and cache its result.
+
+    Hit order: in-process memory → on-disk pickle (if younger than the TTL) →
+    network. Empty/failed fetches are never cached (so a transient outage can't
+    poison the cache). Set ``B3_DISABLE_CACHE=1`` to force a fresh refetch.
+    The canonical object never escapes — callers always get a ``.copy()`` — so a
+    caller mutating its result in place can't corrupt the cache.
+    """
+    if os.environ.get("B3_DISABLE_CACHE"):
+        return fetch()
+
+    key = (kind, *(str(p) for p in key_parts))
+    if key in _MEM_CACHE:
+        return _MEM_CACHE[key].copy()
+
+    digest = hashlib.md5("|".join(key).encode()).hexdigest()[:16]  # ponytail: filename key, not security
+    path = _CACHE_DIR / f"{kind}_{digest}.pkl"
+    if path.exists() and (time.time() - path.stat().st_mtime) < _CACHE_TTL_SECONDS:
+        try:
+            obj = pd.read_pickle(path)
+            _MEM_CACHE[key] = obj
+            return obj.copy()
+        except Exception:
+            pass  # corrupt/version-incompatible pickle → fall through and refetch
+
+    obj = fetch()
+    if obj is not None and not obj.empty:
+        _MEM_CACHE[key] = obj
+        try:
+            _CACHE_DIR.mkdir(parents=True, exist_ok=True)
+            obj.to_pickle(path)
+        except Exception:
+            pass  # disk cache is best-effort; never fail a backtest over it
+        return obj.copy()
+    return obj
 
 
 def load_sector_pit(fca_dir, db_path) -> pd.DataFrame:
@@ -274,23 +325,26 @@ import requests
 
 def download_benchmark(ticker: str, start: str, end: str) -> pd.Series:
     """
-    Download benchmark index data from Yahoo Finance.
+    Download benchmark index data from Yahoo Finance (cached by ticker+window).
     """
-    print(f"⬇  Downloading {ticker} benchmark from Yahoo...")
-    index_data = yf.download(
-        ticker, start=start, end=end, auto_adjust=True, progress=False
-    )["Close"]
+    def _fetch() -> pd.Series:
+        print(f"⬇  Downloading {ticker} benchmark from Yahoo...")
+        index_data = yf.download(
+            ticker, start=start, end=end, auto_adjust=True, progress=False
+        )["Close"]
 
-    if isinstance(index_data, pd.DataFrame):
-        index_data = index_data.squeeze()
+        if isinstance(index_data, pd.DataFrame):
+            index_data = index_data.squeeze()
 
-    index_data.index = pd.to_datetime(index_data.index)
+        index_data.index = pd.to_datetime(index_data.index)
 
-    # Remove timezone if present to align with local sqlite dates
-    if index_data.index.tz is not None:
-        index_data.index = index_data.index.tz_localize(None)
+        # Remove timezone if present to align with local sqlite dates
+        if index_data.index.tz is not None:
+            index_data.index = index_data.index.tz_localize(None)
 
-    return index_data
+        return index_data
+
+    return _fetch_cached("bench", (ticker, start, end), _fetch)
 
 
 def load_b3_hlc_data(
@@ -364,8 +418,12 @@ def download_cdi_daily(start: str, end: str) -> pd.Series:
     """
     Download daily accumulated CDI directly from the Brazilian Central Bank (SGS API Series 12).
     Because BCB limits queries to 10 years for daily data, this safely batches requests.
-    Returns a pandas Series of daily returns (e.g., 0.0001 for 0.01%).
+    Returns a pandas Series of daily returns (e.g., 0.0001 for 0.01%). Cached by window.
     """
+    return _fetch_cached("cdi", (start, end), lambda: _download_cdi_daily(start, end))
+
+
+def _download_cdi_daily(start: str, end: str) -> pd.Series:
     print("⬇  Downloading Daily CDI from Brazilian Central Bank...")
 
     start_dt = pd.to_datetime(start)

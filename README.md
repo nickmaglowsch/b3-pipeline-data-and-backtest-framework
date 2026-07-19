@@ -1,559 +1,357 @@
-# B3 Historical Market Data Pipeline
+# B3 Quant Research Platform
 
-A complete, production-ready Python data pipeline for downloading, parsing, and processing historical equity data from B3 (Brazilian Stock Exchange).
+An end-to-end Python platform for Brazilian equity research: it **downloads and
+cleans** historical B3 market data, **enriches** it with CVM fundamentals,
+**backtests** strategies against a tax-accurate simulator, **discovers** alpha
+features automatically, and drives all of it from a **Streamlit UI**.
 
-**B3 is the single authoritative source for all data:**
-- Price data (COTAHIST)
-- Cash dividends and JCP (Juros sobre Capital Próprio)
-- Stock splits (Desdobramento)
-- Reverse splits (Grupamento)
-- Bonus shares (Bonificação)
+It started life as a COTAHIST price scraper. It is now five layers:
 
-This tool automatically downloads historical daily price data from B3's official systems, fetches corporate actions directly from B3's listedCompaniesProxy API, and calculates split-adjusted OHLC and total-return adjusted close prices (Yahoo Finance style).
+| Layer | Where | What it does |
+|-------|-------|--------------|
+| **Data pipeline** | `b3_pipeline/` | Prices, corporate actions, and fundamentals into one SQLite DB |
+| **Backtesting framework** | `backtests/` | Tax-aware simulator + config/DSL-driven strategies |
+| **Feature discovery** | `research/discovery/` | Auto-generates & IC-ranks hundreds of alpha features |
+| **ML research** | `research/` | Feature-importance study (RandomForest / XGBoost) |
+| **Web UI** | `ui/` | Streamlit app to run every layer from the browser |
 
-All data is stored in a clean SQLite database ready for quantitative analysis or backtesting.
+All data lands in a single SQLite file (`b3_market_data.sqlite`) with
+split/dividend-adjusted prices (Yahoo-style `adj_close`), point-in-time
+fundamentals, and ISIN-linked identity so the dataset is **survivorship-bias
+free** across ticker changes, mergers, and delistings.
 
-## Features
+## Data sources & provenance
 
-- **Automated Downloads**: Fetches B3 COTAHIST annual files (from 1994 to present) automatically.
-- **Fixed-width Parsing**: Parses the notoriously complex COTAHIST fixed-width format, filtering only for standard lot equities (BDI `02`).
-- **Corporate Actions from B3**: Fetches dividends, JCP, splits, reverse splits, and bonus shares directly from B3's official API.
-- **Accurate Split Data**: Uses B3's official split factors instead of heuristic detection, correctly handling:
-  - Stock splits (e.g., 100:1 split in 2008)
-  - Reverse splits (e.g., 0.01 factor in 2000)
-  - Bonus shares (Bonificação)
-- **Data Adjustments**:
-  - `split_adj_*`: OHLC prices adjusted for splits/reverse splits (backward cumulative factor).
-  - `split_adj_volume`: Volume inversely adjusted for splits.
-  - `adj_close`: Total-return adjusted close price accounting for both splits and dividends/JCP.
-- **Idempotent**: Safe to run multiple times. Uses `INSERT OR REPLACE` and checks for existing files.
-- **Resilient**: Handles missing data, gracefully skips rate-limited responses, and handles partial years.
+Earlier versions claimed "B3 is the single source of truth." That is no longer
+true — the platform stitches together several official feeds:
 
-## Architecture
+| Source | Feed | Provides |
+|--------|------|----------|
+| **B3** | COTAHIST annual files | Daily OHLC + volume (1994→present) |
+| **B3** | `listedCompaniesProxy` API | Dividends, JCP, splits, reverse splits, bonus shares |
+| **CVM** | `dados.cvm.gov.br` bulk CSVs (DFP/ITR/FCA) | Structured fundamentals (2010→present) + PIT ticker map |
+| **CVM** | "Download Múltiplo" legacy channel | Pre-2010 fundamentals (~2006–2009), *opt-in, credentialed* |
+| **BCB** | Central Bank API | CDI risk-free daily series |
+| **Yahoo Finance** | `yfinance` | IBOV, ETF sleeves (IVVB11, DIVO11, …) for benchmarks/blends |
 
-- `main.py` - CLI orchestrator and pipeline execution.
-- `downloader.py` - Manages fetching ZIPs from B3 COTAHIST.
-- `b3_corporate_actions.py` - Fetches corporate actions from B3 listedCompaniesProxy API.
-- `parser.py` - Extracts and normalizes the `.TXT` files within the downloaded ZIPs.
-- `adjustments.py` - Core logic for split and dividend adjustments using B3 official data.
-- `storage.py` - SQLite schema definition and fast batch upsert operations.
-- `config.py` - Configuration, schema offsets, and URL templates.
+Splits use B3's **official factors** (not heuristic jump detection), so
+100:1 splits, `0.01` reverse-split factors, and `Bonificação` bonus shares are
+all handled exactly.
 
 ## Installation
 
-Requirements: Python 3.9+
+Requirements: **Python 3.9+** and the **Rust stable toolchain** (for the parser
+extension, see below).
 
 ```bash
-# Clone the repository
 git clone <repository_url>
-cd b3-data-pipeline
+cd b3-pipeline-data-and-backtest-framework
 
-# Create and activate a virtual environment
 python -m venv .venv
-source .venv/bin/activate   # Linux/macOS
-# .venv\Scripts\activate    # Windows
+source .venv/bin/activate        # Linux/macOS  (.venv\Scripts\activate on Windows)
 
-# Install all dependencies
-pip install -r requirements.txt
+pip install -r requirements.txt  # pipeline + backtests + ML + Streamlit UI
+make dev-rust                    # build the Rust COTAHIST parser into the venv (one-time)
 ```
 
-This installs everything needed for the data pipeline, backtesting framework, ML research, and the Streamlit web UI.
+`requirements.txt` covers everything. `make dev-rust` must be run once after
+cloning (and again whenever `b3_pipeline_rs/src/` changes).
 
-## Rust Extension (COTAHIST Parser)
+### Rust extension (COTAHIST parser)
 
-The COTAHIST fixed-width parsing loop is implemented as a compiled Rust extension (`cotahist_rs`)
-for performance. It uses `pyo3` + `maturin` to produce a Python `.so` and `rayon` for parallel
-processing of line records and multiple annual files. Parsing 33 years of data takes ~100ms
-instead of ~60s.
-
-### Prerequisites
-
-Install the Rust stable toolchain (one-time, system-wide):
+The COTAHIST fixed-width parsing loop is a compiled Rust extension
+(`cotahist_rs`, `pyo3` + `maturin`, `rayon` for parallelism). Parsing ~33 years
+of data takes **~100 ms** instead of ~60 s.
 
 ```bash
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-source $HOME/.cargo/env   # or restart your shell
+# one-time toolchain install
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh && source $HOME/.cargo/env
+
+make dev-rust     # debug build into the active venv (run after clone & on src changes)
+make build-rust   # optimised release wheel -> b3_pipeline_rs/target/wheels/
+make test-rust    # cargo test
+make test         # pytest (Python suite)
+make all          # dev-rust + test
 ```
 
-Install `maturin` into the active Python venv (already in `requirements.txt`):
+If you see `ImportError: The cotahist_rs Rust extension is not compiled`, run
+`make dev-rust`.
+
+## Running the data pipelines
+
+There are three independent entry points. All write to the same SQLite DB.
+
+### 1. Prices + corporate actions — `b3_pipeline.main`
 
 ```bash
-pip install maturin
+python -m b3_pipeline.main                     # download missing years, update DB
+python -m b3_pipeline.main --rebuild           # drop tables & recompute adjustments
+python -m b3_pipeline.main --year 2024         # a single year (testing)
+python -m b3_pipeline.main --start-year 2010   # from a year onward
+python -m b3_pipeline.main --skip-corporate-actions   # faster; prices only
+python -m b3_pipeline.main --retry-failures    # re-fetch only companies in fetch_failures
+python -m b3_pipeline.main --update-cnpj-map   # just refresh ticker→CNPJ map (fast)
 ```
 
-### Building the Extension
+Pipeline steps: download COTAHIST → parse (Rust) → upsert raw prices → fetch B3
+corporate actions → compute split factors → compute dividend factors → write
+`split_adj_*` and total-return `adj_close`. It is **idempotent**
+(`INSERT OR REPLACE`, existing-file checks) and resilient to rate limits and
+partial years.
+
+### 2. CVM fundamentals 2010+ — `b3_pipeline.cvm_main`
 
 ```bash
-# Development build — fast compile, installs into active venv
-make dev-rust
-
-# Release build — optimised, produces a .whl in b3_pipeline_rs/target/wheels/
-make build-rust
+python -m b3_pipeline.cvm_main                       # all available years
+python -m b3_pipeline.cvm_main --start-year 2020     # from 2020 onward
+python -m b3_pipeline.cvm_main --rebuild             # rebuild fundamentals tables
+python -m b3_pipeline.cvm_main --skip-ticker-fetch   # skip B3 ticker-map fetch
+python -m b3_pipeline.cvm_main --include-historical  # + FCA/CAD/IPE metadata (register, PIT tickers)
 ```
 
-The `make dev-rust` command must be run once after cloning, and again whenever
-the Rust source files in `b3_pipeline_rs/src/` are changed.
+Ingests structured DFP/ITR filings into **point-in-time** `fundamentals_pit`
+(keyed by filing, so backtests can query "what was known on date X" with no
+look-ahead), then materialises a monthly snapshot (`fundamentals_monthly`).
+Valuation ratios (P/E, P/B, EV/EBITDA) are computed **dynamically at query
+time**, not stored. `--include-historical` adds the CAD company register
+(listing/delisting dates) and FCA point-in-time ticker map — which closes the
+survivorship hole for delisted names — but does **not** provide pre-2010
+financials.
 
-### Running Tests
+### 3. Pre-2010 fundamentals ("Download Múltiplo") — `b3_pipeline.dm_main`
+
+CVM's bulk CSVs only reach back to 2010. `dm_main` extends fundamentals to
+~2006–2009 via CVM's older credentialed delivery channel. It requires
+free CVM credentials (`CVM_DM_USER` / `CVM_DM_PASS`) and is **not yet
+integration-tested against live files** — see
+**[docs/download_multiplo.md](docs/download_multiplo.md)** for the full protocol,
+registration steps, DBF layout, and known limitations.
 
 ```bash
-make test-rust   # Rust unit tests (cargo test)
-make test        # Python test suite (pytest)
-make all         # build + test in sequence
+export CVM_DM_USER=... CVM_DM_PASS=...
+python -m b3_pipeline.dm_main --start 2006-01-01 --end 2010-12-31 --types ITR,DFP,IAN
+python -m b3_pipeline.dm_main --parse-only    # re-parse files already in data/dm/
 ```
 
-### Troubleshooting
+## Database schema
 
-If you see:
+`b3_market_data.sqlite` holds 12 tables. Identity is **ISIN-linked** so ticker
+renames don't fragment a company's history.
 
-```
-ImportError: The cotahist_rs Rust extension is not compiled.
-Run `make dev-rust` (or `cd b3_pipeline_rs && maturin develop`)
-to build it before running the pipeline.
-```
+**Market data**
 
-Run `make dev-rust` to compile the extension.
+| Table | Key | Contents |
+|-------|-----|----------|
+| `prices` | `(ticker, date)` | Raw OHLCV + `split_adj_*` + total-return `adj_close`; carries `isin_code` |
+| `corporate_actions` | `(isin_code, event_date, event_type)` | Cash dividends, JCP, and stock events (`value`, `factor`, `source`) |
+| `stock_actions` | `(isin_code, ex_date, action_type)` | Splits / reverse splits / bonus shares with factors |
+| `detected_splits` | `(isin_code, ex_date)` | Legacy split factors derived from `stock_actions` |
+| `skipped_events` | `(isin_code, event_date, label)` | Corporate events skipped during adjustment, with reason |
+| `fetch_failures` | `(company_code, endpoint)` | Failed API fetches for `--retry-failures` |
 
-## Usage
+**Fundamentals & identity**
 
-Run the pipeline using the main module:
+| Table | Key | Contents |
+|-------|-----|----------|
+| `fundamentals_pit` | `filing_id` | Point-in-time financials per filing (revenue, net income, EBITDA, assets, equity, net debt, shares, TTM net income) |
+| `fundamentals_monthly` | `(month_end, ticker)` | Monthly fundamentals snapshot for fast backtest joins |
+| `cvm_filings` | `filing_id` | Filing metadata (doc type, period end, filing date, version) |
+| `cvm_companies` | `cnpj` | CNPJ ↔ ticker, CVM code, listing/delisting dates |
+| `company_isin_map` | `(cnpj, isin_code)` | CNPJ ↔ ISIN ↔ ticker ↔ share class |
+| `company_tickers_pit` | `(cnpj, ticker, start_date)` | Point-in-time ticker map from CVM FCA (covers delisted names) |
 
-```bash
-# Run the standard pipeline (downloads any missing years and updates DB)
-python -m b3_pipeline.main
+All CVM financial values are stored in **thousands of BRL**, as reported.
 
-# Rebuild the database from scratch (drops tables and recompiles adjustments)
-python -m b3_pipeline.main --rebuild
-
-# Process a specific year only (useful for testing)
-python -m b3_pipeline.main --year 2024
-
-# Process data but skip fetching corporate actions (faster runs)
-python -m b3_pipeline.main --skip-corporate-actions
-```
-
-## Database Schema
-
-The pipeline produces a SQLite database file named `b3_market_data.sqlite` with the following schema:
-
-### Table: `prices`
-Primary Key: `(ticker, date)`
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `ticker` | TEXT | Stock symbol (e.g., PETR4) |
-| `date` | DATE | Trading date (YYYY-MM-DD) |
-| `open` | REAL | Raw open price |
-| `high` | REAL | Raw high price |
-| `low` | REAL | Raw low price |
-| `close` | REAL | Raw close price |
-| `volume` | INTEGER | Raw traded volume |
-| `split_adj_open` | REAL | Open price adjusted for splits |
-| `split_adj_high` | REAL | High price adjusted for splits |
-| `split_adj_low` | REAL | Low price adjusted for splits |
-| `split_adj_close`| REAL | Close price adjusted for splits |
-| `adj_close` | REAL | Close price adjusted for splits AND dividends |
-
-### Table: `corporate_actions`
-Primary Key: `(ticker, event_date, event_type)`
-
-Stores dividends, JCP, and stock action events with ISIN codes for traceability.
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `ticker` | TEXT | Stock symbol |
-| `event_date` | DATE | Ex-date |
-| `event_type` | TEXT | CASH_DIVIDEND, JCP, STOCK_SPLIT, REVERSE_SPLIT, BONUS_SHARES |
-| `value` | REAL | Dividend/JCP amount per share |
-| `isin_code` | TEXT | ISIN code from B3 |
-| `factor` | REAL | Split/bonus factor |
-| `source` | TEXT | Data source (always "B3") |
-
-### Table: `stock_actions`
-Primary Key: `(ticker, ex_date, action_type)`
-
-Stores split, reverse split, and bonus share events separately for clarity.
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `ticker` | TEXT | Stock symbol |
-| `ex_date` | DATE | Ex-date |
-| `action_type` | TEXT | STOCK_SPLIT, REVERSE_SPLIT, BONUS_SHARES |
-| `factor` | REAL | Split/bonus factor |
-| `isin_code` | TEXT | ISIN code from B3 |
-| `source` | TEXT | Data source (always "B3") |
-
-### Table: `detected_splits`
-Primary Key: `(ticker, ex_date)`
-
-Legacy table for storing split factors derived from B3 stock_actions data.
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `ticker` | TEXT | Stock symbol |
-| `ex_date` | DATE | Ex-date |
-| `split_factor`| REAL | Calculated multiplier (old_shares / new_shares) |
-| `description` | TEXT | Text description of the split |
-
-## B3 Corporate Action Labels
-
-The pipeline maps B3's Portuguese labels to standardized types:
-
-| B3 Label | Event Type | Description |
-|----------|------------|-------------|
-| DIVIDENDO | CASH_DIVIDEND | Cash dividend |
-| JRS CAP PROPRIO | JCP | Interest on own capital |
-| RENDIMENTO | CASH_DIVIDEND | Yield (treated as dividend) |
-| DESDOBRAMENTO | STOCK_SPLIT | Stock split (factor > 1) |
-| GRUPAMENTO | REVERSE_SPLIT | Reverse split (factor < 1) |
-| BONIFICACAO | BONUS_SHARES | Bonus shares |
-
-## Split Factor Interpretation
-
-B3 provides factors as localized strings (e.g., "100,00000000000"):
-
-- **Stock Split (DESDOBRAMENTO)**: factor > 1
-  - Example: factor=100 means 100 new shares for each 1 old share
-  - Split factor for adjustment = 1/100 = 0.01
-
-- **Reverse Split (GRUPAMENTO)**: factor < 1
-  - Example: factor=0.01 means 1 new share for each 100 old shares
-  - Split factor for adjustment = 1/0.01 = 100
-
-- **Bonus Shares (BONIFICACAO)**: factor represents percentage
-  - Example: factor=33.33 means 33.33% bonus (get 133 shares for each 100 held)
-  - Split factor for adjustment = 1/(1+33.33/100) ≈ 0.75
-
-## Example Query
-
-To fetch a clean, Yahoo-style historical price series for Petrobras:
+### Example query — a clean, Yahoo-style series
 
 ```sql
-SELECT 
-    date, 
-    ticker, 
-    open, 
-    high, 
-    low, 
-    close as raw_close, 
-    adj_close
-FROM prices 
-WHERE ticker = 'PETR4' 
+SELECT date, ticker, open, high, low, close AS raw_close, adj_close
+FROM prices
+WHERE ticker = 'PETR4'
 ORDER BY date DESC
 LIMIT 10;
 ```
 
-## Web UI
+### B3 corporate-action labels & split factors
 
-A Streamlit-based management UI for running the pipeline, executing backtests, browsing results, and viewing ML research -- all from the browser.
+B3's Portuguese labels map to standard event types, and localised factor strings
+(e.g. `"100,00000000000"`) are converted to adjustment multipliers:
 
-### Running the UI
+| B3 Label | Event Type | Adjustment factor |
+|----------|------------|-------------------|
+| DIVIDENDO / RENDIMENTO | CASH_DIVIDEND | via total-return `adj_close` |
+| JRS CAP PROPRIO | JCP | via total-return `adj_close` |
+| DESDOBRAMENTO (split, factor > 1) | STOCK_SPLIT | `1 / factor` (e.g. 100:1 → 0.01) |
+| GRUPAMENTO (reverse, factor < 1) | REVERSE_SPLIT | `1 / factor` (e.g. 0.01 → 100) |
+| BONIFICACAO (bonus %) | BONUS_SHARES | `1 / (1 + pct/100)` (e.g. 33.33% → ≈0.75) |
 
-```bash
-# Option 1: using streamlit directly
-streamlit run ui/app.py
+## Backtesting framework
 
-# Option 2: using the convenience launcher
-python run_ui.py
+`backtests/` is a modular framework built on the pipeline DB. It uses
+fully-adjusted `adj_close`, computes daily financial volume natively from
+COTAHIST, pulls CDI (BCB) and IBOV/ETFs (Yahoo), and — critically — implements
+the **exact mechanics of Brazilian capital-gains tax** for variable income
+(15% CGT, infinite loss carryforward, the R$20k/month sale exemption, slippage,
+and margin borrow at CDI + spread). The result is a realistic **after-tax**
+equity curve, not a gross one. See **[backtests/README.md](backtests/README.md)**.
+
+### Strategies are data — config + a signal DSL
+
+**Most strategies need no Python.** A large class ("rank a factor, hold the top
+N, rebalance" and "hold fixed sleeves and rebalance to weights") is defined by
+dropping a YAML file in `backtests/strategies/specs/`. Factors themselves are
+**string expressions** in a safe DSL (`backtests/core/signal_dsl.py`, parsed
+with `ast` — no code execution) evaluated over shared data frames.
+
+```yaml
+# backtests/strategies/specs/my_momentum.yaml
+name: MyMomentum
+kind: rank_and_hold
+rebalance: ME                 # ME | QE | W-FRI
+universe: {min_adtv: 1000000, min_price: 1.0}
+signal:   {factor: momentum, lookback: 6}   # a named signal from signals.yaml
+selection: {top_pct: 0.10, min_names: 5}
+weighting: equal
 ```
 
-Then open http://localhost:8501 in your browser.
+It auto-registers and appears in the UI's backtest runner. Named signals live in
+`backtests/strategies/signals.yaml` (also just `expr` + defaults); research-discovered
+features are referenceable as `store:<feature_id>`. Full field reference, the
+expression vocabulary, regime overlays, and parity-porting gotchas are in
+**[docs/config_strategies.md](docs/config_strategies.md)** — the guide for
+humans *and* AI agents.
 
-### Pages
-
-| Page | Description |
-|------|-------------|
-| **Pipeline Manager** | View database stats, browse raw COTAHIST files, explore table data, and trigger pipeline runs with real-time log streaming |
-| **Backtest Runner** | Select from 13 registered strategies, configure all parameters via dynamic forms, run backtests in background with live logs, view interactive Plotly results |
-| **Results Dashboard** | Browse all saved results (new + legacy PNGs), compare multiple strategies side-by-side with equity overlays and correlation matrices |
-| **Research Viewer** | View ML feature importance rankings, model performance metrics, and trigger the research pipeline |
-
-### Strategy Plugin System
-
-> **Building a simple "rank a factor / hold fixed sleeves and rebalance" portfolio?**
-> You don't need Python — write a YAML spec in `backtests/strategies/specs/`.
-> See **[docs/config_strategies.md](docs/config_strategies.md)** (the data/spec-driven
-> guide for humans and AI agents). Write a `StrategyBase` subclass (below) only for
-> bespoke logic the config engines don't cover.
-
-Strategies are registered via a plugin architecture. Each strategy extends `StrategyBase` and is auto-discovered from `backtests/strategies/`. To add a new strategy:
+Write a `StrategyBase` subclass in `backtests/strategies/` only for genuinely
+bespoke logic the config engines don't cover (per-row fundamental ranking,
+inverse-vol weighting, index reconstruction, vol-targeting, asset rotation):
 
 ```python
-# backtests/strategies/my_strategy.py
 from backtests.core.strategy_base import StrategyBase, ParameterSpec, COMMON_START_DATE, COMMON_END_DATE
 
 class MyStrategy(StrategyBase):
-    @property
-    def name(self) -> str:
-        return "My Strategy"
-
-    @property
-    def description(self) -> str:
-        return "Description shown in the UI."
-
-    def get_parameter_specs(self) -> list[ParameterSpec]:
-        return [COMMON_START_DATE, COMMON_END_DATE]
-
-    def generate_signals(self, shared_data: dict, params: dict):
-        ret = shared_data["ret"]
-        # ... compute target weights ...
-        return returns_matrix, target_weights
+    name = "My Strategy"
+    def get_parameter_specs(self): return [COMMON_START_DATE, COMMON_END_DATE]
+    def generate_signals(self, shared_data, params):
+        ...  # return returns_matrix, target_weights
 ```
 
-The strategy will automatically appear in the Backtest Runner dropdown on the next page load.
+Both paths flow through one registry (`get_registry()`, auto-discovered) and the
+shared `run_simulation`. **28 strategies** are registered today — factor books
+(momentum, low-vol, Sharpe-momentum, multifactor, value/quality, low-P/E,
+smallcap momentum, frog-in-the-pan, volume breakout, mean reversion), regime
+overlays (COPOM easing, IBOV trend/vol, dual momentum), index-style books, and
+fixed ETF/CDI blends.
 
-## Backtesting Framework
-
-The `backtests/` directory contains a full quantitative backtesting framework built on top of the data pipeline. It includes 30+ individual strategy backtests, portfolio optimization tools, and research utilities.
-
-### Core Modules (`backtests/core/`)
+### Core modules (`backtests/core/`)
 
 | Module | Description |
 |--------|-------------|
-| `data.py` | Loads B3 data from SQLite + downloads CDI (BCB API) and IBOV (Yahoo Finance) |
-| `simulation.py` | Tax-aware portfolio simulator (15% CGT, loss carryforward, slippage, R$20K monthly sales exemption) |
-| `metrics.py` | Performance metrics: Sharpe, Calmar, max drawdown, annualized return/volatility |
-| `plotting.py` | Standardized dark-theme tear sheets and equity curve plots |
-| `strategy_returns.py` | Runs all 8 core strategies in one call, returns a clean DataFrame of monthly after-tax returns |
-| `portfolio_opt.py` | Portfolio weight functions: equal-weight, inverse-vol, ERC, HRP, rolling Sharpe, regime-conditional |
-| `param_scanner.py` | Generic 2D parameter sweep framework with heatmap visualization |
+| `data.py` | Loads B3 data from SQLite; downloads CDI (BCB) and IBOV/ETFs (Yahoo) |
+| `shared_data.py` | Builds the shared frame bundle (`ret`, `log_ret`, `adj_close`, `adtv`, `f_*`, regime flags…) consumed by every strategy |
+| `simulation.py` | Tax-aware multi-asset simulator (CGT, loss carryforward, slippage, margin, R$20k exemption) |
+| `signal_dsl.py` | Safe `ast`-parsed expression interpreter for factor signals |
+| `config_strategy.py` / `spec_loader.py` | YAML `rank_and_hold` / `fixed_weight` engines + spec auto-discovery |
+| `strategy_base.py` / `strategy_registry.py` | Plugin base class + auto-discovery registry |
+| `metrics.py` | Sharpe, Calmar, max drawdown, annualised return/vol at any frequency |
+| `portfolio_opt.py` | Equal-weight, inverse-vol, ERC, HRP, rolling-Sharpe, regime-conditional weights |
+| `strategy_returns.py` | Runs the core strategies in one call → monthly after-tax return frame |
+| `plotting.py` / `param_scanner.py` | Dark-theme tear sheets; generic 2D parameter-sweep heatmaps |
 
-### Quick Start
-
-```bash
-# Install backtesting dependencies
-pip install -r requirements.txt
-
-# Run the portfolio comparison dashboard (all 7 optimization methods)
-cd backtests && python portfolio_compare_all.py
-
-# Run sub-period stability analysis
-cd backtests && python portfolio_stability_analysis.py
-
-# Run parameter sensitivity heatmaps
-cd backtests && python param_sensitivity_analysis.py
-```
-
-### Building a Custom Portfolio
+### Portfolio construction example
 
 ```python
 from core.strategy_returns import build_strategy_returns
 from core.portfolio_opt import hrp_weights, compute_portfolio_returns
 from core.metrics import build_metrics
 
-# Load all 8 strategy return streams + IBOV/CDI benchmarks
 returns_df, sim_results, regime_signals = build_strategy_returns()
-
-# Select liquid strategies (ADTV >= R$1M)
 liquid = [c for c in returns_df.columns if c not in ("IBOV", "CDI", "SmallcapMom")]
-
-# Build an HRP-weighted portfolio
-port_ret, weights_df = compute_portfolio_returns(
-    returns_df, liquid, lambda w: hrp_weights(w, 36)
-)
-
-# Check performance
+port_ret, weights = compute_portfolio_returns(returns_df, liquid, lambda w: hrp_weights(w, 36))
 print(build_metrics(port_ret, "My HRP Portfolio", 12))
 ```
 
-### Available Strategies
-
-**Stock-selection signals:** Momentum (12M), Smooth Momentum / Sharpe, Low Volatility, MultiFactor (mom + low-vol), Research MultiFactor (5 factors + regime), Smallcap Momentum, Anti-Lottery, Frog-in-the-Pan, Volume Breakout, Mean Reversion, Dividend Yield, and more.
-
-**Regime/allocation filters:** COPOM easing/tightening, IBOV trend (10M SMA), IBOV volatility percentile, dual momentum, global flight (IBOV vs IVVB11).
-
-**Portfolio optimization methods:** Equal Weight, Inverse Volatility, Equal Risk Contribution (ERC), Hierarchical Risk Parity (HRP), Rolling Sharpe, Regime-Conditional, and Combined (regime budget + rolling Sharpe within equity).
-
-### Research Scripts
-
-| Script | Description |
-|--------|-------------|
-| `compare_all.py` | Side-by-side comparison of all individual strategies |
-| `correlation_matrix.py` | Strategy return correlation heatmap |
-| `portfolio_risk_parity_backtest.py` | Equal-weight vs inverse-vol vs ERC |
-| `portfolio_hrp_backtest.py` | Hierarchical Risk Parity + dendrogram |
-| `portfolio_dynamic_backtest.py` | Rolling Sharpe, regime, and combined dynamic allocation |
-| `portfolio_compare_all.py` | All 7 portfolio methods: 4-panel dashboard + CSV export |
-| `portfolio_stability_analysis.py` | Sub-period metrics (4 eras) + rolling 36-month Sharpe |
-| `param_sensitivity_analysis.py` | 2D parameter sweep heatmaps for key strategies |
-| `seasonal_effects_backtest.py` | Turn-of-month, monthly seasonality, Dec/Jan, Sell-in-May |
-| `earnings_proxy_backtest.py` | Volume-confirmed momentum around B3 reporting windows |
-| `sector_rotation_backtest.py` | Sector-level momentum with heuristic ticker classification |
-
-## Feature Discovery Engine
-
-The `research/discovery/` module is an **automatic feature discovery engine** that generates, evaluates, and ranks hundreds of candidate alpha features using Information Coefficient (IC) analysis. It replaces manual feature selection with a systematic pipeline that sweeps across signal categories, applies mathematical operators, and prunes the result set to a compact, uncorrelated feature catalog.
-
-### Quick Start
+### Runnable research scripts (`backtests/`)
 
 ```bash
-# Full run (generates all features, evaluates, prunes, exports catalog + plots)
-python -m research.discovery.main
+cd backtests
+python portfolio_compare_all.py          # all portfolio methods: 4-panel dashboard + CSV
+python portfolio_risk_parity_backtest.py # equal-weight vs inverse-vol vs ERC
+python portfolio_hrp_backtest.py         # Hierarchical Risk Parity + dendrogram
+python portfolio_dynamic_backtest.py     # rolling-Sharpe / regime / combined allocation
+python portfolio_stability_analysis.py   # sub-period metrics + rolling 36-month Sharpe
+python sp500_b3_index.py                 # SP500-style market-cap B3 index reconstruction
+python validate_mean_rev_composite.py    # parity check for the mean-reversion composite
+```
 
-# Incremental run (skips already-computed features and evaluations)
-python -m research.discovery.main --incremental
+## Feature discovery engine
 
-# Force recompute (wipes feature store and starts fresh)
+`research/discovery/` automatically generates, evaluates, and ranks hundreds of
+candidate alpha features by **Information Coefficient (IC)** — replacing manual
+factor selection with a systematic sweep-and-prune pipeline.
+
+```bash
+python -m research.discovery.main                 # full run: generate → evaluate → prune → export
+python -m research.discovery.main --incremental   # skip already-computed features
 python -m research.discovery.main --force-recompute
+python -m research.discovery.main --no-fundamentals
 ```
 
-### Pipeline Steps
+**How it works.** Level 0 base signals (~15 categories: momentum, volatility,
+volume, beta, skew/kurtosis, illiquidity, mean reversion, market/CDI regime, …)
+across many windows → Level 1 unary transforms (cross-sectional `rank`/`zscore`)
+→ Level 2 composites (`delta`, `ratio_to_mean`, `ratio`, `product` on the
+best features). Each feature is scored by IC (Spearman rank correlation vs
+forward returns at 5/10/20/60-day horizons), then pruned by NaN/variance filter →
+IC threshold → correlation dedup (>0.90) → cap at 500. Computed features and IC
+time-series are cached in `research/feature_store/` (Parquet + a `registry.json`
+with a source-data hash that auto-invalidates on new data), so re-runs are
+incremental.
 
-The discovery pipeline runs 12 steps in sequence:
+**Outputs** land in `research/output/`: a ranked `feature_catalog.json` (consumed
+by backtests via `store:<id>`), a text report, and diagnostic plots (IC bar
+chart, rolling IC time-series, IC decay, turnover scatter, correlation heatmap,
+train/test overfit scatter).
 
-| Step | What Happens |
+## ML research pipeline
+
+`research/main.py` is a separate feature-importance study: it engineers ~19
+price/volume/cross-sectional/regime features, builds binary classification
+targets, trains RandomForest + XGBoost, and compares feature-importance rankings.
+
+```bash
+python -m research.main
+```
+
+## Web UI
+
+A Streamlit app to run every layer from the browser.
+
+```bash
+streamlit run ui/app.py      # or: python run_ui.py
+```
+
+Then open http://localhost:8501.
+
+| Page | Description |
 |------|-------------|
-| 1 | **Load data** from SQLite + IBOV + CDI (reuses `research.data_loader`) |
-| 2 | **Initialize feature store** -- checks data hash, invalidates cache if source data changed |
-| 3 | **Compute universe mask** -- filters to liquid stocks (ADTV >= R$1M, price >= R$1, 200+ days) |
-| 4 | **Generate Level 0 + Level 1** features (base signals + rank/zscore transforms) |
-| 5 | **Evaluate** Level 0+1 features (IC computation across 4 forward horizons) |
-| 6 | **Select top features** for Level 2 generation (top-50 for delta/ratio_to_mean, top-20 for binary ops) |
-| 7 | **Generate Level 2** features (delta, ratio_to_mean, ratio, product operators on top features) |
-| 8 | **Evaluate** Level 2 features |
-| 9 | **Prune** -- NaN filter → IC threshold → correlation dedup → cap at 500 |
-| 10 | **Export feature catalog** JSON for backtest consumption |
-| 11 | **Generate plots** and text report |
-| 12 | **Save feature store** registry |
+| **Pipeline** | DB stats, browse raw COTAHIST files & tables, trigger pipeline runs with live logs |
+| **Backtest Runner** | Pick a registered strategy, configure params via dynamic forms, run in background, view interactive Plotly results |
+| **Dashboard** | Browse saved results, compare strategies side-by-side (equity overlays, correlation matrices) |
+| **Research** | ML feature-importance rankings, model metrics, trigger the research pipeline |
+| **Discovery** | Feature-discovery catalog, IC rankings, and diagnostic charts |
+| **Fundamentals** | Browse CVM fundamentals and point-in-time filings |
 
-### Three-Level Feature Generation
+## Testing
 
-Features are built in layers, each more selective than the last:
-
-```
-Level 0: Base Signals (~120-150 features)
-  Parametric sweep across 15 signal categories with multiple windows each.
-
-Level 1: Unary Transforms (~240-300 features)
-  Apply rank() and zscore() cross-sectionally to every Level 0 signal.
-
-Level 2: Composite Features (variable count)
-  - delta(20) on top-50 features by |IC_IR|
-  - ratio_to_mean(10/20/60) on top-50 features
-  - ratio(A, B) and product(A, B) on top-20 cross-category pairs
+```bash
+make test                                  # full Python suite (pytest)
+python -m pytest tests/test_config_strategy.py   # config-strategy behaviour tests
+make test-rust                             # Rust unit tests
 ```
 
-### Base Signal Categories
-
-| Category | Signals | Windows |
-|----------|---------|---------|
-| Momentum | Return, Distance-to-MA | 1, 2, 3, 5, 10, 15, 20, 30, 60, 120, 250 |
-| Volatility | Rolling vol, ATR, Drawdown | 5, 10, 20, 40, 60, 120 |
-| Volume | Z-score, Ratio | 5, 10, 20, 40, 60 |
-| Beta | Rolling beta vs IBOV | 60, 120, 252 |
-| Skewness | Rolling return skewness | 20, 60, 120 |
-| Kurtosis | Rolling return kurtosis | 20, 60, 120 |
-| Max/Min Return | Extreme single-day returns | 20, 60, 120 |
-| Win-rate | Fraction of positive-return days | 20, 60, 120 |
-| Amihud Illiquidity | abs(return) / volume | 20, 60 |
-| Autocorrelation | Return lag-1 autocorrelation | 20, 60 |
-| Mean Reversion | Normalized distance from rolling mean | 5, 10, 20 |
-| EWM Variants | EWM mean/std of returns | spans: 5, 10, 20, 40 |
-| High-Low Range | Normalized (H-L)/C average | 5, 20, 60 |
-| Market (IBOV) | IBOV return and volatility | 10, 20, 40, 63 |
-| Market (CDI) | CDI cumulative and change | 21, 42, 63, 126 |
-
-### IC-Based Evaluation
-
-Every feature is evaluated using **Spearman rank correlation** (Information Coefficient) against forward returns:
-
-```
-IC(t) = spearman_corr(feature_ranks(t), forward_return_ranks(t))
-```
-
-Computed cross-sectionally (across all stocks) for each date, then aggregated:
-
-| Metric | Description |
-|--------|-------------|
-| `mean_ic` | Average IC across all dates |
-| `ic_ir` | IC Information Ratio = mean_ic / ic_std (primary ranking metric) |
-| `ic_t_stat` | Statistical significance of IC |
-| `pct_positive_ic` | Fraction of dates with IC > 0 |
-| `mean_ic_5y` | Mean IC over last 5 years (recency check) |
-| `turnover` | 1 - avg rank autocorrelation (trading cost proxy) |
-| `decay_1d/5d/20d` | IC at lagged feature values (signal persistence) |
-| `train/test split` | Separate IC on first 70% vs last 30% of dates (overfit detection) |
-
-**Forward return horizons**: 5, 10, 20, and 60 trading days.
-
-### Pruning Pipeline
-
-After evaluation, features pass through four filters:
-
-1. **NaN/Variance filter** -- Drop features with > 30% NaN rate or zero variance on > 10% of dates
-2. **IC threshold** -- Drop features where |mean_ic| < 0.005 on the 20-day horizon
-3. **Correlation deduplication** -- If two features have Spearman correlation > 0.90, keep the one with higher |IC_IR|
-4. **Cap enforcement** -- Keep top 500 features by |IC_IR| if more remain
-
-### Feature Store
-
-Computed features and evaluations are persisted for incremental re-runs:
-
-```
-research/feature_store/
-├── registry.json              # Feature metadata + evaluation summaries
-├── features/                  # One Parquet file per feature (long format: date, ticker, value)
-└── evaluations/
-    └── ic_timeseries.parquet  # Consolidated IC time series for all features
-```
-
-The registry tracks a **data hash** of the source data. If the underlying price data changes (e.g., new trading days added), the store is automatically invalidated and all features are recomputed.
-
-### Output Artifacts
-
-After a full run, the pipeline produces:
-
-```
-research/output/
-├── feature_catalog.json               # Ranked feature catalog for backtest consumption
-├── discovery_report.txt               # Text report with top features and category breakdown
-├── discovery_ic_top30.png             # Top 30 features by IC_IR (bar chart)
-├── discovery_ic_timeseries.png        # Rolling 1-year IC for top 10 features (line chart)
-├── discovery_ic_decay.png             # IC decay across top 20 features
-├── discovery_turnover_scatter.png     # IC vs turnover trade-off scatter
-├── discovery_correlation_heatmap.png  # Hierarchical clustering of feature correlations
-└── discovery_train_test_scatter.png   # Train vs test IC (overfit detection)
-```
-
-#### Feature Catalog JSON
-
-The catalog is designed for consumption by the backtest framework:
-
-```json
-{
-  "generated_at": "2026-03-02T...",
-  "evaluation_horizon": "fwd_20d",
-  "features": [
-    {
-      "id": "ratio__Return_60d__Rolling_vol_60d",
-      "rank": 1,
-      "formula_human": "ratio(Return_60d, Rolling_vol_60d)",
-      "category": "composite",
-      "mean_ic": 0.045,
-      "ic_ir": 1.23,
-      "turnover": 0.12
-    }
-  ]
-}
-```
-
-### Module Structure
-
-```
-research/discovery/
-├── __init__.py        # Module definition
-├── config.py          # All configuration constants (windows, thresholds, paths)
-├── base_signals.py    # 15 signal category compute functions + parametric sweep generator
-├── operators.py       # Unary (rank, zscore, delta, ratio_to_mean) + binary (ratio, product) operators
-├── generator.py       # Three-level feature generation pipeline
-├── evaluator.py       # Vectorized IC computation, decay, turnover analysis
-├── store.py           # Parquet + JSON feature store with data hash validation
-├── pruning.py         # NaN filter, IC threshold, correlation dedup, cap enforcement
-├── catalog.py         # JSON catalog export with human-readable formula parsing
-├── report.py          # Text report generation
-├── plots.py           # 6 discovery plots (IC bar, timeseries, decay, scatter, heatmap, train/test)
-└── main.py            # Pipeline orchestrator with CLI argument parsing
-```
+The `tests/` suite covers the parser, corporate actions, CVM ingestion (PIT,
+storage, historical), the config-strategy engines, the data loader, and the
+discovery core.
 
 ## License
 
