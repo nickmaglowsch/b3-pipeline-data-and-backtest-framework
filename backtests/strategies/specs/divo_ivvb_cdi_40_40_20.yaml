@@ -1,0 +1,11 @@
+name: DIVO11 / IVVB11 / CDI (40/40/20)
+description: >-
+  Quarterly-rebalanced 40% DIVO11 (B3 dividend ETF), 40% IVVB11 (S&P 500 in
+  BRL), 20% CDI (cash). Each ETF's weight parks in CDI before it lists.
+kind: fixed_weight
+rebalance: QE
+park_in_cdi_until_live: true
+sleeves:
+  - {ticker: DIVO11.SA, weight: 0.40}
+  - {asset: CDI,        weight: 0.20}
+  - {ticker: IVVB11.SA, weight: 0.40}

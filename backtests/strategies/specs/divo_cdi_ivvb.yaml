@@ -1,0 +1,11 @@
+name: DIVO11 / CDI / IVVB11 (thirds)
+description: >-
+  Quarterly-rebalanced equal thirds: 1/3 DIVO11 (B3 dividend ETF), 1/3 CDI
+  (cash), 1/3 IVVB11 (S&P 500 in BRL). Both ETFs from Yahoo.
+kind: fixed_weight
+rebalance: QE
+park_in_cdi_until_live: true
+sleeves:
+  - {ticker: DIVO11.SA, weight: 0.3333333333333333}
+  - {asset: CDI,        weight: 0.3333333333333333}
+  - {ticker: IVVB11.SA, weight: 0.3333333333333333}

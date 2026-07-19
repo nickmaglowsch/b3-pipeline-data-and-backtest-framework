@@ -1,0 +1,17 @@
+name: MultiFactor
+description: >-
+  Multifactor (always invested). Composite = 0.5 * momentum_rank +
+  0.5 * low_vol_rank. Top decile of eligible liquid universe.
+kind: rank_and_hold
+rebalance: ME
+warmup_pad: 2
+universe:
+  min_adtv: 1000000
+  min_price: 1.0
+composite:
+  - {factor: momentum, lookback: 12, shift: 1, weight: 0.5}
+  - {factor: low_vol,  lookback: 12, shift: 1, weight: 0.5}
+selection:
+  top_pct: 0.10
+  min_names: 5
+weighting: equal

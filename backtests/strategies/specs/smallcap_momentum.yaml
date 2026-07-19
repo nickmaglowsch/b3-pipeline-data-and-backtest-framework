@@ -1,0 +1,20 @@
+name: SmallcapMom
+description: >-
+  Smallcap Momentum. Selects below-median-ADTV stocks (small caps) ranked by
+  6-month momentum, top 20%. Uses low ADTV threshold (default R$100K).
+  WARNING: historically experienced bankruptcy losses (2009).
+kind: rank_and_hold
+rebalance: ME
+warmup_pad: 2
+universe:
+  min_adtv: 100000
+  min_price: 1.0
+  smallcap_below_median: true
+signal:
+  factor: momentum
+  lookback: 6
+  shift: 1
+selection:
+  top_pct: 0.20
+  min_names: 5
+weighting: equal

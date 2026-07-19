@@ -71,6 +71,10 @@ class StrategyRegistry:
                     except Exception as e:
                         logger.warning("Failed to instantiate strategy %s.%s: %s", modname, attr_name, e)
 
+        # Config-driven strategies from backtests/strategies/specs/*.yaml
+        from backtests.core.spec_loader import load_specs
+        load_specs(self)
+
 
 # ── Global singleton ──────────────────────────────────────────────────────────
 

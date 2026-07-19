@@ -1,0 +1,29 @@
+name: AdaptiveLowVol
+description: >-
+  Volatility-Regime Adaptive Low Volatility. Blended low-vol signal; the top
+  percentile adapts to the CDI easing / IBOV-vol-stress regime
+  (calm+easing 15%, calm+tight 10%, stress+easing 5%, stress+tight -> 100% CDI).
+kind: rank_and_hold
+rebalance: ME
+warmup_pad: 1
+universe:
+  min_adtv: 1000000
+  min_price: 1.0
+signal:
+  factor: blended_vol
+  lookback: 12
+selection:
+  top_pct: 0.10
+  min_names: 5
+weighting: equal
+regime:
+  add_ibov: true
+  park_when_too_few: true
+  inputs:
+    easing:   {flag: is_easing, offset: 0}
+    stressed: {flag: ibov_vol_pctrank, offset: 1, gt: 0.70}
+  rules:
+    - {easing: true,  stressed: false, top_pct: 0.15}
+    - {easing: false, stressed: false, top_pct: 0.10}
+    - {easing: true,  stressed: true,  top_pct: 0.05}
+    - {default: true, park: true}
