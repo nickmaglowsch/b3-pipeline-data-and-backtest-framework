@@ -1,0 +1,16 @@
+name: QDL / IVVB11 / CDI (thirds)
+description: >-
+  Equal thirds, quarterly-rebalanced: 1/3 QDL (defensive dividend low-vol B3
+  sleeve with a built-in CDI vol-target overlay), 1/3 IVVB11 (S&P 500 in BRL,
+  Yahoo), 1/3 CDI (cash at the high local real rate). QDL adds Brazil
+  defensive equity + self-de-risking, IVVB11 adds USD/global equity, CDI
+  anchors. Before a sleeve is live (IVVB11 pre-2014, or QDL parked) its weight
+  sits in CDI.
+kind: fixed_weight
+rebalance: QE
+needs_fundamentals: true
+park_in_cdi_until_live: true
+sleeves:
+  - {strategy: QDL,     weight: 0.3333333333333333}
+  - {ticker: IVVB11.SA, weight: 0.3333333333333333}
+  - {asset: CDI,        weight: 0.3333333333333333}

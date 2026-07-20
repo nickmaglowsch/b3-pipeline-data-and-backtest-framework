@@ -282,12 +282,16 @@ class RankAndHold(StrategyBase):
 
 class FixedWeight(StrategyBase):
     """Constant-weight sleeves rebalanced on the grid. Sleeves are B3/Yahoo
-    tickers (downloaded) or the special asset ``CDI``. Generic version of
+    tickers (downloaded), the special asset ``CDI``, or another registered
+    ``strategy`` (its whole book becomes one sleeve). Generic version of
     divo_cdi_ivvb.py:55-86."""
 
     def __init__(self, spec: dict) -> None:
         self.spec = spec
-        self.needs_fundamentals = False
+        # A strategy sleeve may need CVM fundamentals; the spec declares it so
+        # the service loads them (can't query the registry here — we're being
+        # constructed *inside* registry discovery).
+        self.needs_fundamentals = bool(spec.get("needs_fundamentals", False))
 
     @property
     def name(self) -> str:
@@ -328,6 +332,22 @@ class FixedWeight(StrategyBase):
             weight = float(sleeve["weight"])
             if sleeve.get("asset") == "CDI":
                 tw["CDI_ASSET"] += weight
+                continue
+            if "strategy" in sleeve:
+                # Nest a registered strategy as one sleeve: run it, scale its
+                # target weights by this sleeve's weight, and fold them into the
+                # blend. Its own assets (stocks, CDI_ASSET) already share the
+                # blend's return matrix, so no new return streams are needed.
+                from backtests.core.strategy_registry import get_registry
+                sub = get_registry().get(sleeve["strategy"])
+                sub_params = {**sub.get_default_parameters(), **params}
+                _, tw_sub = sub.generate_signals(shared_data, sub_params)
+                for col in tw_sub.columns:
+                    if col not in tw.columns:
+                        tw[col] = 0.0
+                    if col not in r.columns:
+                        r[col] = shared_data["cdi_monthly"] if col == "CDI_ASSET" else 0.0
+                    tw[col] = tw[col] + weight * tw_sub[col].reindex(tw.index).fillna(0.0)
                 continue
             ticker = sleeve["ticker"]
             col = ticker.split(".")[0]
