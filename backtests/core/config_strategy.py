@@ -282,12 +282,16 @@ class RankAndHold(StrategyBase):
 
 class FixedWeight(StrategyBase):
     """Constant-weight sleeves rebalanced on the grid. Sleeves are B3/Yahoo
-    tickers (downloaded) or the special asset ``CDI``. Generic version of
+    tickers (downloaded), the special asset ``CDI``, or another registered
+    ``strategy`` (its whole book becomes one sleeve). Generic version of
     divo_cdi_ivvb.py:55-86."""
 
     def __init__(self, spec: dict) -> None:
         self.spec = spec
-        self.needs_fundamentals = False
+        # A strategy sleeve may need CVM fundamentals; the spec declares it so
+        # the service loads them (can't query the registry here — we're being
+        # constructed *inside* registry discovery).
+        self.needs_fundamentals = bool(spec.get("needs_fundamentals", False))
 
     @property
     def name(self) -> str:
@@ -329,9 +333,30 @@ class FixedWeight(StrategyBase):
             if sleeve.get("asset") == "CDI":
                 tw["CDI_ASSET"] += weight
                 continue
+            if "strategy" in sleeve:
+                # Nest a registered strategy as one sleeve: run it, scale its
+                # target weights by this sleeve's weight, and fold them into the
+                # blend. Its own assets (stocks, CDI_ASSET) already share the
+                # blend's return matrix, so no new return streams are needed.
+                from backtests.core.strategy_registry import get_registry
+                sub = get_registry().get(sleeve["strategy"])
+                sub_params = {**sub.get_default_parameters(), **params}
+                _, tw_sub = sub.generate_signals(shared_data, sub_params)
+                for col in tw_sub.columns:
+                    if col not in tw.columns:
+                        tw[col] = 0.0
+                    if col not in r.columns:
+                        r[col] = shared_data["cdi_monthly"] if col == "CDI_ASSET" else 0.0
+                    tw[col] = tw[col] + weight * tw_sub[col].reindex(tw.index).fillna(0.0)
+                continue
             ticker = sleeve["ticker"]
             col = ticker.split(".")[0]
-            px = download_benchmark(ticker, start, end).reindex(ret.index, method="ffill")
+            px_daily = download_benchmark(ticker, start, end)
+            # Stash the daily ETF returns so the daily NAV reconstruction
+            # (metrics.strategy_daily_values) can mark this sleeve intra-period;
+            # the rebalance-cadence `r[col]` below can't reveal its drawdown.
+            shared_data.setdefault("_daily_asset_ret", {})[col] = px_daily.pct_change()
+            px = px_daily.reindex(ret.index, method="ffill")
             r[col] = px.pct_change().fillna(0.0)
             tw[col] = weight
             etf_cols.append(col)
@@ -344,5 +369,15 @@ class FixedWeight(StrategyBase):
             live = (r[etf_cols] != 0).all(axis=1).cummax()   # baseline_thirds.py:70-71
             tw.loc[~live, etf_cols + ["CDI_ASSET"]] = 0.0
             tw.loc[~live, "CDI_ASSET"] = 1.0
+
+        # Park any residual on live rows into CDI so weights always sum to 1.
+        # A nested `strategy` sleeve emits all-zero weights during its own warmup
+        # (fundamentals/EWMA), leaving its share unallocated; run_simulation does
+        # NOT hold uninvested cash (NAV = sum of positions, simulation.py:347-350),
+        # so that share would be vaporized every rebalance — compounding a fake
+        # drawdown (a 50/50 blend bled 100k -> 26k through the sleeve warmup).
+        live_rows = tw.abs().sum(axis=1) > 0
+        resid = (1.0 - tw.sum(axis=1)).clip(lower=0.0)
+        tw.loc[live_rows, "CDI_ASSET"] = tw.loc[live_rows, "CDI_ASSET"] + resid[live_rows]
 
         return r, tw

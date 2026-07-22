@@ -61,7 +61,7 @@ def _load_cdi() -> pd.Series:
     return cdi
 
 
-def _load_fundamentals(adj_close_index: pd.DatetimeIndex) -> dict:
+def _load_fundamentals(adj_close_index: pd.DatetimeIndex, tickers=None) -> dict:
     """
     Load fundamentals from fundamentals_pit, forward-fill to daily frequency.
 
@@ -87,7 +87,12 @@ def _load_fundamentals(adj_close_index: pd.DatetimeIndex) -> dict:
     }
 
     try:
-        raw = load_all_fundamentals(str(config.DB_PATH), config.START_DATE, config.END_DATE, freq="ME")
+        # tickers -> broadcast root-keyed fundamentals_pit onto full tickers so
+        # they join against adj_close (full-ticker); else every fundamental signal
+        # silently computes on non-matching columns.
+        raw = load_all_fundamentals(
+            str(config.DB_PATH), config.START_DATE, config.END_DATE, freq="ME", tickers=tickers
+        )
     except Exception as e:
         print(f"  [fundamentals] No fundamentals data found — skipping. ({e})")
         return _EMPTY
@@ -166,7 +171,7 @@ def load_all_data(use_fundamentals: bool = True) -> dict:
 
     # Load fundamentals (local SQLite + cache — not a download, run outside executor)
     if use_fundamentals:
-        fundamentals = _load_fundamentals(adj_close.index)
+        fundamentals = _load_fundamentals(adj_close.index, adj_close.columns)
     else:
         fundamentals = {
             "f_revenue": pd.DataFrame(),

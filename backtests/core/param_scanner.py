@@ -28,7 +28,8 @@ for _p in [_PROJECT_ROOT, _BACKTESTS_DIR]:
         sys.path.insert(0, _p)
 
 from core.simulation import run_simulation
-from core.metrics import build_metrics, value_to_ret
+from core.metrics import build_metrics, value_to_ret, strategy_daily_values
+from core.strategy_base import dedup_target_weights
 
 try:
     from core.plotting import PALETTE
@@ -90,6 +91,7 @@ def scan_parameters(
 
         try:
             ret_matrix, target_weights = signal_fn(params, shared_data)
+            target_weights = dedup_target_weights(target_weights, shared_data["adtv"])
             result = run_simulation(
                 returns_matrix=ret_matrix.fillna(0.0),
                 target_weights=target_weights,
@@ -106,7 +108,10 @@ def scan_parameters(
             if len(at_ret) < 12:
                 raise ValueError("Too few periods in result")
 
-            m = build_metrics(at_ret, param_str, 12)
+            daily_vals = strategy_daily_values(
+                shared_data, target_weights, sim_config.get("capital", 100_000)
+            )
+            m = build_metrics(at_ret, param_str, 12, daily_values=daily_vals)
             turnover_series = result.get("turnover", pd.Series(dtype=float))
             avg_turnover = float(turnover_series.mean()) if len(turnover_series) > 0 else 0.0
 

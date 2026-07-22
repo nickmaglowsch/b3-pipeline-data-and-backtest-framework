@@ -609,20 +609,41 @@ def load_fundamentals_pit(
     return wide
 
 
+def _broadcast_roots_to_tickers(df: pd.DataFrame, tickers) -> pd.DataFrame:
+    """Broadcast a root-keyed (4-char company) fundamentals frame onto full
+    tickers: each company's value is copied to every ticker sharing its root
+    (e.g. PETR -> PETR3, PETR4). Company-level metrics (net income, equity, …)
+    apply to all share classes, so this is the correct projection and matches the
+    full-ticker keying of the _m / _dyn frames. Empty in -> empty out."""
+    if df is None or df.empty:
+        return pd.DataFrame() if df is None else df
+    roots = [str(t)[:4] for t in tickers]
+    out = df.reindex(columns=roots)          # dup roots -> repeated columns
+    out.columns = pd.Index(list(tickers))
+    return out
+
+
 def load_all_fundamentals(
     db_path: str,
     start: str,
     end: str,
     freq: str = "ME",
+    tickers=None,
 ) -> dict:
     """
     Load all fundamentals metrics and return them as a dict of wide DataFrames.
+
+    fundamentals_pit is keyed by 4-char company **root**. When ``tickers`` is
+    given, each frame is broadcast onto the full tickers sharing that root so it
+    joins directly against the full-ticker price/return matrix; without it the
+    frames stay root-keyed — a footgun that silently fails to join (bit
+    ValueQuality + the research discovery path). Callers that have a ticker
+    universe (build_shared_data, research.data_loader) should pass it.
 
     Returns:
         dict with keys matching _FUNDAMENTALS_METRICS:
         {"revenue": df, "net_income": df, "ebitda": df, "total_assets": df,
          "equity": df, "net_debt": df, "shares_outstanding": df}
-        Each df has DatetimeIndex (rebalance dates) and ticker columns.
         Ratio columns (pe_ratio, pb_ratio, ev_ebitda) are excluded — compute dynamically.
     """
     result = {}
@@ -633,6 +654,8 @@ def load_all_fundamentals(
             import warnings
             warnings.warn(f"Failed to load fundamentals metric '{metric}': {e}")
             result[metric] = pd.DataFrame()
+    if tickers is not None:
+        result = {m: _broadcast_roots_to_tickers(df, tickers) for m, df in result.items()}
     return result
 
 

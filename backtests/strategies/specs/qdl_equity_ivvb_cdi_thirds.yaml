@@ -1,0 +1,15 @@
+name: QDL-Equity / IVVB11 / CDI (thirds)
+description: >-
+  Equal thirds, quarterly-rebalanced: 1/3 QDL-Equity (the QDL quality-dividend
+  low-vol sleeve, always fully invested — CDI overlay OFF), 1/3 IVVB11 (S&P 500
+  in BRL, Yahoo), 1/3 CDI (cash). Sister of "QDL / IVVB11 / CDI (thirds)" with
+  the overlay-off sleeve, so the only CDI is the explicit third. Before a sleeve
+  is live (IVVB11 pre-2014) its weight sits in CDI.
+kind: fixed_weight
+rebalance: QE
+needs_fundamentals: true
+park_in_cdi_until_live: true
+sleeves:
+  - {strategy: QDL-Equity, weight: 0.3333333333333333}
+  - {ticker: IVVB11.SA,    weight: 0.3333333333333333}
+  - {asset: CDI,           weight: 0.3333333333333333}
