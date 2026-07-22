@@ -299,6 +299,21 @@ def run_simulation(
 
     initialized = False
 
+    # Contract guard: NAV is defined as the sum of position values and this engine
+    # does NOT hold uninvested cash. So any live rebalance row whose target weights
+    # sum to < 1 has that gap silently dropped from NAV — a fake drawdown that
+    # compounds every rebalance. Warn loudly rather than fail silently; strategies
+    # must park the residual in CDI_ASSET. (Rows that sum to 0 are held; rows > 1
+    # are the separate leverage case, not flagged here.)
+    _row_sums = target_weights.fillna(0.0).sum(axis=1)
+    _under = (_row_sums > 1e-9) & (_row_sums < 1.0 - 1e-4)
+    if bool(_under.any()):
+        _off = _under[_under].index
+        print(f"\n⚠️  {name}: {len(_off)} live rebalance row(s) with target weights "
+              f"summing < 1 (first {_off[0].date()}, sum={_row_sums.loc[_off[0]]:.3f}); "
+              f"run_simulation drops that uninvested weight from NAV (fake drawdown). "
+              f"Park the residual in CDI_ASSET.")
+
     for i in range(len(returns_matrix)):
         date = returns_matrix.index[i]
 

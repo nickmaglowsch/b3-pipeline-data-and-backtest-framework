@@ -25,6 +25,7 @@ from backtests.core.strategy_base import (
     COMMON_MIN_ADTV,
     COMMON_REBALANCE_FREQ,
     COMMON_MONTHLY_SALES_EXEMPTION,
+    keep_most_liquid_per_root,
 )
 
 
@@ -162,24 +163,26 @@ class ValueQualityStrategy(StrategyBase):
             else:
                 value_rank = pd.Series(dtype=float)
 
-            # Quality: higher ROE = higher rank
+            # Quality: higher ROE = higher rank. f_net_income/f_equity are now
+            # broadcast to full tickers by load_all_fundamentals, so they align
+            # with the value leg and ret directly.
             if not roe_row.empty:
                 quality_rank = roe_row.rank(pct=True)
             else:
                 quality_rank = pd.Series(dtype=float)
 
             # ── Composite rank ─────────────────────────────────────────────────
-            if not value_rank.empty and not quality_rank.empty:
-                all_tickers = value_rank.index.union(quality_rank.index)
-                vr = value_rank.reindex(all_tickers)
-                qr = quality_rank.reindex(all_tickers)
-                composite = vr.multiply(pb_weight).add(qr.multiply(roe_weight))
-            elif not value_rank.empty:
-                composite = value_rank
-            elif not quality_rank.empty:
-                composite = quality_rank
-            else:
+            # Weighted sum of the available legs. A plain vr*w + qr*w would be NaN
+            # for any ticker missing either leg (and both legs rarely cover the
+            # same tickers), which previously emptied the whole selection.
+            parts = []
+            if not value_rank.empty:
+                parts.append(value_rank.multiply(pb_weight))
+            if not quality_rank.empty:
+                parts.append(quality_rank.multiply(roe_weight))
+            if not parts:
                 continue
+            composite = pd.concat(parts, axis=1).sum(axis=1, min_count=1)
 
             # ── Liquidity and price filter ─────────────────────────────────────
             if not adtv.empty and prev_dt in adtv.index:
@@ -195,6 +198,10 @@ class ValueQualityStrategy(StrategyBase):
 
             # Only keep tickers that are actually in ret columns
             composite = composite[composite.index.isin(ret.columns)].dropna()
+
+            # ── One ticker per company (most-liquid class) ────────────────────
+            adtv_row = adtv.loc[prev_dt] if (not adtv.empty and prev_dt in adtv.index) else pd.Series(dtype=float)
+            composite = keep_most_liquid_per_root(composite, adtv_row)
 
             if len(composite) < 3:
                 continue

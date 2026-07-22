@@ -48,6 +48,57 @@ class ParameterSpec:
         )
 
 
+# ── Selection helpers ─────────────────────────────────────────────────────────
+
+def keep_most_liquid_per_root(scores: pd.Series, adtv_row: pd.Series) -> pd.Series:
+    """Collapse multi-share-class companies to a single ticker before ranking.
+
+    For each 4-char company root, keep only the ticker with the highest ADTV
+    (e.g. PETR4 over PETR3). Company fundamentals are now broadcast onto every
+    share class, so without this a fundamentals ranker could select PETR3 AND
+    PETR4 as two "separate" names — double exposure to one company. Ties and
+    missing-ADTV rows fall back to first-seen. Returns ``scores`` unchanged when
+    empty; the returned order is arbitrary (callers re-sort via nlargest/nsmallest).
+    """
+    if scores.empty:
+        return scores
+    roots = [str(t)[:4] for t in scores.index]
+    liq = adtv_row.reindex(scores.index).fillna(-1.0)   # unknown ADTV -> lowest
+    keep = liq.groupby(roots).idxmax()                  # one ticker per root
+    return scores.loc[keep.values]
+
+
+def dedup_target_weights(tw: pd.DataFrame, adtv: pd.DataFrame) -> pd.DataFrame:
+    """Global safety net applied to EVERY strategy's target weights before the sim.
+
+    For each rebalance row, weights on tickers sharing a 4-char company root
+    (e.g. PETR3 + PETR4) are merged onto that row's highest-ADTV ticker, so no
+    company is ever held via two share classes. Merging (not dropping) preserves
+    the row's weight sum — no vaporized weight. Special assets like CDI_ASSET /
+    IBOV have unique roots and are never touched. No-op when a strategy already
+    holds one ticker per company (e.g. rankers that pre-dedup their pool).
+    """
+    groups: dict[str, list] = {}
+    for c in tw.columns:
+        groups.setdefault(str(c)[:4], []).append(c)
+    dup_groups = {r: cols for r, cols in groups.items() if len(cols) > 1}
+    if not dup_groups:
+        return tw
+
+    out = tw.copy()
+    for cols in dup_groups.values():
+        sub = out[cols]
+        multi = (sub != 0).sum(axis=1) > 1          # rows holding >1 class of this company
+        for dt in out.index[multi]:
+            held = sub.loc[dt]
+            held = held[held != 0]
+            liq = adtv.loc[dt, held.index] if dt in adtv.index else pd.Series(dtype=float)
+            keep = liq.reindex(held.index).fillna(-1.0).idxmax()
+            out.loc[dt, held.index] = 0.0
+            out.loc[dt, keep] = held.sum()          # consolidate exposure, keep sum
+    return out
+
+
 # ── Common Parameter Specs ────────────────────────────────────────────────────
 # Reusable specs that most strategies include.
 

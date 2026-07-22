@@ -30,6 +30,7 @@ from backtests.core.strategy_base import (
     COMMON_MIN_ADTV,
     COMMON_REBALANCE_FREQ,
     COMMON_MONTHLY_SALES_EXEMPTION,
+    keep_most_liquid_per_root,
 )
 
 
@@ -158,6 +159,10 @@ class LowPEStrategy(StrategyBase):
 
             # ── Only keep tickers in ret.columns ──────────────────────────────
             pe_valid = pe_valid[pe_valid.index.isin(ret.columns)]
+
+            # ── One ticker per company (most-liquid class) ────────────────────
+            adtv_row = adtv.loc[prev_dt] if (not adtv.empty and prev_dt in adtv.index) else pd.Series(dtype=float)
+            pe_valid = keep_most_liquid_per_root(pe_valid, adtv_row)
 
             if len(pe_valid) < min_stocks:
                 continue  # not enough candidates — all weights stay at zero

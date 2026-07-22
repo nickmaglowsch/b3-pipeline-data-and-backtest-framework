@@ -30,6 +30,23 @@ def test_zero_weight_row_after_inception_holds_positions():
     assert res["turnover"].iloc[2] == 0.0
 
 
+def test_underinvested_row_warns():
+    # A live row summing < 1 must warn (its uninvested weight is dropped from NAV).
+    import io, contextlib
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        _run([[0.5, 0.0], [0.5, 0.0]], [[0.0, 0.0], [0.0, 0.0]])
+    assert "summing < 1" in buf.getvalue()
+
+
+def test_fully_invested_row_does_not_warn():
+    import io, contextlib
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        _run([[0.6, 0.4], [0.6, 0.4]], [[0.0, 0.0], [0.0, 0.0]])
+    assert "summing < 1" not in buf.getvalue()
+
+
 def test_initial_deployment_charged_slippage():
     res = _run([[1.0, 0.0], [1.0, 0.0]], [[0.0, 0.0], [0.0, 0.0]], slippage=0.01)
     assert res["aftertax_values"].iloc[0] == pytest.approx(99.0)

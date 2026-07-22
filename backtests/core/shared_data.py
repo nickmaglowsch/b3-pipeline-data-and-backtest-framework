@@ -343,7 +343,10 @@ def build_shared_data(
     # avoid performance regression for strategies that don't need fundamentals.
     if include_fundamentals:
         logger.info("Loading CVM fundamentals data (include_fundamentals=True)...")
-        fundamentals = load_all_fundamentals(db_path, start, end, freq=freq)
+        # Pass the ticker universe so the root-keyed fundamentals_pit frames are
+        # broadcast onto full tickers (else they silently fail to join — the bug
+        # that made ValueQuality never invest).
+        fundamentals = load_all_fundamentals(db_path, start, end, freq=freq, tickers=ret.columns)
         for metric, df_fund in fundamentals.items():
             shared["f_" + metric] = df_fund
         logger.info(f"Added {len(fundamentals)} fundamentals DataFrames with 'f_' prefix")

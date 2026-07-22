@@ -108,6 +108,50 @@ def test_fixed_weight_per_sleeve_parks_dead_etf(monkeypatch):
     assert np.allclose(tw[["DIVO11", "IVVB11", "CDI_ASSET"]].iloc[12:], third)
 
 
+def test_fixed_weight_parks_nested_strategy_warmup_residual(monkeypatch):
+    # A nested `strategy` sleeve emits all-zero weights during its own warmup.
+    # That share must be parked in CDI (weights sum to 1), not left unallocated —
+    # run_simulation vaporizes uninvested weight, faking a compounding drawdown.
+    from backtests.core import strategy_registry as sr
+    from backtests.core.strategy_base import StrategyBase
+
+    idx, shared = _blend_shared()  # tickers A, B
+
+    class _Stub(StrategyBase):
+        @property
+        def name(self): return "_StubSleeve"
+        @property
+        def description(self): return "stub"
+        def get_parameter_specs(self): return []
+        def generate_signals(self, shared_data, params):
+            ret = shared_data["ret"]
+            tw = pd.DataFrame(0.0, index=ret.index, columns=ret.columns)
+            tw.iloc[6:, tw.columns.get_loc("A")] = 1.0   # all-zero warmup, then 100% A
+            return ret, tw
+
+    reg = sr.StrategyRegistry()
+    reg.register(_Stub())
+    monkeypatch.setattr(sr, "get_registry", lambda: reg)
+
+    ivvb = pd.Series(np.nan, index=idx)
+    ivvb.iloc[12:] = np.linspace(100.0, 150.0, len(idx) - 12)  # lists at row 12
+    monkeypatch.setattr(core_data, "download_benchmark", lambda t, s, e: ivvb)
+
+    spec = {
+        "name": "stub blend", "kind": "fixed_weight", "rebalance": "QE",
+        "park_in_cdi_until_live": True,
+        "sleeves": [{"strategy": "_StubSleeve", "weight": 0.5},
+                    {"ticker": "IVVB11.SA", "weight": 0.5}],
+    }
+    _, tw = FixedWeight(spec).generate_signals(shared, {})
+
+    rowsum = tw.sum(axis=1)
+    live = rowsum > 0
+    assert np.allclose(rowsum[live], 1.0), f"live rows must sum to 1, got {rowsum[live].unique()}"
+    # sleeve-warmup + dead ETF -> everything in CDI (nothing vaporized)
+    assert np.allclose(tw["CDI_ASSET"].iloc[:6], 1.0)
+
+
 def test_fixed_weight_all_or_nothing_holds_cdi_until_all_live(monkeypatch):
     idx, shared = _blend_shared()
     bova = pd.Series(np.linspace(50.0, 80.0, len(idx)), index=idx)

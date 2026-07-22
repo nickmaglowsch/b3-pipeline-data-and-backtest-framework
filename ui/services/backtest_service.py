@@ -55,7 +55,8 @@ def run_backtest(strategy_name: str, params: dict) -> dict:
 
     from backtests.core.strategy_registry import get_registry
     from backtests.core.simulation import run_simulation
-    from backtests.core.metrics import build_metrics, value_to_ret
+    from backtests.core.metrics import build_metrics, value_to_ret, strategy_daily_values
+    from backtests.core.strategy_base import dedup_target_weights
 
     registry = get_registry()
     strategy = registry.get(strategy_name)
@@ -81,6 +82,8 @@ def run_backtest(strategy_name: str, params: dict) -> dict:
 
     print(f"[backtest_service] Generating signals for {strategy_name}...")
     ret_matrix, target_weights = strategy.generate_signals(shared, params)
+    # Global: one ticker per company (merge dual-class holdings onto most-liquid).
+    target_weights = dedup_target_weights(target_weights, shared["adtv"])
 
     print("[backtest_service] Running simulation...")
     result = run_simulation(
@@ -104,11 +107,22 @@ def run_backtest(strategy_name: str, params: dict) -> dict:
     pt_ret = value_to_ret(pt_val)
 
     ppy = {"ME": 12, "QE": 4, "W-FRI": 52}.get(freq, 12)
+
+    # Daily mark-to-market paths so Max Drawdown / Calmar see intra-rebalance
+    # lows — the rebalance-cadence equity curve is blind to a mid-period crash
+    # (a quarterly curve can report an -8% max DD through a -37% quarter).
+    w0, w1 = common[0], common[-1]
+    strat_daily = strategy_daily_values(
+        shared, target_weights, float(params.get("initial_capital", 100_000))
+    ).loc[w0:w1]
+    ibov_daily = shared["ibov_px"].loc[w0:w1]                       # prices = NAV path
+    cdi_daily_nav = (1 + shared["cdi_daily"]).cumprod().loc[w0:w1]
+
     metrics = [
-        build_metrics(pt_ret, f"{strategy_name} (Pre-Tax)", ppy),
-        build_metrics(at_ret, f"{strategy_name} (After-Tax)", ppy),
-        build_metrics(ibov_ret.loc[common], "IBOV", ppy),
-        build_metrics(cdi_ret.reindex(common).fillna(0), "CDI", ppy),
+        build_metrics(pt_ret, f"{strategy_name} (Pre-Tax)", ppy, daily_values=strat_daily),
+        build_metrics(at_ret, f"{strategy_name} (After-Tax)", ppy, daily_values=strat_daily),
+        build_metrics(ibov_ret.loc[common], "IBOV", ppy, daily_values=ibov_daily),
+        build_metrics(cdi_ret.reindex(common).fillna(0), "CDI", ppy, daily_values=cdi_daily_nav),
     ]
 
     sharpe_val = metrics[1].get('Sharpe', 'N/A')

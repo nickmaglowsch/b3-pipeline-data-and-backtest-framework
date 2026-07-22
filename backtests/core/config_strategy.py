@@ -351,7 +351,12 @@ class FixedWeight(StrategyBase):
                 continue
             ticker = sleeve["ticker"]
             col = ticker.split(".")[0]
-            px = download_benchmark(ticker, start, end).reindex(ret.index, method="ffill")
+            px_daily = download_benchmark(ticker, start, end)
+            # Stash the daily ETF returns so the daily NAV reconstruction
+            # (metrics.strategy_daily_values) can mark this sleeve intra-period;
+            # the rebalance-cadence `r[col]` below can't reveal its drawdown.
+            shared_data.setdefault("_daily_asset_ret", {})[col] = px_daily.pct_change()
+            px = px_daily.reindex(ret.index, method="ffill")
             r[col] = px.pct_change().fillna(0.0)
             tw[col] = weight
             etf_cols.append(col)
@@ -364,5 +369,15 @@ class FixedWeight(StrategyBase):
             live = (r[etf_cols] != 0).all(axis=1).cummax()   # baseline_thirds.py:70-71
             tw.loc[~live, etf_cols + ["CDI_ASSET"]] = 0.0
             tw.loc[~live, "CDI_ASSET"] = 1.0
+
+        # Park any residual on live rows into CDI so weights always sum to 1.
+        # A nested `strategy` sleeve emits all-zero weights during its own warmup
+        # (fundamentals/EWMA), leaving its share unallocated; run_simulation does
+        # NOT hold uninvested cash (NAV = sum of positions, simulation.py:347-350),
+        # so that share would be vaporized every rebalance — compounding a fake
+        # drawdown (a 50/50 blend bled 100k -> 26k through the sleeve warmup).
+        live_rows = tw.abs().sum(axis=1) > 0
+        resid = (1.0 - tw.sum(axis=1)).clip(lower=0.0)
+        tw.loc[live_rows, "CDI_ASSET"] = tw.loc[live_rows, "CDI_ASSET"] + resid[live_rows]
 
         return r, tw

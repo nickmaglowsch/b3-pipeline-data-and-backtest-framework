@@ -85,8 +85,14 @@ def get_registry() -> StrategyRegistry:
     """Return the global strategy registry, discovering strategies on first call."""
     global _registry
     if _registry is None:
-        _registry = StrategyRegistry()
-        _registry.discover()
+        # Build into a local and publish only after discover() fully succeeds.
+        # If discovery raises partway (e.g. spec loading), we must NOT cache a
+        # half-built registry (plugins-but-no-specs) — that would stick for the
+        # whole process and silently drop every YAML strategy. Leaving _registry
+        # None lets the next call retry cleanly.
+        reg = StrategyRegistry()
+        reg.discover()
+        _registry = reg
     return _registry
 
 

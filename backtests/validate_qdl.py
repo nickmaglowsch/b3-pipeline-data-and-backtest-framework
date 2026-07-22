@@ -23,7 +23,9 @@ from backtests.core.strategy_registry import get_registry
 from backtests.core.data import download_benchmark
 from backtests.core.metrics import (
     ann_return, ann_vol, sharpe, max_dd, calmar, value_to_ret,
+    strategy_daily_values,
 )
+from backtests.core.strategy_base import dedup_target_weights
 
 DB = "b3_market_data.sqlite"
 START, FREQ = "2006-01-01", "QE"
@@ -31,16 +33,26 @@ PPY = {"ME": 12, "QE": 4, "W-FRI": 52}[FREQ]
 END = datetime.today().strftime("%Y-%m-%d")
 
 
-def metrics_row(name: str, values: pd.Series) -> dict:
-    """Full metric set from an equity-value curve."""
+def metrics_row(name: str, values: pd.Series, daily_values: pd.Series | None = None) -> dict:
+    """Full metric set from an equity-value curve.
+
+    Max Drawdown / Calmar use ``daily_values`` (a daily NAV path) when given so
+    they see intra-rebalance lows; otherwise they fall back to the
+    rebalance-cadence curve, which understates drawdown.
+    """
     r = value_to_ret(values)
+    if daily_values is not None and daily_values.dropna().shape[0] > 1:
+        mdd = max_dd(value_to_ret(daily_values.dropna()))
+    else:
+        mdd = max_dd(r)
+    ar = ann_return(r, PPY)
     return {
         "name": name,
-        "ret": round(ann_return(r, PPY) * 100, 2),
+        "ret": round(ar * 100, 2),
         "vol": round(ann_vol(r, PPY) * 100, 2),
         "sharpe": round(sharpe(r, periods_per_year=PPY), 2),
-        "mdd": round(max_dd(r) * 100, 2),
-        "calmar": round(calmar(r, PPY), 2),
+        "mdd": round(mdd * 100, 2),
+        "calmar": round(ar / abs(mdd) if mdd != 0 else 0.0, 2),
     }
 
 
@@ -53,9 +65,13 @@ def print_table(title: str, rows: list[dict]) -> None:
               f"{m['mdd']:>9}{m['calmar']:>8}")
 
 
-def run_strategy(strat, shared, params) -> pd.Series:
-    """Run one strategy -> after-tax equity curve (Series on rebalance dates)."""
+def run_strategy(strat, shared, params):
+    """Run one strategy -> (after-tax cadence curve, daily NAV path).
+
+    The daily path is used only for intra-rebalance-aware drawdown/Calmar.
+    """
     ret_matrix, tw = strat.generate_signals(shared, params)
+    tw = dedup_target_weights(tw, shared["adtv"])   # one ticker per company
     res = run_simulation(
         returns_matrix=ret_matrix.fillna(0.0),
         target_weights=tw,
@@ -65,7 +81,8 @@ def run_strategy(strat, shared, params) -> pd.Series:
         monthly_sales_exemption=20_000.0,
         name=strat.name,
     )
-    return res["aftertax_values"]
+    daily = strategy_daily_values(shared, tw, 100_000.0)
+    return res["aftertax_values"], daily
 
 
 def main() -> None:
@@ -77,25 +94,38 @@ def main() -> None:
             "initial_capital": 100_000.0, "tax_rate": 0.15, "slippage": 0.001,
             "monthly_sales_exemption": 20_000.0}
 
+    # curves = rebalance-cadence NAV; daily_curves = daily NAV path (for
+    # intra-rebalance-aware drawdown/Calmar via metrics_row).
     curves: dict[str, pd.Series] = {}
+    daily_curves: dict[str, pd.Series] = {}
     for nm in ["QDL", "QDL-Equity", "TevaAtivosReais", "BESST Quality"]:
         strat = reg.get(nm)
         p = dict(base)
         p.update(strat.get_default_parameters())
         p.update(base)  # keep our common dates/costs
-        curves[nm] = run_strategy(strat, shared, p)
+        curves[nm], daily_curves[nm] = run_strategy(strat, shared, p)
 
     # DIVO11 buy-hold ETF (Yahoo total-return via auto_adjust); no tax/turnover.
-    divo_px = download_benchmark("DIVO11.SA", START, END).resample(FREQ).last().dropna()
+    divo_daily = download_benchmark("DIVO11.SA", START, END).dropna()
+    divo_px = divo_daily.resample(FREQ).last().dropna()
     curves["DIVO11"] = divo_px / divo_px.iloc[0] * 100_000.0
+    daily_curves["DIVO11"] = divo_daily              # daily prices = daily NAV path
 
     # IBOV reference.
     ibov = (1 + shared["ibov_ret"]).cumprod() * 100_000.0
     curves["IBOV"] = ibov
+    daily_curves["IBOV"] = shared["ibov_px"]         # daily prices = daily NAV path
+
+    def on_daily(nm, idx):  # slice the daily NAV path to a window (no rebase; DD is scale-free)
+        dc = daily_curves.get(nm)
+        if dc is None or dc.dropna().empty or len(idx) == 0:
+            return None
+        return dc.loc[idx[0]:idx[-1]]
 
     # ── Each strategy on its OWN full available window ────────────────────────
     print_table("Own full window (each since first live signal):",
-                [metrics_row(nm, c.dropna()) for nm, c in curves.items()])
+                [metrics_row(nm, c.dropna(), on_daily(nm, c.dropna().index))
+                 for nm, c in curves.items()])
 
     # ── Common overlapping window (strict apples-to-apples) ───────────────────
     common = None
@@ -112,7 +142,8 @@ def main() -> None:
         return s / s.iloc[0] * 100_000.0
 
     order = ["QDL", "QDL-Equity", "TevaAtivosReais", "BESST Quality", "DIVO11", "IBOV"]
-    print_table("Common window:", [metrics_row(nm, on(nm, common)) for nm in order])
+    print_table("Common window:",
+                [metrics_row(nm, on(nm, common), on_daily(nm, common)) for nm in order])
 
     # ── Sub-period stability ──────────────────────────────────────────────────
     subs = [("2011-2015", "2011-01-01", "2015-12-31"),
@@ -123,7 +154,7 @@ def main() -> None:
         if len(idx) < 4:
             continue
         print_table(f"Sub-period {label}:",
-                    [metrics_row(nm, on(nm, idx)) for nm in order])
+                    [metrics_row(nm, on(nm, idx), on_daily(nm, idx)) for nm in order])
 
     # ── QDL parameter sensitivity (one knob at a time; center = a-priori) ─────
     qdl = reg.get("QDL")
@@ -142,8 +173,9 @@ def main() -> None:
             p.update(qdl.get_default_parameters())
             p.update(base)
             p[knob] = v
-            cv = run_strategy(qdl, shared, p)
-            rows.append(metrics_row(f"{knob}={v}", on_series(cv, common)))
+            cv, dv = run_strategy(qdl, shared, p)
+            dv_win = dv.loc[common[0]:common[-1]] if dv is not None and not dv.dropna().empty else None
+            rows.append(metrics_row(f"{knob}={v}", on_series(cv, common), dv_win))
         print_table(f"sweep {knob}:", rows)
 
 

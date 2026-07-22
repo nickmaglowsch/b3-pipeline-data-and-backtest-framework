@@ -1,0 +1,16 @@
+name: QDL-Equity / IVVB11 (50/50)
+description: >-
+  Equal halves, quarterly-rebalanced: 1/2 QDL-Equity (the QDL quality-dividend
+  low-vol sleeve, always fully invested — CDI overlay OFF), 1/2 IVVB11 (S&P 500
+  in BRL, Yahoo). No explicit cash sleeve — a pure B3-defensive / US-in-BRL
+  barbell whose currency exposure is the only hedge. Sister of
+  "QDL-Equity / IVVB11 / CDI (thirds)" with the CDI third redistributed equally
+  across the two risk sleeves. Before IVVB11 is live (pre-2014) its half sits in
+  CDI.
+kind: fixed_weight
+rebalance: QE
+needs_fundamentals: true
+park_in_cdi_until_live: true
+sleeves:
+  - {strategy: QDL-Equity, weight: 0.5}
+  - {ticker: IVVB11.SA,    weight: 0.5}
