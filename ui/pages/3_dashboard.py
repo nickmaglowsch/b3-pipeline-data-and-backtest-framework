@@ -136,6 +136,13 @@ if len(selected_results) == 1:
             tab_eq, tab_dd, tab_tax, tab_met, tab_params = st.tabs([
                 "Equity Curves", "Drawdown", "Tax Detail", "Metrics", "Parameters",
             ])
+            # Buy-in aware, exactly like the Backtest Runner: without these the
+            # equity tab would book every deposit as performance and the DD tab
+            # would show deposits refilling the peak. All None for older results.
+            def _or(key: str, fallback: str):
+                series = data.get(key)
+                return data[fallback] if series is None or series.empty else series
+
             with tab_eq:
                 try:
                     fig = plot_equity_curves(
@@ -143,6 +150,8 @@ if len(selected_results) == 1:
                         data["aftertax_values"],
                         data["ibov_ret"],
                         data.get("cdi_ret"),
+                        contributions=data.get("contributions"),
+                        invested=data.get("invested"),
                     )
                     st.plotly_chart(fig, use_container_width=True)
                 except Exception as e:
@@ -150,8 +159,8 @@ if len(selected_results) == 1:
             with tab_dd:
                 try:
                     fig = plot_drawdown(
-                        data["pretax_values"],
-                        data["aftertax_values"],
+                        _or("pretax_twr", "pretax_values"),
+                        _or("aftertax_twr", "aftertax_values"),
                         data["ibov_ret"],
                         data.get("cdi_ret"),
                     )
@@ -200,7 +209,13 @@ elif len(selected_results) >= 2:
         for r in non_legacy:
             data = store.load_data(r)
             if data and "aftertax_values" in data:
-                curve = data["aftertax_values"]
+                # Prefer the contribution-neutral curve so a DCA run and a lump-sum
+                # run are compared on the same basis (identical without buy-ins).
+                curve = data.get("aftertax_twr")
+                if curve is None or curve.empty:
+                    curve = data["aftertax_values"]
+                if curve.iloc[0] == 0:
+                    continue                       # unfunded start: nothing to normalize
                 curve = curve / curve.iloc[0]
                 # Use a unique key that includes the timestamp to avoid
                 # silently dropping duplicate strategy names (bug #21).

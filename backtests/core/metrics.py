@@ -10,9 +10,20 @@ def cumret(ret: pd.Series) -> pd.Series:
     return (1 + ret).cumprod()
 
 
-def value_to_ret(values: pd.Series) -> pd.Series:
-    """Convert BRL equity curve to simple period returns."""
-    return values.pct_change().fillna(0)
+def value_to_ret(values: pd.Series, contributions: pd.Series | None = None) -> pd.Series:
+    """Convert BRL equity curve to simple period returns.
+
+    With periodic buy-ins (``run_simulation(contribution=...)``) a raw
+    ``pct_change`` reads each deposit as a gain, inflating Return/Vol/Sharpe.
+    Pass the sim's ``contributions`` Series to strip them out and get the
+    time-weighted return: the cash lands *after* the period's returns are
+    applied, so ``V_t - C_t`` is the pre-deposit mark.
+    """
+    if contributions is None:
+        return values.pct_change().fillna(0)
+    c = contributions.reindex(values.index).fillna(0.0)
+    ret = (values - c) / values.shift(1) - 1
+    return ret.replace([np.inf, -np.inf], 0.0).fillna(0)   # inf: zero-capital start
 
 
 def ann_return(ret: pd.Series, periods_per_year: int = 12) -> float:
@@ -75,8 +86,11 @@ def reconstruct_daily_values(
     reb = tw.index
     dr = daily_ret[cols]
 
-    segments = [pd.Series([float(initial_capital)], index=[reb[0]])]
-    nav = float(initial_capital)
+    # Scale-free: this path only feeds ratio metrics (drawdown, Calmar), and a
+    # pure-DCA run starts at 0 — which would flatten it to zeros and print a
+    # fake 0% max DD. Any positive base gives the same ratios.
+    nav = float(initial_capital) or 1.0
+    segments = [pd.Series([nav], index=[reb[0]])]
     for i, d0 in enumerate(reb):
         d1 = reb[i + 1] if i + 1 < len(reb) else dr.index[-1]
         # Trading days strictly after this rebalance, up to and including the

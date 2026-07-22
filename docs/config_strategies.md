@@ -12,6 +12,10 @@ are now **data, not code**. You create one by dropping a YAML file in
 - The engines only build `target_weights`; the shared `run_simulation`
   (`backtests/core/simulation.py`) handles rebalancing, slippage and the
   Brazilian capital-gains tax engine. You never touch that.
+- Periodic buy-ins (`contribution`, BRL/month) are a **run-level knob**, not a
+  spec field — set it in the UI form or on the `run_simulation` call. Every spec
+  gets it for free, and the new cash is allocated by the same rebalance logic
+  (biggest gap to target gets the most). See `backtests/README.md`.
 
 ---
 

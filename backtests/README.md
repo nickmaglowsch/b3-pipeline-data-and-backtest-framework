@@ -83,6 +83,31 @@ target_weights.iloc[i]["PETR4"] = 1.0     # 100% long PETR4
 target_weights.iloc[i]["CDI_ASSET"] = -0.50 # Borrow 50% on margin
 ```
 
+#### Periodic Buy-Ins (Aportes / DCA)
+
+Pass `contribution=<BRL per calendar month>` to `run_simulation` to fund the book
+with recurring deposits instead of a single lump sum. The cash is added to NAV
+right before the rebalance, so the existing target-weight logic allocates it —
+**whatever is farthest below its target absorbs the most new money** — and the
+deposit's trades pay slippage and go through the tax engine like any other buy.
+
+```python
+result = run_simulation(..., initial_capital=100_000, contribution=1_000)
+```
+
+Deposits accrue by calendar month and land on the next rebalance row: `1x` per
+month on `ME`, `3x` at each quarter-end on `QE`, and on the first weekly row of
+each month on `W-FRI`. A row with no valid targets (all-zero weights) holds its
+deposit until the next live rebalance. Negative values are withdrawals, and
+`initial_capital=0` gives a pure DCA run.
+
+NAV now contains deposits, so **returns must be computed with
+`value_to_ret(values, result["contributions"])`** — a plain `pct_change()` books
+every aporte as a gain. The result dict also carries `invested`
+(`initial_capital + cumulative buy-ins`) for the money-in vs money-out view.
+Max Drawdown/Calmar via `strategy_daily_values` are unaffected: that path is
+rebuilt from weights, not from NAV.
+
 #### Rebalance Frequencies
 Because the framework strictly uses Pandas offset aliases (`ME`, `QE`, `W-FRI`), the backtest effortlessly scales from Monthly down to Weekly. If you change frequency, remember to recalculate your `LOOKBACK_PERIODS` (e.g. 1 year lookback = 12 `ME` periods, but 52 `W-FRI` periods).
 

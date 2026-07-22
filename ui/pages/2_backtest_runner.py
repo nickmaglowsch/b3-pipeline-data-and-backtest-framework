@@ -26,6 +26,10 @@ if "last_backtest_result" not in st.session_state:
 
 try:
     from backtests.core.strategy_registry import get_registry
+    from backtests.core.strategy_base import (
+        COMMON_CONTRIBUTION,
+        COMMON_INITIAL_CAPITAL,
+    )
     from ui.services.backtest_service import run_backtest
     from ui.services.result_store import ResultStore
     from ui.components.parameter_form import render_parameter_form, render_reset_button
@@ -83,6 +87,13 @@ st.divider()
 st.subheader("Parameters")
 
 specs = strategy.get_parameter_specs()
+# Starting money and buy-ins are engine-level knobs (run_simulation), so offer
+# them for every strategy without each one having to declare them.
+declared = {s.name for s in specs}
+specs = specs + [
+    s for s in (COMMON_INITIAL_CAPITAL, COMMON_CONTRIBUTION)
+    if s.name not in declared
+]
 
 # Load previous params if same strategy was run
 prev_params = None
@@ -152,6 +163,17 @@ if result and result.get("strategy_name") == selected_name:
 
     st.subheader(f"Results: {result['strategy_name']}")
 
+    contribs = result.get("contributions")
+    invested = result.get("invested")
+    if contribs is not None and float(contribs.abs().sum()) > 0:
+        final_nav = float(result["aftertax_values"].iloc[-1])
+        total_in = float(invested.iloc[-1])
+        cols = st.columns(3)
+        cols[0].metric("Total Invested", f"R$ {total_in:,.0f}")
+        cols[1].metric("Final NAV (after-tax)", f"R$ {final_nav:,.0f}")
+        cols[2].metric("Profit", f"R$ {final_nav - total_in:,.0f}",
+                       f"{(final_nav / total_in - 1) * 100:.1f}%")
+
     tab_equity, tab_dd, tab_tax, tab_metrics = st.tabs([
         "Equity Curves", "Drawdown", "Tax Detail", "Metrics",
     ])
@@ -163,6 +185,8 @@ if result and result.get("strategy_name") == selected_name:
                 result["aftertax_values"],
                 result["ibov_ret"],
                 result.get("cdi_ret"),
+                contributions=contribs,
+                invested=invested,
             )
             st.plotly_chart(fig, use_container_width=True)
         except Exception as e:
@@ -170,9 +194,14 @@ if result and result.get("strategy_name") == selected_name:
 
     with tab_dd:
         try:
+            # Contribution-neutral curves: deposits would otherwise refill the
+            # peak and understate the drawdown (same series when buy-ins are off).
+            # `or`-style .get is wrong here: the key can exist holding None.
+            pt_dd = result.get("pretax_twr")
+            at_dd = result.get("aftertax_twr")
             fig = plot_drawdown(
-                result["pretax_values"],
-                result["aftertax_values"],
+                result["pretax_values"] if pt_dd is None else pt_dd,
+                result["aftertax_values"] if at_dd is None else at_dd,
                 result["ibov_ret"],
                 result.get("cdi_ret"),
             )
