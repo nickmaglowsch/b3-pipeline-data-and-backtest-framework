@@ -1,8 +1,11 @@
 """
 Background Job Runner with Log Streaming
 =========================================
-Runs Python callables in background threads, captures stdout/stderr in real-time
+Runs Python callables on a thread pool, captures stdout/stderr in real-time
 via a queue, and exposes job status + log lines to the Streamlit UI.
+
+Status/result/error are *derived* from the `concurrent.futures.Future`, never
+mirrored into the Job, so there is no state to keep in sync.
 """
 from __future__ import annotations
 
@@ -10,9 +13,9 @@ import io
 import queue
 import sys
 import threading
-import time
 import traceback
 import uuid
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
@@ -22,7 +25,7 @@ from typing import Any, Callable, Optional
 # ── Job Status ────────────────────────────────────────────────────────────────
 
 class JobStatus(Enum):
-    PENDING = "pending"
+    """UI-facing view of a Future's state (see :attr:`Job.status`)."""
     RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
@@ -73,6 +76,9 @@ class _RedirectingStream(io.TextIOBase):
     """
     Proxy for sys.stdout / sys.stderr that routes writes to a per-thread capturing
     stream if one is installed, or to the global original stream otherwise.
+
+    (contextlib.redirect_stdout can't be used here: it is process-global, and jobs
+    need per-thread capture while the terminal keeps receiving everything.)
     """
 
     def __init__(self, name: str, original: Any) -> None:
@@ -101,56 +107,43 @@ class _RedirectingStream(io.TextIOBase):
 
 @dataclass
 class Job:
+    """A submitted callable plus the bits the Future doesn't track: logs and timestamps."""
+
     id: str
     job_type: str
-    status: JobStatus = JobStatus.PENDING
+    future: Optional[Future] = None  # assigned by JobRunner.submit before publishing
     log_lines: list[str] = field(default_factory=list)
     log_queue: "queue.Queue[str]" = field(default_factory=queue.Queue)
-    result: Any = None
-    error: Optional[str] = None
-    started_at: Optional[datetime] = None
+    started_at: datetime = field(default_factory=datetime.now)
     completed_at: Optional[datetime] = None
-    thread: Optional[threading.Thread] = None
-    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
-    def set_running(self) -> None:
-        """Atomically mark the job as running with a start timestamp."""
-        with self._lock:
-            self.started_at = datetime.now()
-            self.status = JobStatus.RUNNING
+    @property
+    def status(self) -> JobStatus:
+        if self.future is None or not self.future.done():
+            return JobStatus.RUNNING
+        return JobStatus.FAILED if self.future.exception() else JobStatus.COMPLETED
 
-    def set_completed(self, result: Any = None) -> None:
-        """Atomically mark the job as completed.
+    @property
+    def result(self) -> Any:
+        return self.future.result() if self.status is JobStatus.COMPLETED else None
 
-        Sets ``completed_at`` *before* ``status`` so that any reader that
-        observes ``COMPLETED`` will always see a non-None ``completed_at``.
-        """
-        with self._lock:
-            self.result = result
-            self.completed_at = datetime.now()
-            self.status = JobStatus.COMPLETED
-
-    def set_failed(self, error: str) -> None:
-        """Atomically mark the job as failed.
-
-        Sets ``completed_at`` *before* ``status`` so that any reader that
-        observes ``FAILED`` will always see a non-None ``completed_at``.
-        """
-        with self._lock:
-            self.error = error
-            self.completed_at = datetime.now()
-            self.status = JobStatus.FAILED
+    @property
+    def error(self) -> Optional[str]:
+        """Formatted traceback of the failure, or None."""
+        if self.status is not JobStatus.FAILED:
+            return None
+        return "".join(traceback.format_exception(self.future.exception()))
 
     def get_snapshot(self) -> dict[str, Any]:
         """Return a consistent snapshot of status, timestamps, and result."""
-        with self._lock:
-            return {
-                "status": self.status,
-                "started_at": self.started_at,
-                "completed_at": self.completed_at,
-                "result": self.result,
-                "error": self.error,
-            }
+        status = self.status  # read once: the job may finish between field reads
+        return {
+            "status": status,
+            "started_at": self.started_at,
+            "completed_at": self.completed_at,
+            "result": self.future.result() if status is JobStatus.COMPLETED else None,
+            "error": self.error if status is JobStatus.FAILED else None,
+        }
 
 
 # ── JobRunner ─────────────────────────────────────────────────────────────────
@@ -176,20 +169,24 @@ def _install_redirectors() -> None:
 class JobRunner:
     """
     Singleton-style job runner stored in st.session_state.
-    Executes callables in background threads and captures their output.
+    Executes callables on a thread pool and captures their output.
     """
 
     def __init__(self) -> None:
         self._jobs: dict[str, Job] = {}
         self._active_by_type: dict[str, str] = {}  # job_type -> job_id
         self._lock = threading.Lock()
+        # ponytail: pool threads are non-daemon (the stdlib joins them at interpreter
+        # exit), unlike the old per-job daemon threads -- Ctrl-C during a long job now
+        # waits for it. Upgrade path if that bites: os._exit() from a SIGINT handler.
+        self._executor = ThreadPoolExecutor(thread_name_prefix="job")
         _install_redirectors()
 
     def submit(
         self, job_type: str, fn: Callable, *args: Any, **kwargs: Any
     ) -> str:
         """
-        Submit a callable to run in a background thread.
+        Submit a callable to run in the background.
 
         Args:
             job_type: Tag (e.g. 'pipeline', 'backtest', 'research').
@@ -205,42 +202,35 @@ class JobRunner:
             existing_id = self._active_by_type.get(job_type)
             if existing_id:
                 existing = self._jobs.get(existing_id)
-                if existing and existing.status == JobStatus.RUNNING:
+                if existing and existing.status is JobStatus.RUNNING:
                     return existing_id
 
             job_id = str(uuid.uuid4())[:8]
             job = Job(id=job_id, job_type=job_type)
+            job.future = self._executor.submit(self._run, job, fn, args, kwargs)
             self._jobs[job_id] = job
             self._active_by_type[job_type] = job_id
-
-        thread = threading.Thread(
-            target=self._run,
-            args=(job, fn, args, kwargs),
-            daemon=True,
-            name=f"job-{job_type}-{job_id}",
-        )
-        job.thread = thread
-        job.set_running()
-        thread.start()
         return job_id
 
-    def _run(
-        self, job: Job, fn: Callable, args: tuple, kwargs: dict
-    ) -> None:
-        """Thread target: runs fn and captures output."""
-        capturing = _CapturingStream(job.log_queue, _stdout_redirector._original if _stdout_redirector else sys.__stdout__)
+    def _run(self, job: Job, fn: Callable, args: tuple, kwargs: dict) -> Any:
+        """Pool worker: runs fn with this thread's stdout/stderr captured into job.log_queue."""
+        capturing = _CapturingStream(
+            job.log_queue,
+            _stdout_redirector._original if _stdout_redirector else sys.__stdout__,
+        )
         _thread_local.capturing_stream = capturing
         try:
-            result = fn(*args, **kwargs)
-            job.set_completed(result)
+            return fn(*args, **kwargs)
         except Exception:
-            error_tb = traceback.format_exc()
-            # Push error to log queue before changing status so the UI
+            # Push the error to the log queue before the Future completes so the UI
             # sees the error lines as soon as the status flips to FAILED.
-            for line in error_tb.splitlines():
+            for line in traceback.format_exc().splitlines():
                 job.log_queue.put(f"[ERROR] {line}")
-            job.set_failed(error_tb)
+            raise
         finally:
+            # Set completed_at before returning, i.e. before the Future flips to done:
+            # any reader observing COMPLETED/FAILED always sees a non-None completed_at.
+            job.completed_at = datetime.now()
             _thread_local.capturing_stream = None
 
     def get_job(self, job_id: str) -> Optional[Job]:
@@ -254,7 +244,7 @@ class JobRunner:
 
     def is_running(self, job_type: str) -> bool:
         job = self.get_active_job(job_type)
-        return job is not None and job.status == JobStatus.RUNNING
+        return job is not None and job.status is JobStatus.RUNNING
 
     def drain_logs(self, job_id: str) -> list[str]:
         """
@@ -267,8 +257,7 @@ class JobRunner:
         new_lines: list[str] = []
         try:
             while True:
-                line = job.log_queue.get_nowait()
-                new_lines.append(line)
+                new_lines.append(job.log_queue.get_nowait())
         except queue.Empty:
             pass
         job.log_lines.extend(new_lines)

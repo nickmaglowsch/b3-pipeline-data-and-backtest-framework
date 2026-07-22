@@ -13,7 +13,7 @@ exist — but that is data availability, not the overlay.)
 
 Purpose: isolate how much of QDL's edge comes from the stock sleeve vs the CDI
 overlay. Compare QDL-Equity ("sleeve only") against QDL ("sleeve + overlay") and
-the defensive-income peers via backtests/validate_qdl.py.
+the defensive-income peers via scripts/run_single_backtest.py.
 """
 from __future__ import annotations
 

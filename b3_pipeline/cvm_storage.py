@@ -387,13 +387,6 @@ def get_cvm_company_map(conn: sqlite3.Connection) -> dict:
     return {row[0]: row[1] for row in cursor.fetchall()}
 
 
-def get_ticker_to_cnpj_map(conn: sqlite3.Connection) -> dict:
-    """Return {ticker_root: cnpj} reverse lookup."""
-    cursor = conn.cursor()
-    cursor.execute("SELECT ticker_root, cnpj FROM cvm_companies WHERE ticker_root IS NOT NULL")
-    return {row[0]: row[1] for row in cursor.fetchall()}
-
-
 def upsert_fundamentals_monthly(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
     """Batch upsert fundamentals_monthly rows from a DataFrame.
 

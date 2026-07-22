@@ -640,51 +640,6 @@ def get_ticker_isin_map(conn: sqlite3.Connection) -> dict:
     return {row[0]: row[1] for row in cursor.fetchall()}
 
 
-def get_tickers_by_company_code(
-    conn: sqlite3.Connection, company_code: str
-) -> List[str]:
-    """Get all tickers that start with a given company code."""
-    cursor = conn.cursor()
-    cursor.execute(
-        "SELECT DISTINCT ticker FROM prices WHERE ticker LIKE ? ORDER BY ticker",
-        (f"{company_code}%",),
-    )
-    return [row[0] for row in cursor.fetchall()]
-
-
-def get_trading_names(conn: sqlite3.Connection) -> List[str]:
-    """Get all unique ticker root codes (first 4 characters) from prices."""
-    cursor = conn.cursor()
-    cursor.execute("SELECT DISTINCT ticker FROM prices ORDER BY ticker")
-    tickers = [row[0] for row in cursor.fetchall()]
-    roots = sorted(set(t[:4] for t in tickers if len(t) >= 4))
-    return roots
-
-
-def get_prices_for_ticker(conn: sqlite3.Connection, ticker: str) -> pd.DataFrame:
-    """Get all price records for a specific ticker."""
-    query = """
-        SELECT ticker, isin_code, date, open, high, low, close, volume,
-               quotation_factor,
-               split_adj_open, split_adj_high, split_adj_low, split_adj_close, adj_close
-        FROM prices
-        WHERE ticker = ?
-        ORDER BY date
-    """
-    return pd.read_sql_query(query, conn, params=(ticker,))
-
-
-def get_prices_for_isin(conn: sqlite3.Connection, isin_code: str) -> pd.DataFrame:
-    """Get all price records for a specific ISIN code."""
-    query = """
-        SELECT ticker, isin_code, date, open, high, low, close, volume,
-               quotation_factor,
-               split_adj_open, split_adj_high, split_adj_low, split_adj_close, adj_close
-        FROM prices
-        WHERE isin_code = ?
-        ORDER BY date
-    """
-    return pd.read_sql_query(query, conn, params=(isin_code,))
 
 
 def get_all_prices(conn: sqlite3.Connection) -> pd.DataFrame:
@@ -705,16 +660,6 @@ def get_all_corporate_actions(conn: sqlite3.Connection) -> pd.DataFrame:
         SELECT isin_code, event_date, event_type, value, factor, source
         FROM corporate_actions
         ORDER BY isin_code, event_date
-    """
-    return pd.read_sql_query(query, conn)
-
-
-def get_all_detected_splits(conn: sqlite3.Connection) -> pd.DataFrame:
-    """Get all detected split records from the database."""
-    query = """
-        SELECT isin_code, ex_date, split_factor, description
-        FROM detected_splits
-        ORDER BY isin_code, ex_date
     """
     return pd.read_sql_query(query, conn)
 

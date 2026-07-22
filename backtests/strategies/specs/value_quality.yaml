@@ -1,0 +1,31 @@
+name: ValueQuality
+description: >-
+  Composite Value + Quality strategy. Ranks stocks by P/B (value, lower is
+  better) and ROE (quality, higher is better). Requires CVM fundamentals data
+  (DFP/ITR) to be loaded in the DB.
+kind: rank_and_hold
+rebalance: ME
+needs_fundamentals: true
+universe:
+  min_adtv: 1000000
+  min_price: 1.0
+signal:
+  # nan_add, not `+`: the P/B and ROE frames have different coverage and a plain
+  # sum would NaN-out every ticker missing either leg (the bug that made this
+  # strategy never invest). NaN only where BOTH legs are missing.
+  expr: >-
+    nan_add(
+      pb_weight
+      * (1.0 - rank(where(f_pb_ratio_dyn,
+                          (f_pb_ratio_dyn <= max_pb) & (f_pb_ratio_dyn > 0)))),
+      (1.0 - pb_weight)
+      * rank(f_net_income / where(f_equity, f_equity > 0))
+    )
+  pb_weight: 0.5
+  max_pb: 5.0
+  apply_glitch: false
+selection:
+  top_pct: 0.20
+  min_names: 3
+  dedup_roots: true   # one share class per company (fundamentals are per-company)
+weighting: equal

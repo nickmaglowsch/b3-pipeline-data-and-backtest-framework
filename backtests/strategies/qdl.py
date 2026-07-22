@@ -46,9 +46,9 @@ priori from theory / the methodologies — NOT scanned on the backtest:
   - target_vol=0.12 : long-run realized vol of a B3 low-vol basket (dial sits
                       ~fully invested in calm times, de-risks only in stress).
   - min_div_years=2 : the "2 of last 3 years" regular-payer rule the indices use.
-Weighting is parameter-free (inverse-vol). Validate with backtests/validate_qdl.py,
-which reports full-sample AND four sub-period metrics vs all three targets, net
-of the repo's tax + slippage engine, plus a parameter-sensitivity table.
+Weighting is parameter-free (inverse-vol). Compare against the defensive-income
+peers with scripts/run_single_backtest.py, which reports the full metric set net
+of the repo's tax + slippage engine.
 
 Requires CVM fundamentals (needs_fundamentals=True) and reads dividends from
 corporate_actions (via besst_quality.load_dividends).

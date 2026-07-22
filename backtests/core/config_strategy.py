@@ -3,7 +3,7 @@ Config-driven strategies
 ========================
 Two generic ``StrategyBase`` subclasses that turn "portfolio with rebalancing"
 strategies into data. Instead of a bespoke Python class per strategy, a YAML
-spec (loaded by ``spec_loader.py``) drives one of:
+spec (auto-registered by ``strategy_registry.discover()``) drives one of:
 
   * ``RankAndHold``  — rank a factor over a liquid universe, take the top
     N / top-pct, weight them, rebalance. Covers the ~16 ranked-equity
@@ -28,7 +28,7 @@ import pandas as pd
 
 from backtests.core import signal_dsl
 from backtests.core.strategy_base import (
-    StrategyBase, ParameterSpec,
+    StrategyBase, ParameterSpec, keep_most_liquid_per_root,
     COMMON_START_DATE, COMMON_END_DATE, COMMON_INITIAL_CAPITAL,
     COMMON_TAX_RATE, COMMON_SLIPPAGE, COMMON_MIN_ADTV, COMMON_REBALANCE_FREQ,
 )
@@ -132,6 +132,12 @@ def _eval_regime(regime: dict, shared: dict, i: int):
     for rule in regime.get("rules", []):
         if rule.get("default"):
             return rule
+        # `min_true: N` = an N-of-M vote over all inputs (research_multifactor's
+        # "2 of 3" gate), instead of naming an exact combination.
+        if "min_true" in rule:
+            if sum(vals.values()) >= int(rule["min_true"]):
+                return rule
+            continue
         conds = {k: v for k, v in rule.items() if k not in ("top_pct", "park", "default")}
         if all(vals.get(k) == v for k, v in conds.items()):
             return rule
@@ -205,8 +211,11 @@ class RankAndHold(StrategyBase):
         min_adtv = float(params.get("min_adtv", uni.get("min_adtv", 1_000_000)))
         min_price = float(params.get("min_price", uni.get("min_price", 1.0)))
         min_names = int(sel.get("min_names", 5))
+        min_hold = int(sel.get("min_hold", min_names))   # floor on the held count
         top_pct = params.get("top_pct", sel.get("top_pct"))
         top_n = params.get("top_n", sel.get("top_n"))
+        sticky = bool(sel.get("sticky", False))
+        dedup_roots = bool(sel.get("dedup_roots", False))
         vrange = spec.get("signal", {}).get("range")
         smallcap = bool(uni.get("smallcap_below_median", False))
         weighting = spec.get("weighting", "equal")
@@ -231,6 +240,7 @@ class RankAndHold(StrategyBase):
             park_few = bool(regime.get("park_when_too_few", True))
             cash_loc = tw.columns.get_loc(cash)
 
+        prev_sel: list = []
         for i in range(start, len(ret)):
             eff_top_pct = top_pct
             if regime:
@@ -240,9 +250,12 @@ class RankAndHold(StrategyBase):
                     continue
                 eff_top_pct = action.get("top_pct", top_pct)
 
-            sig_row = signal.iloc[i - 1]
             adtv_r = adtv.iloc[i - 1]
             raw_r = raw_close.iloc[i - 1]
+            # A fundamentals factor covers more tickers than the traded universe
+            # (f_pe_ratio_dyn spans every share class); align to the universe so
+            # the liquidity mask applies and the extras drop out.
+            sig_row = signal.iloc[i - 1].reindex(adtv_r.index)
 
             mask = (adtv_r >= min_adtv) & (raw_r >= min_price)
             valid = sig_row[mask].dropna()
@@ -252,13 +265,20 @@ class RankAndHold(StrategyBase):
             if smallcap:
                 liq_adtv = adtv_r[valid.index]
                 valid = valid[liq_adtv <= liq_adtv.median()]
+            if dedup_roots:
+                valid = keep_most_liquid_per_root(valid, adtv_r)
             if len(valid) < min_names:
-                if regime and park_few:
-                    tw.iloc[i, cash_loc] = 1.0
-                continue
-
-            n = int(top_n) if top_n else max(min_names, int(len(valid) * eff_top_pct))
-            selected = valid.nlargest(n).index.tolist()
+                # `sticky`: carry the previous book through a thin month rather
+                # than going flat (volume_breakout's prev_sel fallback).
+                if not (sticky and prev_sel):
+                    if regime and park_few:
+                        tw.iloc[i, cash_loc] = 1.0
+                    continue
+                selected = prev_sel
+            else:
+                n = int(top_n) if top_n else max(min_hold, int(len(valid) * eff_top_pct))
+                selected = valid.nlargest(n).index.tolist()
+            prev_sel = selected
             w = self._weights(selected, adtv_r, signal, i, weighting)
             for t, wt in w.items():
                 if t in tw.columns:

@@ -1,0 +1,25 @@
+name: CDI+MA200
+description: >-
+  CDI + MA200 Trend Filter. During COPOM easing, hold equal-weight stocks above
+  their 200-day MA. During tightening, hold 100% CDI.
+kind: rank_and_hold
+rebalance: ME
+warmup: 13
+universe:
+  min_adtv: 1000000
+  min_price: 1.0
+signal:
+  # Not a ranking — a membership flag: 1.0 above the 200d MA, NaN below. The
+  # regime's top_pct 1.0 then holds *every* qualifying name, equal weight.
+  expr: "where(above_ma200 * 1.0, above_ma200)"
+selection:
+  min_names: 1
+weighting: equal
+regime:
+  add_ibov: true
+  park_when_too_few: true
+  inputs:
+    easing: {flag: is_easing, offset: 0}
+  rules:
+    - {easing: true, top_pct: 1.0}  # easing -> hold every name above its MA200
+    - {default: true, park: true}   # tightening -> 100% CDI

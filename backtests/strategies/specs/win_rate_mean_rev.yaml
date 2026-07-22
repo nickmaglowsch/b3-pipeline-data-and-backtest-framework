@@ -1,0 +1,21 @@
+name: WinRateMeanRev
+description: >-
+  Mean-reversion strategy with a win-rate momentum filter: excludes stocks whose
+  recent win rate is significantly above (or below) their 60-day historical
+  average (trending stocks), then selects the biggest recent losers from the
+  remaining universe.
+kind: rank_and_hold
+rebalance: ME
+warmup_pad: 5          # lookback + (win_rate_window + 60)//21 + 2, at defaults
+universe:
+  min_adtv: 1000000
+  min_price: 1.0
+signal:
+  factor: win_rate_mean_rev
+  lookback: 1
+  apply_glitch: false  # the factor uses `has_glitch == 0` (NaN also excluded)
+selection:
+  top_pct: 0.10
+  min_names: 1         # invest as soon as ONE name survives the band filter...
+  min_hold: 5          # ...but always hold at least 5 (or 10% of the survivors)
+weighting: equal

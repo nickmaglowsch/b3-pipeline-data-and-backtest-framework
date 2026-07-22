@@ -1,0 +1,29 @@
+name: Res.MultiFactor
+description: >-
+  Research Multi-Factor. Requires 2-of-3 regime signals (easing, calm, uptrend).
+  Composite score: dist_MA200 + low_vol_60d + low_ATR + low_vol_20d + high_ADTV
+  (equal weights). Top 10% selected.
+kind: rank_and_hold
+rebalance: ME
+warmup: 14
+universe:
+  min_adtv: 1000000
+  min_price: 1.0
+signal:
+  expr: >-
+    0.2 * rank(dist_ma200) + 0.2 * rank(-vol_60d) + 0.2 * rank(-atr_m)
+    + 0.2 * rank(-vol_20d) + 0.2 * rank(adtv)
+selection:
+  top_pct: 0.10
+  min_names: 5
+weighting: equal
+regime:
+  add_ibov: true
+  park_when_too_few: true
+  inputs:
+    easing:  {flag: is_easing,     offset: 0}
+    calm:    {flag: ibov_calm,     offset: 1}
+    uptrend: {flag: ibov_uptrend,  offset: 1}
+  rules:
+    - {min_true: 2}                 # 2 of 3 regime signals -> invest
+    - {default: true, park: true}   # else 100% CDI

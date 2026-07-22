@@ -68,21 +68,3 @@ def download_ipe_file(year: int, force: bool = False) -> Optional[Path]:
         return None
 
 
-def detect_available_ipe_years(start_year: int = 2003, end_year: int = 2009) -> List[int]:
-    """Probe CVM server to find which IPE years are available.
-
-    Returns list of year integers where the server returns HTTP 200.
-    Default range is 2003-2009 (pre-DFP era).
-    """
-    available = []
-    for year in range(start_year, end_year + 1):
-        filename = f"ipe_cia_aberta_{year}.zip"
-        url = config.CVM_IPE_BASE_URL + filename
-        try:
-            resp = requests.head(url, headers=config.B3_HEADERS, timeout=10, allow_redirects=True)
-            if resp.status_code == 200:
-                available.append(year)
-        except requests.RequestException:
-            pass
-        time.sleep(0.2)
-    return available

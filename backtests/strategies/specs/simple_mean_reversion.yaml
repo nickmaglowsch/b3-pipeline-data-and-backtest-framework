@@ -1,0 +1,24 @@
+name: SimpleMeanReversion
+description: >-
+  Short-Term Mean Reversion. Buys the biggest recent losers (1-month negative
+  return). Top decile of the liquid universe ranked by most negative 1-period
+  return. `lookback` sums that many periods of return; at the default of 1 it
+  is last month's return (the class this replaced ignored the knob entirely
+  and always used a single period, so only lookback > 1 differs).
+kind: rank_and_hold
+rebalance: ME
+warmup_pad: 1
+universe:
+  min_adtv: 1000000
+  min_price: 1.0
+signal:
+  # -(k-period return), with the strategy's own glitch band (a +100% / -90%
+  # monthly print is a split or a data error, not a reversal candidate).
+  expr: "where(-roll_sum(ret, lookback), (ret <= 1.0) & (ret >= -0.9))"
+  lookback: 1
+  apply_glitch: false
+selection:
+  top_pct: 0.10
+  min_names: 5
+  sticky: true      # too few names qualify -> hold the book (the class's prev_sel)
+weighting: equal

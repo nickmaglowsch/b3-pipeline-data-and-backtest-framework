@@ -91,7 +91,9 @@ def equal_risk_contribution_weights(
     if len(window) < 3:
         return inverse_vol_weights(returns_df, lookback)
 
-    cov = window.cov().values
+    # copy=True: pandas 3 copy-on-write hands back a read-only view, and the
+    # regularisation below mutates in place.
+    cov = window.cov().to_numpy(copy=True)
     n = cov.shape[0]
     cols = returns_df.columns
 
@@ -210,8 +212,8 @@ def hrp_weights(returns_df: pd.DataFrame, lookback: int = 36) -> pd.Series:
     if len(window) < max(3, n):
         return equal_weights(n, cols)
 
-    corr = window.corr().values
-    cov = window.cov().values
+    corr = window.corr().to_numpy(copy=True)   # fill_diagonal below mutates in place
+    cov = window.cov().to_numpy()
 
     # Ensure no NaNs in the correlation matrix
     if np.any(np.isnan(corr)):

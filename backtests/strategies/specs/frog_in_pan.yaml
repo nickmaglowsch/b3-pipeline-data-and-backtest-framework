@@ -1,0 +1,28 @@
+name: FrogInPan
+description: >-
+  Frog-in-the-Pan (Da, Gurun & Warachka 2014). Ranks stocks by a composite of
+  12-month momentum + win-rate (number of positive months). Investors
+  under-react to small, continuous positive news.
+kind: rank_and_hold
+rebalance: ME
+warmup_pad: 2
+universe:
+  min_adtv: 1000000
+  min_price: 1.0
+signal:
+  # mom_weight * rank(12m skip-1 momentum) + (1-mom_weight) * rank(count of
+  # positive months). `(ret > 0) + 0 * ret` = 1/0 with NaN kept where ret is NaN.
+  # Glitch band is the strategy's own (+100% / -90%), rolled over the lookback.
+  expr: >-
+    where(
+      mom_weight * rank(roll_sum(shift(log_ret, 1), lookback))
+      + (1 - mom_weight) * rank(roll_sum(shift((ret > 0) + 0 * ret, 1), lookback)),
+      roll_max(shift((ret > 1.0) | (ret < -0.9), 1), lookback) != 1
+    )
+  lookback: 12
+  mom_weight: 0.5
+  apply_glitch: false
+selection:
+  top_pct: 0.10
+  min_names: 5
+weighting: equal

@@ -4,7 +4,6 @@ Core backtesting components.
 
 from .data import load_b3_data, load_b3_hlc_data, download_benchmark, download_cdi_daily
 from .metrics import build_metrics, value_to_ret, display_metrics_table
-from .plotting import plot_tax_backtest
 from .simulation import run_simulation
 
 __all__ = [
@@ -15,6 +14,5 @@ __all__ = [
     "build_metrics",
     "value_to_ret",
     "display_metrics_table",
-    "plot_tax_backtest",
     "run_simulation",
 ]

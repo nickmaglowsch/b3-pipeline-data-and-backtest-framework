@@ -13,18 +13,15 @@ data loading, plotting and reporting).
 Usage (after the pipeline has populated the DB):
     python -m b3_pipeline.main          # prices + corporate actions
     python -m b3_pipeline.cvm_main      # fundamentals_pit (net_income_ttm)
-    cd backtests && python sp500_b3_index.py
+    python -m backtests.sp500_b3_index
 """
 from __future__ import annotations
 
 import os
 import sqlite3
-import sys
 from pathlib import Path
 
 import pandas as pd
-
-sys.path.append(str(Path(__file__).resolve().parent.parent))
 
 from backtests.core.data import load_b3_data, download_benchmark, download_cdi_daily
 from backtests.core.metrics import build_metrics, display_metrics_table, cumret
