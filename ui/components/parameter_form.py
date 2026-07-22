@@ -15,7 +15,7 @@ import streamlit as st
 
 # Parameter names that are considered "common" and grouped together at top.
 COMMON_PARAM_NAMES = {
-    "start_date", "end_date", "initial_capital",
+    "start_date", "end_date", "initial_capital", "contribution",
     "tax_rate", "slippage", "rebalance_freq", "min_adtv",
 }
 

@@ -72,11 +72,28 @@ def _drawdown_series(values: pd.Series) -> pd.Series:
 
 # ── 1. Equity Curves ──────────────────────────────────────────────────────────
 
+def _dca_nav(ret: pd.Series, contributions: pd.Series, initial: float) -> pd.Series:
+    """NAV of a benchmark bought with the SAME cash-flow schedule as the strategy.
+
+    Mirrors the simulator's order: the period's return is applied first, then the
+    buy-in lands (simulation.py, Step 1b).
+    """
+    nav, out = float(initial), []
+    for i, (d, r) in enumerate(ret.items()):
+        if i:                                        # row 0 = the initial deployment
+            nav = nav * (1 + (0.0 if pd.isna(r) else float(r)))
+            nav += float(contributions.get(d, 0.0))
+        out.append(nav)
+    return pd.Series(out, index=ret.index)
+
+
 def plot_equity_curves(
     pretax_values: pd.Series,
     aftertax_values: pd.Series,
     ibov_ret: pd.Series,
     cdi_ret: Optional[pd.Series] = None,
+    contributions: Optional[pd.Series] = None,
+    invested: Optional[pd.Series] = None,
 ) -> go.Figure:
     """
     Cumulative return chart: pre-tax, after-tax, IBOV, CDI.
@@ -86,11 +103,53 @@ def plot_equity_curves(
         aftertax_values:  After-tax equity curve (BRL), DatetimeIndex.
         ibov_ret:         IBOV period returns (not cumulative).
         cdi_ret:          CDI period returns (optional).
+        contributions:    Per-period buy-ins (BRL) from run_simulation.
+        invested:         Running capital in (initial + cumulative buy-ins).
+
+    With buy-ins the chart switches to BRL wealth — cumulative-% would count the
+    deposits as performance — and the benchmarks are run through the same
+    deposit schedule so the comparison stays apples-to-apples.
 
     Returns:
         Plotly Figure.
     """
     fig = go.Figure()
+
+    dca = (
+        contributions is not None
+        and invested is not None
+        and float(contributions.fillna(0).abs().sum()) > 0
+    )
+    if dca:
+        initial = float(invested.iloc[0])
+        for values, key, label in (
+            (pretax_values, "pretax", "Pre-Tax NAV"),
+            (aftertax_values, "aftertax", "After-Tax NAV"),
+        ):
+            fig.add_trace(go.Scatter(
+                x=values.index, y=values, name=label,
+                line=dict(color=PALETTE[key], width=2),
+                hovertemplate=f"<b>{label}</b><br>Date: %{{x}}<br>R$ %{{y:,.0f}}<extra></extra>",
+            ))
+        fig.add_trace(go.Scatter(
+            x=invested.index, y=invested, name="Capital Invested",
+            # not PALETTE["sub"] — same grey as the CDI line
+            line=dict(color=PALETTE["text"], width=1.5, shape="hv"),
+            hovertemplate="<b>Invested</b><br>Date: %{x}<br>R$ %{y:,.0f}<extra></extra>",
+        ))
+        for ret, key, label in (
+            (ibov_ret, "ibov", "IBOV"), (cdi_ret, "cdi", "CDI"),
+        ):
+            if ret is None or ret.empty:
+                continue
+            nav = _dca_nav(ret, contributions, initial)
+            fig.add_trace(go.Scatter(
+                x=nav.index, y=nav, name=f"{label} (same buy-ins)",
+                line=dict(color=PALETTE[key], width=1.5, dash="dot"),
+                hovertemplate=f"<b>{label}</b><br>Date: %{{x}}<br>R$ %{{y:,.0f}}<extra></extra>",
+            ))
+        _apply_dark_theme(fig, title="Portfolio Value (BRL)", yaxis_title="BRL")
+        return fig
 
     # Pre-tax
     pretax_cum = _to_cumret(pretax_values)

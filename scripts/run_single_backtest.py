@@ -1,7 +1,7 @@
 """Headless single-strategy backtest — mirrors ui/services/backtest_service.run_backtest
 (incl. the daily-resolution drawdown fix) without the Streamlit deps.
 
-Usage: python scripts/run_single_backtest.py "QDL-Equity"
+Usage: python scripts/run_single_backtest.py "QDL-Equity" [monthly_buy_in_brl] [initial_capital_brl]
 """
 from __future__ import annotations
 
@@ -23,9 +23,12 @@ from backtests.core.strategy_base import dedup_target_weights
 DB = str(ROOT / "b3_market_data.sqlite")
 
 
-def main(name: str) -> None:
+def main(name: str, contribution: float = 0.0,
+         initial_capital: float | None = None) -> None:
     strat = get_registry().get(name)
     params = strat.get_default_parameters()
+    if initial_capital is not None:
+        params["initial_capital"] = initial_capital
 
     start = params.get("start_date", "2005-01-01")
     end = params.get("end_date", "today")
@@ -51,6 +54,7 @@ def main(name: str) -> None:
         tax_rate=float(params.get("tax_rate", 0.15)),
         slippage=float(params.get("slippage", 0.001)),
         monthly_sales_exemption=float(params.get("monthly_sales_exemption", 20_000)),
+        contribution=contribution,
         name=name,
     )
 
@@ -59,8 +63,9 @@ def main(name: str) -> None:
     common = result["pretax_values"].index.intersection(ibov_ret.index)
     w0, w1 = common[0], common[-1]
 
-    at_ret = value_to_ret(result["aftertax_values"].loc[common])
-    pt_ret = value_to_ret(result["pretax_values"].loc[common])
+    contribs = result["contributions"].loc[common]      # deposits are not returns
+    at_ret = value_to_ret(result["aftertax_values"].loc[common], contribs)
+    pt_ret = value_to_ret(result["pretax_values"].loc[common], contribs)
 
     # Daily NAV paths -> intra-rebalance-aware Max Drawdown / Calmar.
     strat_daily = strategy_daily_values(
@@ -77,11 +82,22 @@ def main(name: str) -> None:
         build_metrics(cdi_ret.reindex(common).fillna(0), "CDI", ppy, daily_values=cdi_daily_nav),
     ]
 
+    final_nav = result["aftertax_values"].loc[common].iloc[-1]
     print(f"\nCommon window: {w0.date()} .. {w1.date()}  ({len(common)} periods)")
-    print(f"Final after-tax NAV: {result['aftertax_values'].loc[common].iloc[-1]:,.0f} "
+    print(f"Final after-tax NAV: {final_nav:,.0f} "
           f"(from {params.get('initial_capital', 100_000):,.0f})")
+    if contribution:
+        invested = result["invested"].loc[common].iloc[-1]
+        print(f"Monthly buy-in    : {contribution:,.0f}  "
+              f"({contribs.sum():,.0f} deposited over the window)")
+        print(f"Total invested    : {invested:,.0f}   "
+              f"Profit: {final_nav - invested:,.0f}")
     display_metrics_table(metrics)
 
 
 if __name__ == "__main__":
-    main(sys.argv[1] if len(sys.argv) > 1 else "QDL-Equity")
+    main(
+        sys.argv[1] if len(sys.argv) > 1 else "QDL-Equity",
+        float(sys.argv[2]) if len(sys.argv) > 2 else 0.0,
+        float(sys.argv[3]) if len(sys.argv) > 3 else None,
+    )

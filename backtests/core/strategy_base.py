@@ -112,8 +112,9 @@ COMMON_END_DATE = ParameterSpec(
 )
 COMMON_INITIAL_CAPITAL = ParameterSpec(
     "initial_capital", "Initial Capital (BRL)", "float", 100_000.0,
-    description="Starting portfolio value in BRL",
-    min_value=1_000.0, step=10_000.0,
+    description="Starting portfolio value in BRL. 0 = pure DCA, the book is "
+                "built entirely from the monthly buy-ins.",
+    min_value=0.0, step=10_000.0,
 )
 COMMON_TAX_RATE = ParameterSpec(
     "tax_rate", "Tax Rate", "float", 0.15,
@@ -134,6 +135,13 @@ COMMON_REBALANCE_FREQ = ParameterSpec(
     "rebalance_freq", "Rebalance Frequency", "choice", "ME",
     description="Portfolio rebalancing frequency",
     choices=["ME", "QE", "W-FRI"],
+)
+COMMON_CONTRIBUTION = ParameterSpec(
+    "contribution", "Monthly Buy-In (BRL)", "float", 0.0,
+    description="Periodic buy-in (aporte) added every calendar month and "
+                "allocated by the rebalance — the holding farthest below its "
+                "target gets the most. Negative = withdrawal. 0 = lump sum only.",
+    step=500.0,
 )
 COMMON_MONTHLY_SALES_EXEMPTION = ParameterSpec(
     "monthly_sales_exemption", "Monthly Sales Exemption (BRL)", "float", 20_000.0,

@@ -32,6 +32,16 @@ def test_uncovered_sleeve_bails_to_empty():
     assert reconstruct_daily_values(tw, daily_ret, 100.0).empty
 
 
+def test_zero_initial_capital_still_yields_a_drawdown():
+    # Pure-DCA run (initial_capital=0): scaling the path by 0 would flatten it
+    # and print a fake 0% max DD. The path is scale-free, so it must survive.
+    days = pd.date_range("2020-01-01", periods=4, freq="D")
+    daily_ret = pd.DataFrame({"A": [None, -0.20, 0.0, 0.10]}, index=days)
+    tw = pd.DataFrame({"A": [1.0]}, index=[days[0]])
+    nav = reconstruct_daily_values(tw, daily_ret, initial_capital=0.0)
+    assert max_dd(value_to_ret(nav)) == __import__("pytest").approx(-0.20)
+
+
 def test_two_asset_drift_matches_buy_and_hold():
     # Two equal-weighted assets, one held flat, one +10% total over the segment.
     days = pd.date_range("2020-01-01", periods=3, freq="D")

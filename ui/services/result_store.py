@@ -26,6 +26,10 @@ RESULTS_DIR = PROJECT_ROOT / "results"
 _DATA_KEYS = [
     "pretax_values",
     "aftertax_values",
+    "pretax_twr",
+    "aftertax_twr",
+    "contributions",
+    "invested",
     "ibov_ret",
     "cdi_ret",
     "tax_paid",

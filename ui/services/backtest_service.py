@@ -37,6 +37,17 @@ def _get_shared_data_cached(
     return build_shared_data(db_path, start, end, freq, include_fundamentals=include_fundamentals)
 
 
+def _twr_curve(values: pd.Series, ret: pd.Series) -> pd.Series:
+    """Growth-of-capital curve from time-weighted returns.
+
+    Based on the first NON-ZERO NAV: a pure-DCA run (initial_capital=0) starts
+    at 0, and scaling by that would flatten the whole curve to zeros.
+    """
+    nonzero = values[values != 0]
+    base = float(nonzero.iloc[0]) if len(nonzero) else 1.0
+    return base * (1 + ret).cumprod()
+
+
 def run_backtest(strategy_name: str, params: dict) -> dict:
     """
     Execute a single backtest.
@@ -93,6 +104,7 @@ def run_backtest(strategy_name: str, params: dict) -> dict:
         tax_rate=float(params.get("tax_rate", 0.15)),
         slippage=float(params.get("slippage", 0.001)),
         monthly_sales_exemption=float(params.get("monthly_sales_exemption", 20_000)),
+        contribution=float(params.get("contribution", 0.0)),
         name=strategy_name,
     )
 
@@ -103,8 +115,11 @@ def run_backtest(strategy_name: str, params: dict) -> dict:
 
     at_val = result["aftertax_values"].loc[common]
     pt_val = result["pretax_values"].loc[common]
-    at_ret = value_to_ret(at_val)
-    pt_ret = value_to_ret(pt_val)
+    # Buy-ins are stripped out here: NAV includes deposits, so a raw pct_change
+    # would book every aporte as a gain.
+    contribs = result["contributions"].loc[common]
+    at_ret = value_to_ret(at_val, contribs)
+    pt_ret = value_to_ret(pt_val, contribs)
 
     ppy = {"ME": 12, "QE": 4, "W-FRI": 52}.get(freq, 12)
 
@@ -140,6 +155,13 @@ def run_backtest(strategy_name: str, params: dict) -> dict:
     return {
         "pretax_values": pt_val,
         "aftertax_values": at_val,
+        # Contribution-neutral (time-weighted) curves: identical to the NAV
+        # curves when there are no buy-ins, honest drawdowns when there are
+        # (deposits otherwise refill the peak and mute the DD).
+        "pretax_twr": _twr_curve(pt_val, pt_ret),
+        "aftertax_twr": _twr_curve(at_val, at_ret),
+        "contributions": contribs,
+        "invested": result["invested"].loc[common],
         "ibov_ret": ibov_ret.loc[common],
         "cdi_ret": cdi_ret.reindex(common).fillna(0),
         "tax_paid": _safe_loc(result["tax_paid"], common),

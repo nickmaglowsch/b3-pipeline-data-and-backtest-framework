@@ -272,6 +272,7 @@ def run_simulation(
     name: str = "Strategy",
     monthly_sales_exemption: float = 0.0,
     defer_tax: bool = False,
+    contribution: float = 0.0,
 ) -> dict:
     """
     Run a generic, institutional-grade portfolio simulation.
@@ -283,10 +284,23 @@ def run_simulation(
         initial_capital: Starting BRL
         tax_rate: Capital gains tax rate applied to net realized gains
         slippage: Transaction cost applied per trade (e.g., 0.001 for 0.1%)
+        contribution: Periodic buy-in in BRL **per calendar month** (aporte).
+                     Deposited into NAV right before the rebalance, so the
+                     existing target-weight logic spreads it over the book —
+                     the name farthest below target absorbs the most new cash.
+                     Negative = withdrawal. Deposits accrue by calendar month
+                     and land on the next live rebalance row (1x for ME, 3x for
+                     QE, first weekly row of each month for W-FRI).
 
     Returns:
         Dictionary containing pre-tax and after-tax equity curves, tax ledgers, etc.
     """
+    if initial_capital <= 0 and contribution <= 0:
+        raise ValueError(
+            "No money in the portfolio: set initial_capital > 0, contribution > 0, "
+            "or both (initial_capital=0 with a contribution is a pure-DCA run)."
+        )
+
     # Initialize the ledgers
     pt_pos = {}  # Pre-tax ledger
     at_pos = {}  # After-tax ledger
@@ -296,8 +310,10 @@ def run_simulation(
 
     pretax_values, aftertax_values = [], []
     tax_paid_list, loss_cf_list, turnover_list, dates = [], [], [], []
+    contrib_list = []
 
     initialized = False
+    last_deploy = None      # date of the last rebalance that received a deposit
 
     # Contract guard: NAV is defined as the sum of position values and this engine
     # does NOT hold uninvested cash. So any live rebalance row whose target weights
@@ -337,6 +353,7 @@ def run_simulation(
                     at_pos[t] = {"cost_basis": alloc, "current_value": alloc}
 
             initialized = True
+            last_deploy = date
 
             nav0 = sum(p["current_value"] for p in pt_pos.values())
             pretax_values.append(nav0)
@@ -344,6 +361,7 @@ def run_simulation(
             tax_paid_list.append(0.0)
             loss_cf_list.append(0.0)
             turnover_list.append(1.0)
+            contrib_list.append(0.0)
             dates.append(date)
             continue
 
@@ -354,21 +372,52 @@ def run_simulation(
         pt_nav = sum(p["current_value"] for p in pt_pos.values())
         at_nav = sum(p["current_value"] for p in at_pos.values())
 
-        if pt_nav <= 0 or at_nav <= 0:
-            print(f"\n💀 MARGIN CALL! Portfolio went bankrupt on {date.date()}")
-            break
-
         # After inception, an all-zero target row means "no valid targets this
         # period" — hold current positions. Rebalancing to zero would liquidate
         # everything, and since sale proceeds aren't tracked as cash
         # (NAV = sum of position values), NAV would collapse to 0 and fake a
         # margin call on the next step.
-        if t_weights.abs().sum() == 0:
+        live = bool(t_weights.abs().sum() != 0)
+
+        # ── Step 1b: Periodic buy-in (aporte) ────
+        # Whole calendar months elapsed since the last deposit — exact for ME/QE
+        # and lumpy-but-realistic for weekly (lands on the first row of a month).
+        # On a hold row there is no rebalance to ride, so nothing is deposited and
+        # last_deploy stays put: the months accrue and land on the next live row.
+        # ponytail: the cash is deployed at the rebalance, not the day it arrives;
+        # a quarterly book gets 3 months in one go instead of sitting in cash.
+        # A book that has already gone negative is bankrupt — check BEFORE the
+        # deposit so a buy-in can't resurrect it (a wiped-out short book would
+        # otherwise reappear at a fake NAV). Exactly 0.0 is the never-funded
+        # case (initial_capital=0, pure DCA), which the post-deposit check below
+        # still catches if no cash arrives.
+        if pt_nav < 0 or at_nav < 0:
+            print(f"\n💀 MARGIN CALL! Portfolio went bankrupt on {date.date()}")
+            break
+
+        cash = 0.0
+        if contribution and live:
+            months = (date.year - last_deploy.year) * 12 + date.month - last_deploy.month
+            cash = contribution * months
+        if cash:
+            # Handed to _execute_rebalance as extra NAV: every position's
+            # (target_val - current_value) gap widens by w_i * cash, so the
+            # underweight names take the biggest share of the new money.
+            pt_nav += cash
+            at_nav += cash
+            last_deploy = date
+
+        if pt_nav <= 0 or at_nav <= 0:
+            print(f"\n💀 MARGIN CALL! Portfolio went bankrupt on {date.date()}")
+            break
+
+        if not live:
             pretax_values.append(pt_nav)
             aftertax_values.append(at_nav)
             tax_paid_list.append(0.0)
             loss_cf_list.append(loss_carryforward)
             turnover_list.append(0.0)
+            contrib_list.append(0.0)
             dates.append(date)
             continue
 
@@ -408,6 +457,7 @@ def run_simulation(
         tax_paid_list.append(tax_paid)
         loss_cf_list.append(loss_carryforward)
         turnover_list.append(turnover)
+        contrib_list.append(cash)
         dates.append(date)
 
     # Deduct any remaining deferred tax from final NAV
@@ -415,6 +465,7 @@ def run_simulation(
         aftertax_values[-1] -= pending_tax
 
     idx = pd.DatetimeIndex(dates)
+    contribs = pd.Series(contrib_list, index=idx, name="Contribution (BRL)")
     return {
         "pretax_values": pd.Series(pretax_values, index=idx, name=f"{name} (Pre-Tax)"),
         "aftertax_values": pd.Series(
@@ -425,4 +476,10 @@ def run_simulation(
             loss_cf_list, index=idx, name="Loss Carryforward (BRL)"
         ),
         "turnover": pd.Series(turnover_list, index=idx, name="Turnover"),
+        # Cash added per rebalance, and the running cost basis of the whole book.
+        # NAV includes deposits, so returns must be computed with
+        # metrics.value_to_ret(values, contributions=...) — a raw pct_change reads
+        # every buy-in as a gain.
+        "contributions": contribs,
+        "invested": (initial_capital + contribs.cumsum()).rename("Invested (BRL)"),
     }
