@@ -156,6 +156,10 @@ def _grid_signals(shared: dict, win: int) -> tuple[pd.DataFrame, dict]:
         d_daily = px / px.rolling(win).mean() - 1.0
         dist[col] = d_daily.reindex(grid, method="ffill").shift(1)
         cols[col] = px.reindex(grid, method="ffill").pct_change()
+        # Stash daily ETF returns so metrics.strategy_daily_values can mark this
+        # sleeve intra-period; else the daily-DD reconstruction has no series for
+        # DIVO11/IVVB11 and falls back to (understated) cadence drawdown.
+        shared.setdefault("_daily_asset_ret", {})[col] = px.pct_change()
 
     r = pd.DataFrame(cols).reindex(grid)
     r["CDI_ASSET"] = cdi_m                       # CDI is exact, never ffilled/pct_changed
