@@ -29,7 +29,6 @@ from datetime import datetime
 # 1. Import the Core Framework
 from core.data import load_b3_data, download_benchmark, download_cdi_daily
 from core.metrics import build_metrics, value_to_ret, display_metrics_table
-from core.plotting import plot_tax_backtest
 from core.simulation import run_simulation
 
 # 2. Configuration
@@ -70,7 +69,7 @@ def main():
         slippage=0.001  # 0.1% cost per trade
     )
     
-    # ... Plot using plot_tax_backtest(result...)
+    # ... analyze result using build_metrics, plot with Plotly if desired ...
 ```
 
 ### Advanced Features

@@ -20,30 +20,23 @@ Outputs:
   - portfolio_stability_results.csv  -- Full results
 
 Usage:
-    python3 backtests/portfolio_stability_analysis.py
+    python -m backtests.portfolio_stability_analysis
 """
 
 import warnings
 warnings.filterwarnings("ignore")
 
 import os
-import sys
 import numpy as np
 import pandas as pd
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-import matplotlib.dates as mdates
-from matplotlib.gridspec import GridSpec
 
 _BACKTESTS_DIR = os.path.dirname(os.path.abspath(__file__))
-_PROJECT_ROOT = os.path.dirname(_BACKTESTS_DIR)
-for _p in [_PROJECT_ROOT, _BACKTESTS_DIR]:
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
 
-from core.strategy_returns import build_strategy_returns, SMALLCAP_MOM_NOTE
-from core.portfolio_opt import (
+from backtests.core.strategy_returns import build_strategy_returns
+from backtests.core.portfolio_opt import (
     inverse_vol_weights,
     equal_risk_contribution_weights,
     hrp_weights,
@@ -51,8 +44,8 @@ from core.portfolio_opt import (
     compute_portfolio_returns,
     compute_regime_portfolio,
 )
-from core.metrics import build_metrics, ann_return, ann_vol, sharpe, max_dd
-from core.plotting import PALETTE, fmt_ax
+from backtests.core.metrics import build_metrics, ann_return, sharpe, max_dd
+from backtests.core.plotting import PALETTE, fmt_ax
 
 # ─── Sub-period definitions ───────────────────────────────────────────────────
 SUB_PERIODS = [

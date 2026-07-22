@@ -772,17 +772,3 @@ def fetch_all_b3_listed_companies(page_size: int = 100) -> List[dict]:
     return all_results
 
 
-def build_trading_name_to_code_map(tickers: List[str]) -> Dict[str, str]:
-    """
-    Build a mapping from ticker roots to trading names.
-
-    B3 uses trading names like 'PETROBRAS' but we have tickers like 'PETR4'.
-    This function creates a simple mapping based on the first 4 characters.
-
-    Args:
-        tickers: List of ticker symbols
-
-    Returns:
-        Dictionary mapping ticker roots to potential trading names
-    """
-    return {t[:4]: t[:4] for t in tickers if len(t) >= 4}

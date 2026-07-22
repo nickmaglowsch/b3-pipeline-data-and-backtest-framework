@@ -47,55 +47,6 @@ def render_metrics_table(metrics_list: list[dict], highlight_best: bool = True) 
     )
 
 
-def render_metrics_cards(metrics: dict) -> None:
-    """
-    Display a single strategy's metrics as Streamlit metric cards (one row of 5).
-
-    Args:
-        metrics: Single dict from build_metrics().
-    """
-    if not metrics:
-        return
-    cols = st.columns(5)
-    cols[0].metric("Ann. Return", f"{metrics.get('Ann. Return (%)', 0):.2f}%")
-    cols[1].metric("Ann. Volatility", f"{metrics.get('Ann. Volatility (%)', 0):.2f}%")
-    cols[2].metric("Sharpe", f"{metrics.get('Sharpe', 0):.2f}")
-    cols[3].metric("Max Drawdown", f"{metrics.get('Max Drawdown (%)', 0):.2f}%")
-    cols[4].metric("Calmar", f"{metrics.get('Calmar', 0):.2f}")
-
-
-def render_parameters_table(params: dict, specs: Optional[list] = None) -> None:
-    """
-    Display strategy parameters as a formatted table.
-
-    Args:
-        params: Dict of {param_name: value}.
-        specs:  Optional list of ParameterSpec for human-readable labels and descriptions.
-    """
-    if not params:
-        st.info("No parameters to display.")
-        return
-
-    if specs:
-        spec_map = {s.name: s for s in specs}
-        rows = []
-        for name, value in params.items():
-            spec = spec_map.get(name)
-            rows.append({
-                "Parameter": spec.label if spec else name,
-                "Value": str(value),
-                "Description": spec.description if spec else "",
-            })
-        df = pd.DataFrame(rows)
-    else:
-        df = pd.DataFrame([
-            {"Parameter": k, "Value": str(v)}
-            for k, v in params.items()
-        ])
-
-    st.dataframe(df, use_container_width=True, hide_index=True)
-
-
 def render_db_stats(stats: dict) -> None:
     """
     Display database summary statistics as metric cards (two rows of 3).

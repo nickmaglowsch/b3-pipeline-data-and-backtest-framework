@@ -449,16 +449,6 @@ def audit_cross_table(conn: sqlite3.Connection) -> None:
             f"{overlap/max(price_tickers,1)*100:.0f}% of prices)")
 
 
-def audit_summary(issues: list) -> None:
-    section("SUMMARY")
-    if not issues:
-        print(f"  {GREEN}{BOLD}No issues detected.{RESET}")
-    else:
-        print(f"  {YELLOW}Issues detected ({len(issues)}):{RESET}\n")
-        for i, issue in enumerate(issues, 1):
-            print(f"  {i:>3}. {issue}")
-
-
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main() -> None:

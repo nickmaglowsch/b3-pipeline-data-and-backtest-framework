@@ -8,11 +8,16 @@ from __future__ import annotations
 import importlib
 import logging
 import pkgutil
+from pathlib import Path
 from typing import Optional
+
+import yaml
 
 logger = logging.getLogger(__name__)
 
 from backtests.core.strategy_base import StrategyBase
+
+SPECS_DIR = Path(__file__).resolve().parent.parent / "strategies" / "specs"
 
 
 class StrategyRegistry:
@@ -28,10 +33,6 @@ class StrategyRegistry:
     def get(self, name: str) -> StrategyBase:
         """Retrieve a strategy by name. Raises KeyError if not found."""
         return self._strategies[name]
-
-    def list_all(self) -> list[StrategyBase]:
-        """Return all registered strategies."""
-        return list(self._strategies.values())
 
     def names(self) -> list[str]:
         """Return list of strategy names."""
@@ -67,13 +68,25 @@ class StrategyRegistry:
                 ):
                     try:
                         instance = attr()
+                        # Abstract bases (e.g. _SMATiltBase) satisfy the ABC but
+                        # carry a sentinel empty name — registering one puts a
+                        # blank row in the UI picker and a '' key in the registry.
+                        if not str(instance.name).strip():
+                            continue
                         self.register(instance)
                     except Exception as e:
                         logger.warning("Failed to instantiate strategy %s.%s: %s", modname, attr_name, e)
 
         # Config-driven strategies from backtests/strategies/specs/*.yaml
-        from backtests.core.spec_loader import load_specs
-        load_specs(self)
+        from backtests.core.config_strategy import RankAndHold, FixedWeight
+
+        kinds = {"rank_and_hold": RankAndHold, "fixed_weight": FixedWeight}
+        for path in sorted(SPECS_DIR.glob("*.yaml")) if SPECS_DIR.is_dir() else []:
+            try:
+                spec = yaml.safe_load(path.read_text())
+                self.register(kinds[spec["kind"]](spec))
+            except Exception as e:
+                logger.warning("Failed to load strategy spec %s: %s", path.name, e)
 
 
 # ── Global singleton ──────────────────────────────────────────────────────────
@@ -94,9 +107,3 @@ def get_registry() -> StrategyRegistry:
         reg.discover()
         _registry = reg
     return _registry
-
-
-def reset_registry() -> None:
-    """Reset the global registry (useful for testing)."""
-    global _registry
-    _registry = None

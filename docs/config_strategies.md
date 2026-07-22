@@ -8,7 +8,7 @@ are now **data, not code**. You create one by dropping a YAML file in
 `backtests/strategies/specs/`. No Python, no class, no registration step.
 
 - Engines: `backtests/core/config_strategy.py`
-- Loader: `backtests/core/spec_loader.py` (auto-discovers `specs/*.yaml`)
+- Loader: `backtests/core/strategy_registry.py` (`discover()` auto-registers `specs/*.yaml`)
 - The engines only build `target_weights`; the shared `run_simulation`
   (`backtests/core/simulation.py`) handles rebalancing, slippage and the
   Brazilian capital-gains tax engine. You never touch that.
@@ -91,7 +91,17 @@ signal:
 selection:
   top_pct: 0.10            # fraction of eligible universe... OR:
   top_n: 20               # ...a fixed number of names (top_n wins if both set)
-  min_names: 5
+  min_names: 5             # need >= this many candidates to invest at all
+  min_hold: 5              # floor on the number held (default: min_names). Split
+                           #   them when a strategy invests on 1 survivor but
+                           #   always holds >= 5 (see win_rate_mean_rev.yaml).
+  dedup_roots: false       # collapse share classes (PETR3/PETR4) to the most
+                           #   liquid one BEFORE ranking. Required for any
+                           #   fundamentals factor — fundamentals are per-company,
+                           #   so both classes carry the same score and a top-N
+                           #   would double-book the company.
+  sticky: false            # when < min_names qualify, hold the previous book
+                           #   instead of going flat (volume_breakout).
 
 weighting: equal           # equal | market_cap  (market_cap uses ADTV as a size proxy)
 
@@ -144,7 +154,8 @@ Python to add a factor.
 3. `store:<feature_id>` — a factor from the research IC store (`research/discovery`),
    e.g. `factor: store:ratio__High_low_range_20d__Win_rate_120d`. Loaded from
    parquet and as-of-aligned to the rebalance calendar. IDs live in
-   `research/output/feature_catalog.json`. Also callable inside an expr: `store("id")`.
+   `research/output/feature_catalog.json`. Reference-only (`factor:`); string
+   constants are rejected inside an `expr:`.
 4. A bare **`shared_data` key** — any precomputed frame (`mf_composite`,
    `f_pe_ratio_dyn`, …). Fundamentals `f_*` keys need `needs_fundamentals: true`.
 
@@ -152,19 +163,42 @@ Python to add a factor.
 
 Names resolve to `shared_data` frames (`ret`, `log_ret`, `adj_close`, `raw_close`,
 `adtv`, `close_px`, `fin_vol`, `vol_60d`, `vol_20d`, `atr_m`, `mf_composite`,
-`f_*` …) or numeric params (`lookback`). Operators: `+ - * / **` and unary `-`.
+`f_*` …) or numeric scalars — `lookback`, plus **any extra numeric key you put in
+the `signal:` block** (`mom_weight`, `max_pb`, … ; a run-time param of the same
+name overrides it).
+
+Operators: `+ - * / **`, unary `-`, the comparisons `> < >= <= == !=` and the
+elementwise boolean `&` / `|`. Comparisons yield boolean frames — feed them to
+`where(...)`. **Parenthesise**: `&` binds tighter than `>` in Python, so write
+`(a > 0) & (b < 1)`, never `a > 0 & b < 1`. Chained comparisons (`0 < x < 1`)
+are rejected.
 
 | group | functions |
 |-------|-----------|
 | time-series | `shift(x,n)`, `roll_sum/mean/std/var/min/max/median/skew/kurt(x,w)`, `pct_change(x,w)`, `diff(x,n)`, `ewm_mean(x,span)`, `ewm_std(x,span)` |
 | elementwise | `log(x)`, `sign(x)`, `abs(x)`, `clip(x,lo,hi)` |
 | cross-sectional | `rank(x)` (pct, per date), `zscore(x)`, `demean(x)` |
-| data-quality | `mask_glitch(x)` (NaN-out `has_glitch` cells) |
-| store | `store("feature_id")` |
+| masking | `mask_glitch(x)` (NaN-out `has_glitch` cells), `where(x, cond)` (keep where `cond`, else NaN) |
+| combining | `nan_add(a, b)` (sum two legs; NaN only where **both** are NaN) |
+| calendar | `at_rebalance(x)` (daily frame → the rebalance grid: last obs per period, columns aligned to the traded universe) |
 
 The evaluator is **safe**: expressions are parsed with `ast` and only this
 whitelist runs — no attribute access, subscripts, lambdas, or arbitrary calls,
 so a spec can never execute code.
+
+Three of these exist for a specific reason and are easy to get wrong:
+
+- **`where(x, cond)`** is how a strategy carries its *own* glitch band or gate
+  rather than the shared `has_glitch`, e.g.
+  `where(-roll_sum(ret, lookback), (ret <= 1.0) & (ret >= -0.9))`. Set
+  `apply_glitch: false` when you do this, or you get both masks.
+- **`nan_add(a, b)`** — use it whenever two legs have *different coverage*. A
+  plain `a + b` is NaN wherever either side is NaN, which is how ValueQuality
+  once produced zero trades for its whole history (P/B and ROE come from
+  different tables). `nan_add` = `pandas.DataFrame.add(fill_value=0)`.
+- **`at_rebalance(x)`** lets an expression mix a daily-derived factor with the
+  monthly frames (`win_rate_mean_rev` builds a 20d win rate off daily
+  `adj_close`). Without it the frames misalign silently.
 
 Convention: **higher = better**. Express low-P/E as an earnings-yield, low-vol as
 negated volatility, etc. A "composite" is just an expr:
@@ -196,6 +230,16 @@ A **binary gate** is just the degenerate case (one input, one invest rule, one
 park default) — see `specs/regime_switching.yaml`. When a rule omits `top_pct`,
 it invests using `selection.top_pct`.
 
+An **N-of-M vote** — "invest when at least 2 of these 3 signals are on" — is
+`min_true` on the rule, instead of enumerating every winning combination
+(`specs/research_multifactor.yaml`):
+
+```yaml
+  rules:
+    - {min_true: 2}                 # >= 2 of the inputs above are True -> invest
+    - {default: true, park: true}
+```
+
 Common regime flags in `shared_data`: `is_easing`, `above_ma200`, `ibov_above`,
 `ibov_calm`, `ibov_uptrend`, `ibov_vol_pctrank`.
 
@@ -210,6 +254,11 @@ Common regime flags in `shared_data`: `is_easing`, `above_ma200`, `ibov_above`,
 | Small-cap tilt | `specs/smallcap_momentum.yaml` |
 | Macro on/off gate | `specs/regime_switching.yaml` |
 | Regime-scaled exposure (table) | `specs/adaptive_low_vol.yaml` |
+| N-of-M regime vote | `specs/research_multifactor.yaml` |
+| Hold *every* qualifying name (no top slice) | `specs/cdi_ma200.yaml` |
+| Fundamentals ranker (needs `dedup_roots`) | `specs/low_pe.yaml`, `specs/value_quality.yaml` |
+| Band filter on the factor value | `specs/low_pe.yaml` (`range:`) |
+| Daily-derived factor on a monthly grid | `signals.yaml: win_rate_mean_rev` |
 | Fixed ETF/CDI blend | `specs/divo_ivvb_cdi_40_40_20.yaml` |
 | Blend that waits for all ETFs | `specs/baseline_thirds.yaml` |
 
@@ -266,6 +315,18 @@ table in `backtests/core/signal_dsl.py`. That's rare; factors are data.
   `offset: 1` reads `i-1`. A NaN flag is treated as `False`.
 - **Regime `top_pct` overrides `selection.top_pct`.** If every rule sets its own
   `top_pct`, the `selection.top_pct` (and its UI slider) is inert.
+- **`top_pct: 1.0` on a rule = hold everything that qualifies**, no top slice —
+  that is how `cdi_ma200` holds every name above its MA200. Put it on the rule
+  (not in `selection`) so the 0.01–0.50 UI slider is suppressed.
+- **A `range:` filter is on the *signal* value**, after the liquidity mask. A
+  low-P/E band `[1, 30]` becomes an earnings-yield range `[1/30, 1]`.
+- **Fundamentals frames are wider than the traded universe** (`f_pe_ratio_dyn`
+  spans every share class, ~15% more columns than `ret`). The engine reindexes
+  the signal row onto the universe, but `rank()` inside your `expr` still ranks
+  over the *whole* frame — which is what the original classes did.
+- **`min_names` vs `min_hold`.** `min_names` gates whether to invest at all;
+  `min_hold` floors how many to hold. They default to the same value; split them
+  only when a strategy really does both (`win_rate_mean_rev`).
 
 ---
 
@@ -273,9 +334,15 @@ table in `backtests/core/signal_dsl.py`. That's rare; factors are data.
 
 The config engines deliberately cover the homogeneous cases. Write a normal
 `StrategyBase` subclass in `backtests/strategies/` when the strategy needs any
-of: per-row fundamental cross-sectional ranking, iterative/inverse-vol weighting,
-index reconstruction (market-cap constituent selection), vol-targeting, sticky
-selection, pure asset-switch rotation, or an embedded sub-strategy. Forcing those
-into YAML makes a worse language, not less code. Existing examples kept as code:
-`low_pe`, `value_quality`, `top_mcap`, `ibov_low_vol`, `qmv`, `mean_reversion`,
-`sp500_b3`, `two_leg_value`, `cdi_ma200`, `copom_easing`, `dual_momentum`.
+of: iterative or inverse-vol weighting, index reconstruction (market-cap
+constituent selection), vol-targeting, long/short books, a rolling-IC stability
+guard, pure asset-switch rotation, or an embedded sub-strategy. Forcing those
+into YAML makes a worse language, not less code. Examples kept as code:
+`top_mcap`, `ibov_low_vol`, `qmv`, `mean_reversion` (MeanRevComposite),
+`sp500_b3`, `two_leg_value`, `copom_easing`, `dual_momentum`, `sma_momentum_tilt`.
+
+Fundamental cross-sectional ranking and sticky selection are *no longer* on that
+list — `low_pe`, `value_quality`, `cdi_ma200`, `frog_in_pan`, `volume_breakout`,
+`research_multifactor`, `win_rate_mean_reversion` and the simple mean-reversion
+half of `mean_reversion` are all specs now, each proven bit-identical to the
+class it replaced before deletion.

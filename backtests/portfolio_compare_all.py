@@ -19,30 +19,24 @@ Outputs:
   - portfolio_comparison_results.csv -- full metrics table
 
 Usage:
-    python3 backtests/portfolio_compare_all.py
+    python -m backtests.portfolio_compare_all
 """
 
 import warnings
 warnings.filterwarnings("ignore")
 
 import os
-import sys
 import numpy as np
 import pandas as pd
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-import matplotlib.dates as mdates
 from matplotlib.gridspec import GridSpec
 
 _BACKTESTS_DIR = os.path.dirname(os.path.abspath(__file__))
-_PROJECT_ROOT = os.path.dirname(_BACKTESTS_DIR)
-for _p in [_PROJECT_ROOT, _BACKTESTS_DIR]:
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
 
-from core.strategy_returns import build_strategy_returns, SMALLCAP_MOM_NOTE
-from core.portfolio_opt import (
+from backtests.core.strategy_returns import build_strategy_returns, SMALLCAP_MOM_NOTE
+from backtests.core.portfolio_opt import (
     inverse_vol_weights,
     equal_risk_contribution_weights,
     hrp_weights,
@@ -50,8 +44,8 @@ from core.portfolio_opt import (
     compute_portfolio_returns,
     compute_regime_portfolio,
 )
-from core.metrics import build_metrics, cumret, ann_return, ann_vol, sharpe, max_dd, calmar
-from core.plotting import PALETTE, fmt_ax
+from backtests.core.metrics import build_metrics, cumret, sharpe
+from backtests.core.plotting import PALETTE, fmt_ax
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 LOOKBACK_RISK = 36

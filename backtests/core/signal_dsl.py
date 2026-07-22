@@ -31,12 +31,18 @@ import pandas as pd
 _BINOPS = {
     ast.Add: operator.add, ast.Sub: operator.sub, ast.Mult: operator.mul,
     ast.Div: operator.truediv, ast.Pow: operator.pow,
+    ast.BitAnd: operator.and_, ast.BitOr: operator.or_,   # boolean masks
 }
 _UNARYOPS = {ast.USub: operator.neg, ast.UAdd: operator.pos}
+_CMPOPS = {
+    ast.Gt: operator.gt, ast.Lt: operator.lt, ast.GtE: operator.ge,
+    ast.LtE: operator.le, ast.Eq: operator.eq, ast.NotEq: operator.ne,
+}
 
 _ALLOWED = (
     ast.Expression, ast.BinOp, ast.UnaryOp, ast.Constant, ast.Name, ast.Call,
     ast.Load, ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Pow, ast.USub, ast.UAdd,
+    ast.Compare, ast.BitAnd, ast.BitOr, *_CMPOPS,
 )
 
 
@@ -48,12 +54,23 @@ def _zscore(x: pd.DataFrame) -> pd.DataFrame:
 
 def _build_funcs(ns: dict) -> dict:
     glitch = ns.get("has_glitch")
+    rebal = ns.get("ret")          # the strategy's rebalance grid (rows x tickers)
 
     def mask_glitch(x):
         return x.where(glitch != 1) if glitch is not None else x
 
     def _roll(x, w, agg):
         return getattr(x.rolling(int(w)), agg)()   # min_periods = window (parity)
+
+    def at_rebalance(x):
+        """Daily frame -> the rebalance grid: last observation of each period,
+        columns aligned to the traded universe. Lets an expression mix a
+        daily-derived factor with the monthly frames."""
+        if rebal is None:
+            return x
+        freq = rebal.index.freq or pd.infer_freq(rebal.index)
+        out = x.resample(freq).last() if freq is not None else x
+        return out.reindex(columns=rebal.columns).reindex(rebal.index, method="ffill")
 
     return {
         # time-series (operate per column, along time)
@@ -80,8 +97,11 @@ def _build_funcs(ns: dict) -> dict:
         "rank": lambda x: x.rank(axis=1, pct=True),   # pandas semantics (parity)
         "zscore": _zscore,
         "demean": lambda x: x.sub(x.mean(axis=1), axis=0),
-        # data-quality
+        # data-quality / shaping
         "mask_glitch": mask_glitch,
+        "where": lambda x, cond: x.where(cond),          # keep where cond, else NaN
+        "nan_add": lambda a, b: a.add(b, fill_value=0),  # NaN only where BOTH are NaN
+        "at_rebalance": at_rebalance,
     }
 
 
@@ -110,6 +130,11 @@ def _ev(node, ns, funcs):
         return _UNARYOPS[type(node.op)](_ev(node.operand, ns, funcs))
     if isinstance(node, ast.BinOp):
         return _BINOPS[type(node.op)](_ev(node.left, ns, funcs), _ev(node.right, ns, funcs))
+    if isinstance(node, ast.Compare):
+        if len(node.ops) != 1:
+            raise ValueError(f"signal expr: chained comparisons are not allowed in {ast.dump(node)!r}")
+        return _CMPOPS[type(node.ops[0])](
+            _ev(node.left, ns, funcs), _ev(node.comparators[0], ns, funcs))
     if isinstance(node, ast.Call):
         if not isinstance(node.func, ast.Name) or node.keywords:
             raise ValueError("signal expr: only positional calls to named functions are allowed")

@@ -239,16 +239,3 @@ def parse_all_cotahist_files(directory: Path) -> pd.DataFrame:
     return combined
 
 
-def get_tickers_from_prices(prices_df: pd.DataFrame) -> List[str]:
-    """
-    Extract unique tickers from prices DataFrame.
-
-    Args:
-        prices_df: DataFrame with price data
-
-    Returns:
-        Sorted list of unique tickers
-    """
-    if prices_df.empty:
-        return []
-    return sorted(prices_df["ticker"].unique().tolist())

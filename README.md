@@ -250,12 +250,12 @@ fixed ETF/CDI blends.
 | `shared_data.py` | Builds the shared frame bundle (`ret`, `log_ret`, `adj_close`, `adtv`, `f_*`, regime flags…) consumed by every strategy |
 | `simulation.py` | Tax-aware multi-asset simulator (CGT, loss carryforward, slippage, margin, R$20k exemption) |
 | `signal_dsl.py` | Safe `ast`-parsed expression interpreter for factor signals |
-| `config_strategy.py` / `spec_loader.py` | YAML `rank_and_hold` / `fixed_weight` engines + spec auto-discovery |
-| `strategy_base.py` / `strategy_registry.py` | Plugin base class + auto-discovery registry |
+| `config_strategy.py` | YAML `rank_and_hold` / `fixed_weight` engines |
+| `strategy_base.py` / `strategy_registry.py` | Plugin base class + auto-discovery registry (plugin classes *and* `specs/*.yaml`) |
 | `metrics.py` | Sharpe, Calmar, max drawdown, annualised return/vol at any frequency |
 | `portfolio_opt.py` | Equal-weight, inverse-vol, ERC, HRP, rolling-Sharpe, regime-conditional weights |
 | `strategy_returns.py` | Runs the core strategies in one call → monthly after-tax return frame |
-| `plotting.py` / `param_scanner.py` | Dark-theme tear sheets; generic 2D parameter-sweep heatmaps |
+| `plotting.py` | Dark-theme tear sheets |
 
 ### Portfolio construction example
 
@@ -273,14 +273,9 @@ print(build_metrics(port_ret, "My HRP Portfolio", 12))
 ### Runnable research scripts (`backtests/`)
 
 ```bash
-cd backtests
-python portfolio_compare_all.py          # all portfolio methods: 4-panel dashboard + CSV
-python portfolio_risk_parity_backtest.py # equal-weight vs inverse-vol vs ERC
-python portfolio_hrp_backtest.py         # Hierarchical Risk Parity + dendrogram
-python portfolio_dynamic_backtest.py     # rolling-Sharpe / regime / combined allocation
-python portfolio_stability_analysis.py   # sub-period metrics + rolling 36-month Sharpe
-python sp500_b3_index.py                 # SP500-style market-cap B3 index reconstruction
-python validate_mean_rev_composite.py    # parity check for the mean-reversion composite
+python -m backtests.portfolio_compare_all         # all portfolio methods: 4-panel dashboard + CSV
+python -m backtests.portfolio_stability_analysis  # sub-period metrics + rolling 36-month Sharpe
+python -m backtests.sp500_b3_index                # SP500-style market-cap B3 index reconstruction
 ```
 
 ## Feature discovery engine
